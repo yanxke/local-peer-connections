@@ -1,0 +1,21 @@
+# Dart / Flutter generated files
+.dart_tool/
+.packages
+build/
+coverage/
+pubspec_overrides.yaml
+
+# IDE and platform-generated files
+.idea/
+.vscode/
+*.iml
+android/.gradle/
+android/local.properties
+android/key.properties
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/ephemeral/
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+*.xcworkspace/xcuserdata/
+*.xcuserstate

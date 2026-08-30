@@ -1346,7 +1346,7 @@ Offset  Size  Field
 103     1     role
 104     1     trust_mode
 105     1     application_metadata_length N, 0..31
-106     2     reserved, MUST be zero
+106     2     keepalive_interval_ms uint16, 1000..10000
 108     4     max_application_message_bytes
 112     N     application_metadata
 ```
@@ -1384,6 +1384,23 @@ peer_id == first 16 bytes SHA256(identity_ed25519_public_key)
 
 Failure closes with `AUTHENTICATION_FAILED`.
 
+`keepalive_interval_ms` is the sender's configured local keepalive interval.
+It is authenticated by the HELLO transcript. After both HELLO payloads are
+parsed, both peers compute exactly:
+
+```text
+negotiated_keepalive_interval =
+    max(local HELLO keepalive_interval_ms,
+        remote HELLO keepalive_interval_ms)
+
+keepalive_dead_timeout =
+    max(6000, 3 * negotiated_keepalive_interval)
+```
+
+Both subsequent READY payloads MUST carry those same two derived values. This
+HELLO field is the only keepalive-configuration negotiation mechanism in
+protocol minor 1.
+
 ## 16.4 Peer Capability Bitmap
 
 The HELLO `peer_capability_bitmap` is the `PeerCapabilityBitmap` defined normatively in Section 49.
@@ -1395,6 +1412,12 @@ Bits 9 through 31 are reserved and MUST be zero.
 Protocol minor 0 capability semantics are not defined by this specification.
 
 This wire bitmap MUST NOT be confused with `LocalRuntimeCapabilityBitmap`.
+
+The negotiated peer capability bitmap carried by READY is exactly:
+
+```text
+local_hello.peer_capability_bitmap & remote_hello.peer_capability_bitmap
+```
 
 ## 16.5 Transcript
 
@@ -1647,6 +1670,14 @@ Offset Size Field
 ```
 
 Session becomes READY only after local READY is sent and remote READY is authenticated.
+
+The READY payload MUST equal the authenticated handshake agreement:
+
+- `session_id` equals the Section 16.12 derived SessionId;
+- `negotiated_peer_capabilities` is the Section 16.4 bitwise intersection;
+- `keepalive_interval_ms` and `keepalive_dead_timeout_ms` are the values
+  derived from the two HELLO payloads above; and
+- `security_level` maps exactly from the mutually encoded HELLO `trust_mode`.
 
 # 17. AEAD Nonce and Associated Data
 
@@ -2761,7 +2792,7 @@ Default:
 2000
 ```
 
-Peers negotiate:
+Peers negotiate from their HELLO payloads:
 
 ```text
 negotiated_keepalive_interval =
@@ -6820,6 +6851,8 @@ Before protocol minor 1 is considered interoperable across independent implement
 ## 53.1 Protocol 1.1 Baseline Core Vectors
 
 - HELLO minor 1 encoding including `PeerCapabilityBitmap`;
+- HELLO `keepalive_interval_ms` encoding and READY derivation from unequal
+  local configured intervals;
 - `REALTIME_DATAGRAM` reliable-fallback frame encoding;
 - exact `GroupTrustMode -> HELLO trust_mode` mapping cases;
 - canonical `GroupMemberRecord`;
@@ -7207,6 +7240,8 @@ expected parser result
 - [ ] UT-153 Incomplete stale former-coordinator GROUP_RELIABLE reassembly is discarded and never combined with rerouted chunks from the new coordinator.
 - [ ] UT-154 Stale former-coordinator GROUP_REALTIME_DATAGRAM is authenticated then discarded without RealtimeDatagramReceived.
 - [ ] UT-155 A former coordinator newly originating routing/signaling after authority loss does not qualify for stale-authority handling.
+- [ ] UT-156 HELLO `keepalive_interval_ms` is encoded at offset 106 and both
+  peers derive identical READY keepalive interval/dead-timeout values.
 
 # 55. Mandatory Physical Integration Tests
 

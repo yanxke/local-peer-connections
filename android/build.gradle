@@ -1,0 +1,11 @@
+group 'dev.localpeerconnections.local_peer_connections'
+version '1.0-SNAPSHOT'
+
+buildscript { ext.kotlin_version = '1.9.22'; repositories { google(); mavenCentral() } dependencies { classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version" } }
+rootProject.allprojects { repositories { google(); mavenCentral() } }
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android { namespace 'dev.localpeerconnections.local_peer_connections'; compileSdk 34
+  defaultConfig { minSdk 21 }
+}
