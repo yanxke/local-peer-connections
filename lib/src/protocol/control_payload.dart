@@ -129,6 +129,16 @@ enum SequenceAcceptance { accepted, replay }
 
 class ReceiveSequenceWindow {
   int _highest = 0;
+
+  /// Records a sequence already consumed by handshake establishment before a
+  /// [PeerConnectionCore] takes ownership of the encrypted generation.
+  void seedHighest(int sequence) {
+    if (sequence < 0) {
+      throw ArgumentError.value(sequence, 'sequence');
+    }
+    _highest = sequence;
+  }
+
   SequenceAcceptance accept(int sequence) {
     if (sequence < 1) throw const LpcException(LpcErrorCode.protocolMismatch);
     if (sequence <= _highest) return SequenceAcceptance.replay;

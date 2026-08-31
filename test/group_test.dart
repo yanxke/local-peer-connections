@@ -50,8 +50,8 @@ void main() {
         applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
     group.commitMembership([GroupMember(peer(1), 8), GroupMember(peer(2), 8)],
         coordinator: peer(1));
-    expect(await group.sendRealtime(peer(2), 0, [1]).completed,
-        SendState.failed);
+    expect(
+        await group.sendRealtime(peer(2), 0, [1]).completed, SendState.failed);
     expect(await group.sendRealtime(peer(2), 1, List.filled(1101, 0)).completed,
         SendState.failed);
     await runtime.close();
@@ -61,11 +61,15 @@ void main() {
     final runtime = await createRuntime(localPeerId: peer(2));
     final group = runtime.joinOrCreateGroup(GroupConfig(
         applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
-    group.commitMembership(
-        [GroupMember(peer(2), 8), GroupMember(peer(3), 8), GroupMember(peer(1), 8)],
-        coordinator: peer(2));
+    group.commitMembership([
+      GroupMember(peer(2), 8),
+      GroupMember(peer(3), 8),
+      GroupMember(peer(1), 8)
+    ], coordinator: peer(2));
     final broadcast = group.broadcast([1]);
     expect(broadcast.handles.length, 2);
+    expect(broadcast.targetPeerIds, [peer(1), peer(3)]);
+    expect(broadcast.results.keys, [peer(1), peer(3)]);
     await runtime.close();
   });
 }

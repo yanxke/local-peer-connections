@@ -18,12 +18,21 @@ class PeerConnectionCore {
       required this.localPeerId,
       required this.remotePeerId,
       AckRetentionSet? ackRetention,
-      this.generation = 1})
+      this.generation = 1,
+      int initialNextSequence = 1,
+      int initialHighestReceivedSequence = 0})
       : _sessionRootKey = Uint8List.fromList(sessionRootKey),
         _sessionId = Uint8List.fromList(sessionId),
-        ackRetention = ackRetention ?? AckRetentionSet() {
+        ackRetention = ackRetention ?? AckRetentionSet(),
+        _nextSequence = initialNextSequence {
     if (_sessionRootKey.length != 32 || _sessionId.length != 16)
       throw ArgumentError('invalid session key or id');
+    if (generation < 1 ||
+        initialNextSequence < 1 ||
+        initialHighestReceivedSequence < 0) {
+      throw ArgumentError('invalid generation or sequence');
+    }
+    _receiveSequences.seedHighest(initialHighestReceivedSequence);
     _state.requireTransition(PeerConnectionState.connecting);
     _state.requireTransition(PeerConnectionState.transportConnected);
     _state.requireTransition(PeerConnectionState.authenticating);
@@ -40,7 +49,7 @@ class PeerConnectionCore {
   final Set<TransportWrite> _pendingWrites = <TransportWrite>{};
   late final StreamSubscription<BackendConnectionEvent> _backendSubscription;
   int generation;
-  int _nextSequence = 1;
+  int _nextSequence;
   PeerConnectionState get state => _state.state;
   Future<TransportWriteState> submitEncrypted(FrameType type, List<int> payload,
       {int flags = 0, List<int>? messageId}) async {

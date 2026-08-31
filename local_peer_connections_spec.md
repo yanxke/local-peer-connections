@@ -6880,6 +6880,8 @@ Before protocol minor 1 is considered interoperable across independent implement
 - ACK timer start event after final chunk of multi-chunk COORDINATOR_CHECKPOINT;
 - checkpoint partial-reassembly discard on transport loss and full retransmission after RESUME;
 
+- Section 12 GATT fragment envelope, including one-fragment `START|END` and
+  segmented `START`/middle/`END` cases;
 - TransportWrite/SENT_TO_TRANSPORT completion trace for GATT fragmentation;
 - ACK-timer trace showing final physical GATT fragment of final LPC frame triggers timer start;
 - RESUME trace containing an unacknowledged ACK-required control operation and post-RESUME duplicate suppression;
@@ -7242,6 +7244,10 @@ expected parser result
 - [ ] UT-155 A former coordinator newly originating routing/signaling after authority loss does not qualify for stale-authority handling.
 - [ ] UT-156 HELLO `keepalive_interval_ms` is encoded at offset 106 and both
   peers derive identical READY keepalive interval/dead-timeout values.
+- [ ] UT-157 Backend-driven HELLO/AUTH sends encrypted generation-1 READY at
+  sequence 1 in both directions; a PeerConnection becomes READY only after
+  local transport submission and remote authenticated READY, and ordinary
+  encrypted traffic begins at sequence 2.
 
 # 55. Mandatory Physical Integration Tests
 

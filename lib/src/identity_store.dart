@@ -1,4 +1,5 @@
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/services.dart';
 import 'identity.dart';
 import 'types.dart';
 
@@ -29,4 +30,27 @@ class InMemoryIdentityStore implements IdentityStore {
   @override
   Future<SimpleKeyPair> loadOrCreateEd25519KeyPair() async =>
       _keyPair ??= await Ed25519().newKeyPair();
+}
+
+/// Android/iOS implementation backed by the plugin's protected platform
+/// storage. Only a 32-byte seed crosses into Dart so `cryptography` can use
+/// the same Ed25519 implementation as the portable handshake code; it is
+/// never persisted by Dart or emitted in diagnostics.
+class PlatformIdentityStore implements IdentityStore {
+  PlatformIdentityStore({MethodChannel? channel})
+      : _channel = channel ??
+            const MethodChannel(
+                'dev.localpeerconnections.local_peer_connections/identity');
+  final MethodChannel _channel;
+
+  @override
+  Future<SimpleKeyPair> loadOrCreateEd25519KeyPair() async {
+    final seed =
+        await _channel.invokeMethod<Uint8List>('loadOrCreateEd25519Seed');
+    if (seed == null || seed.length != 32) {
+      throw const LpcException(LpcErrorCode.platformError,
+          'protected identity storage returned an invalid seed');
+    }
+    return Ed25519().newKeyPairFromSeed(seed);
+  }
 }

@@ -76,7 +76,12 @@ class SendHandle {
 }
 
 class BroadcastHandle {
-  BroadcastHandle(this.handles);
+  BroadcastHandle(Map<PeerId, SendHandle> results)
+      : results = Map.unmodifiable(results),
+        targetPeerIds = List.unmodifiable(results.keys),
+        handles = List.unmodifiable(results.values);
+  final List<PeerId> targetPeerIds;
+  final Map<PeerId, SendHandle> results;
   final List<SendHandle> handles;
   Future<List<SendState>> get completed =>
       Future.wait(handles.map((e) => e.completed));
@@ -87,7 +92,12 @@ class RealtimeSendHandle extends SendHandle {
 }
 
 class RealtimeBroadcastHandle {
-  RealtimeBroadcastHandle(this.handles);
+  RealtimeBroadcastHandle(Map<PeerId, RealtimeSendHandle> results)
+      : results = Map.unmodifiable(results),
+        targetPeerIds = List.unmodifiable(results.keys),
+        handles = List.unmodifiable(results.values);
+  final List<PeerId> targetPeerIds;
+  final Map<PeerId, RealtimeSendHandle> results;
   final List<RealtimeSendHandle> handles;
   Future<List<SendState>> get completed =>
       Future.wait(handles.map((e) => e.completed));
@@ -124,8 +134,8 @@ class GroupSession {
   PeerId? get coordinatorPeerId => _coordinator;
   bool get isCoordinator => _coordinator == _localPeerId;
   GroupState get state => _state;
-  List<GroupMember> get members => List.unmodifiable(
-      _members.values.toList()..sort((a, b) => _comparePeerIds(a.peerId, b.peerId)));
+  List<GroupMember> get members => List.unmodifiable(_members.values.toList()
+    ..sort((a, b) => _comparePeerIds(a.peerId, b.peerId)));
   int get effectiveMaxPeers =>
       _members.values.map((m) => m.maxPeers).reduce(min);
   void _transition(GroupState next) {
@@ -203,10 +213,12 @@ class GroupSession {
 
   BroadcastHandle broadcast(List<int> bytes,
           {SendOptions options = const SendOptions()}) =>
-      BroadcastHandle((_members.keys.where((p) => p != _localPeerId).toList()
-            ..sort(_comparePeerIds))
-          .map((p) => send(p, bytes, options: options))
-          .toList());
+      BroadcastHandle({
+        for (final peer
+            in (_members.keys.where((p) => p != _localPeerId).toList()
+              ..sort(_comparePeerIds)))
+          peer: send(peer, bytes, options: options)
+      });
   RealtimeSendHandle sendRealtime(
       PeerId destination, int channelId, List<int> bytes,
       {RealtimeOptions options = const RealtimeOptions()}) {
@@ -217,8 +229,7 @@ class GroupSession {
           !_members.containsKey(destination) ||
           channelId < 1 ||
           channelId > 65535 ||
-          bytes.length > 1100)
-        return h._complete(SendState.failed);
+          bytes.length > 1100) return h._complete(SendState.failed);
       h._complete(SendState.sentToTransport);
     });
     return h;
@@ -226,11 +237,12 @@ class GroupSession {
 
   RealtimeBroadcastHandle broadcastRealtime(int channelId, List<int> bytes,
           {RealtimeOptions options = const RealtimeOptions()}) =>
-      RealtimeBroadcastHandle(
-          (_members.keys.where((p) => p != _localPeerId).toList()
-                ..sort(_comparePeerIds))
-              .map((p) => sendRealtime(p, channelId, bytes, options: options))
-          .toList());
+      RealtimeBroadcastHandle({
+        for (final peer
+            in (_members.keys.where((p) => p != _localPeerId).toList()
+              ..sort(_comparePeerIds)))
+          peer: sendRealtime(peer, channelId, bytes, options: options)
+      });
   void leave() => _enqueue(() {
         if (_state == GroupState.closed || _state == GroupState.leaving) return;
         _transition(GroupState.leaving);

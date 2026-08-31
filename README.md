@@ -21,13 +21,14 @@ Implemented:
 - [x] Flutter package metadata and Android/iOS plugin registration shells
 - [x] Protocol constants, fixed frame header, frame-type registry, and bounds checks
 - [x] PeerId derivation from an Ed25519 public key
-- [x] GATT fragment envelope parsing/serialization with uint32 fragment sequences
+- [x] GATT fragment envelope parsing/serialization with START/END flags, per-frame uint32 sequences, bounded payloads, and expiry-aware reassembly
 - [x] Group/runtime configuration validation
-- [x] Serialized GroupSession snapshots and event dispatch foundation
+- [x] Serialized GroupSession snapshots, deterministic broadcast target snapshots, and event dispatch foundation
 - [x] DATA/realtime payload codecs, reliable DATA chunking, MessageId allocation, and bounded dedup primitives
 - [x] DATA reassembly, generation-loss discard, and realtime uint32 sequence filtering
 - [x] ChaCha20-Poly1305 frame protection, Section 17 AAD/nonce layout, and traffic-key derivation
 - [x] HELLO/AUTH plaintext frame envelopes, HELLO codec (including negotiated keepalive input), transcript/base-root/session derivation, and SAS formatting primitives
+- [x] Serialized HELLO/AUTH handshake controller with version-mismatch close and explicit SAS confirmation gate
 - [x] X25519 shared-secret, Ed25519 AUTH signing/verification, and in-memory TOFU continuity helper
 - [x] READY agreement validation, exact pre-key `ERROR(PROTOCOL_MISMATCH)` codec, and encrypted-generation receive-sequence window
 - [x] Generic ACK payload, bounded ACK-required retention/deadlines, ACK correlation, and RESUME retry eligibility
@@ -56,9 +57,11 @@ Implemented:
 
 Not implemented yet (and therefore not claimable as V1.1 conformance):
 
-- [ ] Android/iOS protected persistent Ed25519 key-storage adapter (portable IdentityStore integration is implemented)
-- [ ] Backend-driven HELLO/AUTH/READY PeerConnection lifecycle (portable HELLO/AUTH verification and READY agreement validation are implemented)
-- [ ] Android/iOS BLE advertising, scanning, GATT service, permission flow, and transport-write completion adapter
+- [x] Android/iOS protected persistent Ed25519 key-storage adapter (Android Keystore-encrypted seed; iOS device-only Keychain seed)
+- [x] Backend-driven portable HELLO/AUTH/READY PeerConnection lifecycle with encrypted READY gating and sequence-2 handoff to the authenticated core
+- [x] Android/iOS service-UUID-only BLE advertising/scanning bridge with platform endpoint events and stable error mapping
+- [x] Portable GATT BackendConnection adapter with bounded fragmentation queues, backpressure retention, final-fragment completion, and terminal-failure fanout
+- [ ] Native BLE GATT service/client integration and permission-request UX
 - [ ] Automatic PeerConnection timers/retransmission, reconnect orchestration, and complete RESUME lifecycle (state guard, retention, terminal transport-loss, and codec primitives are implemented)
 - [ ] Automatic discovery-driven formation, timed election, merge application, and coordinator migration
 - [ ] Routed relay state
@@ -79,6 +82,19 @@ local_peer_connections_spec.md
 ```
 
 That file is the source of truth for wire formats, state machines, timing, routing, security, recovery, conformance, and test requirements.
+
+## Platform permissions
+
+The Android manifest declares `BLUETOOTH_SCAN` and `BLUETOOTH_ADVERTISE` on
+Android 12+; the host application must request them at runtime before starting
+discovery or advertising. On Android 6–11, scanning additionally requires
+runtime location permission. iOS hosts must provide an appropriate Bluetooth
+usage-description string in their application `Info.plist`. A denied or
+powered-off Bluetooth state is returned as the matching stable LPC error.
+
+The current native bridge advertises and scans by service UUID only. Its
+platform endpoint IDs are transient discovery handles, never protocol PeerIds;
+GATT transport remains unfinished.
 
 ## What the library provides
 
