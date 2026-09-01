@@ -21,6 +21,7 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   private var activeServiceUuid: CBUUID?
   private var gattClients: [UUID: GattClient] = [:]
   private var gattServerCentrals: [UUID: CBCentral] = [:]
+  private var lastDiscoveryLog: [UUID: Date] = [:]
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = LocalPeerConnectionsPlugin()
@@ -72,7 +73,10 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
         // endpoint/TTL view and RSSI updates instead of expiring entries while
         // the peripheral is still advertising.
         self.central.scanForPeripherals(
-          withServices: [serviceUuid],
+          // Android devices may place the 128-bit UUID in a scan response;
+          // filtering in CoreBluetooth can then discard the advertisement.
+          // Scan broadly and let the app present endpoints explicitly.
+          withServices: nil,
           options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
         print("[LocalPeerConnections] discovery requested uuid=\(serviceUuid.uuidString)")
       }
@@ -132,8 +136,19 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   }
   public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                              advertisementData: [String : Any], rssi RSSI: NSNumber) {
+    if let expected = activeServiceUuid {
+      let advertised = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? [])
+        + (advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID] ?? [])
+      let marker = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)
+      let isLpcMarker = marker?.suffix(4).elementsEqual([0x4c, 0x50, 0x43, 0x31]) == true
+      guard advertised.contains(expected) || isLpcMarker else { return }
+    }
     discoveredPeripherals[peripheral.identifier] = peripheral
-    print("[LocalPeerConnections] endpoint found id=\(peripheral.identifier.uuidString) name=\(advertisementData[CBAdvertisementDataLocalNameKey] ?? "") rssi=\(RSSI)")
+    let now = Date()
+    if now.timeIntervalSince(lastDiscoveryLog[peripheral.identifier] ?? .distantPast) >= 5 {
+      lastDiscoveryLog[peripheral.identifier] = now
+      print("[LocalPeerConnections] endpoint found id=\(peripheral.identifier.uuidString) name=\(advertisementData[CBAdvertisementDataLocalNameKey] ?? "") rssi=\(RSSI)")
+    }
     eventSink?(["type": "endpointFound", "endpointId": peripheral.identifier.uuidString,
                 "localName": advertisementData[CBAdvertisementDataLocalNameKey] as? String,
                 "rssi": RSSI.intValue])

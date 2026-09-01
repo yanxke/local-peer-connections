@@ -120,7 +120,12 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     }
     val advertiser = adapterOrThrow().bluetoothLeAdvertiser ?: throw BackendError("ADVERTISING_UNAVAILABLE")
     stopAdvertising()
-    val data = AdvertiseData.Builder().addServiceUuid(serviceUuid).build()
+    val data = AdvertiseData.Builder()
+      .addServiceUuid(serviceUuid)
+      // Marker lets iOS identify LPC advertisements when Android places the
+      // service UUID only in a scan response that CoreBluetooth omits.
+      .addManufacturerData(0xFFFF, byteArrayOf(0x4c, 0x50, 0x43, 0x31))
+      .build()
     val settings = AdvertiseSettings.Builder().setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
       .setConnectable(true).setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM).build()
     advertiserCallback = object : AdvertiseCallback() {
