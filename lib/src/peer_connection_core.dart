@@ -62,10 +62,17 @@ class PeerConnectionCore {
       {};
   final Map<String, _ReliableDataOperation> _reliableDataOperations = {};
   final Set<TransportWrite> _pendingWrites = <TransportWrite>{};
+  final StreamController<LpcFrame> _receivedFrames =
+      StreamController<LpcFrame>.broadcast(sync: true);
   late final StreamSubscription<BackendConnectionEvent> _backendSubscription;
   int generation;
   int _nextSequence;
   PeerConnectionState get state => _state.state;
+  Uint8List get sessionId => Uint8List.fromList(_sessionId);
+
+  /// Authenticated, replay-filtered frames in receive order. Higher layers
+  /// own the frame-specific application/group dispatch.
+  Stream<LpcFrame> get receivedFrames => _receivedFrames.stream;
   Future<TransportWriteState> submitEncrypted(FrameType type, List<int> payload,
       {int flags = 0, List<int>? messageId}) async {
     if (state != PeerConnectionState.ready)
@@ -539,8 +546,24 @@ class PeerConnectionCore {
   }
 
   void _onBackendEvent(BackendConnectionEvent event) {
+    if (event is BackendBytesReceived) {
+      unawaited(_receiveBackendFrame(event.bytes));
+      return;
+    }
     if (event is BackendClosed || event is BackendError) {
       _handleTransportLoss();
+    }
+  }
+
+  Future<void> _receiveBackendFrame(List<int> encoded) async {
+    try {
+      final frame = await receiveEncrypted(encoded);
+      if (frame != null) _receivedFrames.add(frame);
+    } on Object {
+      // A malformed encrypted frame is a terminal protocol failure for this
+      // transport generation.  Do not leave an authenticated connection
+      // accepting later bytes after its framing/security invariant failed.
+      await close();
     }
   }
 
@@ -564,6 +587,7 @@ class PeerConnectionCore {
     await backend.close();
     _state.requireTransition(PeerConnectionState.disconnected);
     await _backendSubscription.cancel();
+    await _receivedFrames.close();
   }
 }
 

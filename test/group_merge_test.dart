@@ -77,6 +77,31 @@ void main() {
     expect(second.members, hasLength(4));
   });
 
+  test('COORD-027 only would-be merge winner emits GROUP_MERGE_REJECT', () {
+    final winner = _info(
+        1, [for (var peer = 1; peer <= 5; peer++) GroupMember(_peer(peer), 8)]);
+    final loser = _info(
+        2, [for (var peer = 6; peer <= 9; peer++) GroupMember(_peer(peer), 8)]);
+    final evaluation = evaluateGroupMerge(winner, loser);
+
+    expect(
+      groupMergeRejectForWinner(
+        local: winner,
+        remote: loser,
+        evaluation: evaluation,
+      )?.reason,
+      GroupMergeRejectReason.groupFull,
+    );
+    expect(
+      groupMergeRejectForWinner(
+        local: loser,
+        remote: winner,
+        evaluation: evaluation,
+      ),
+      isNull,
+    );
+  });
+
   test('COORD-016 effective merge capacity is minimum of all members', () {
     final first = _info(1, [GroupMember(_peer(1), 12)]);
     final second =
@@ -128,5 +153,30 @@ void main() {
     expect(result.decision, GroupMergeDecision.merge);
     expect(result.unionCount, 1);
     expect(result.effectiveMaxPeers, 8);
+  });
+
+  test('COORD-014 same-GroupId split brain reconciles at max term plus one',
+      () {
+    final reconciliation = reconcileSameGroupSplitBrain(
+      termA: 7,
+      termB: 9,
+      snapshotA: [GroupMember(_peer(1), 12), GroupMember(_peer(2), 8)],
+      snapshotB: [GroupMember(_peer(2), 10), GroupMember(_peer(3), 9)],
+    );
+    expect(reconciliation.coordinatorTerm, 10);
+    expect(reconciliation.members.map((member) => member.peerId),
+        [_peer(1), _peer(2), _peer(3)]);
+    expect(reconciliation.members[1].maxPeers, 8);
+    expect(reconciliation.effectiveMaxPeers, 8);
+  });
+
+  test('COORD-019 three compatible groups converge on one GroupId', () {
+    final groups = [
+      _info(3, [GroupMember(_peer(1), 8)]),
+      _info(2, [GroupMember(_peer(2), 8)]),
+      _info(1, [GroupMember(_peer(3), 8)]),
+    ];
+    expect(selectConvergedMergeWinner(groups).groupId,
+        GroupId(List.filled(16, 1)));
   });
 }

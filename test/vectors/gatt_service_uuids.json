@@ -1,0 +1,8 @@
+{
+  "name": "gatt_service_uuids",
+  "description": "Section 4 default GATT service and characteristic UUIDs",
+  "service_hex": "83f20a008c5a4f5a9a3a2f0d7a96b100",
+  "rx_hex": "83f20a018c5a4f5a9a3a2f0d7a96b100",
+  "tx_hex": "83f20a028c5a4f5a9a3a2f0d7a96b100",
+  "control_hex": "83f20a038c5a4f5a9a3a2f0d7a96b100"
+}

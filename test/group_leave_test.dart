@@ -149,4 +149,18 @@ void main() {
     ).removeResignedCoordinator(old);
     expect(membership.members.map((member) => member.peerId), [next]);
   });
+
+  test('COORD-033 ordinary join preserves the committed coordinator term', () {
+    final coordinator = PeerId(List.filled(16, 1));
+    final controller = GroupLeaveMembershipController(
+      groupId: GroupId(List.filled(16, 1)),
+      coordinatorTerm: 7,
+      coordinatorPeerId: coordinator,
+      committedMembers: [GroupMember(coordinator, 8)],
+    );
+    final commit =
+        controller.admitMember(GroupMember(PeerId(List.filled(16, 2)), 8));
+    expect(commit.coordinatorTerm, 7);
+    expect(commit.members, hasLength(2));
+  });
 }

@@ -4,7 +4,8 @@ import Security
 import CoreBluetooth
 
 public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
-                                          CBCentralManagerDelegate, CBPeripheralManagerDelegate {
+                                          CBCentralManagerDelegate, CBPeripheralManagerDelegate,
+                                          CBPeripheralDelegate {
   private static let identityChannel = "dev.localpeerconnections.local_peer_connections/identity"
   private static let backendChannel = "dev.localpeerconnections.local_peer_connections/backend"
   private static let backendEventsChannel = "dev.localpeerconnections.local_peer_connections/backend_events"
@@ -14,6 +15,12 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   private var central: CBCentralManager!
   private var peripheral: CBPeripheralManager!
   private var eventSink: FlutterEventSink?
+  private var gattService: CBMutableService?
+  private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
+  private var expectedGattServices: [UUID: CBUUID] = [:]
+  private var activeServiceUuid: CBUUID?
+  private var gattClients: [UUID: GattClient] = [:]
+  private var gattServerCentrals: [UUID: CBCentral] = [:]
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = LocalPeerConnectionsPlugin()
@@ -39,6 +46,8 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
       var capabilities: [String] = []
       if central.state != .unsupported { capabilities.append("bleScan") }
       if peripheral.state != .unsupported { capabilities.append("bleAdvertise") }
+      if central.state != .unsupported { capabilities.append("gattCentral") }
+      if peripheral.state != .unsupported { capabilities.append("gattPeripheral") }
       result(capabilities)
     case "startAdvertising":
       backend(call, result) { arguments in
@@ -55,10 +64,44 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     case "startDiscovery":
       backend(call, result) { arguments in
         try self.requirePoweredOn(self.central.state)
-        self.central.scanForPeripherals(withServices: [try self.serviceUuid(arguments)], options: nil)
+        let serviceUuid = try self.serviceUuid(arguments)
+        self.activeServiceUuid = serviceUuid
+        self.central.scanForPeripherals(withServices: [serviceUuid], options: nil)
       }
     case "stopDiscovery":
       central.stopScan(); result(nil)
+    case "listenGatt":
+      backend(call, result) { arguments in
+        try self.requirePoweredOn(self.peripheral.state)
+        self.listenGatt(try self.serviceUuid(arguments))
+      }
+    case "stopGatt":
+      peripheral.removeAllServices(); gattService = nil; gattServerCentrals.removeAll(); result(nil)
+    case "connectGatt":
+      backend(call, result) { arguments in
+        try self.requirePoweredOn(self.central.state)
+        guard let endpointId = arguments["endpointId"] as? String,
+              let identifier = UUID(uuidString: endpointId),
+              let peripheral = self.discoveredPeripherals[identifier] else {
+          throw BackendError("ENDPOINT_LOST", "unknown discovery endpoint")
+        }
+        guard let serviceUuid = self.activeServiceUuid else {
+          throw BackendError("UNSUPPORTED_CAPABILITY", "no configured LPC GATT service UUID")
+        }
+        self.expectedGattServices[identifier] = serviceUuid
+        self.central.connect(peripheral, options: nil)
+      }
+    case "submitGattFragment":
+      backendValue(call, result) { arguments in try self.submitGattFragment(arguments) }
+    case "closeGattConnection":
+      backend(call, result) { arguments in
+        guard let endpointId = arguments["endpointId"] as? String,
+              let identifier = UUID(uuidString: endpointId),
+              let client = self.gattClients.removeValue(forKey: identifier) else {
+          throw BackendError("ENDPOINT_LOST", "unknown GATT connection")
+        }
+        self.central.cancelPeripheralConnection(client.peripheral)
+      }
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -77,14 +120,143 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {}
   public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                              advertisementData: [String : Any], rssi RSSI: NSNumber) {
+    discoveredPeripherals[peripheral.identifier] = peripheral
     eventSink?(["type": "endpointFound", "endpointId": peripheral.identifier.uuidString,
                 "localName": advertisementData[CBAdvertisementDataLocalNameKey] as? String,
                 "rssi": RSSI.intValue])
+  }
+  public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+    guard let service = expectedGattServices[peripheral.identifier] else {
+      central.cancelPeripheralConnection(peripheral); return
+    }
+    peripheral.delegate = self
+    peripheral.discoverServices([service])
+  }
+  public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral,
+                             error: Error?) {
+    expectedGattServices.removeValue(forKey: peripheral.identifier)
+    eventSink?(FlutterError(code: "ENDPOINT_LOST", message: error?.localizedDescription, details: nil))
+  }
+  public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+    guard error == nil, let expected = expectedGattServices[peripheral.identifier],
+          let service = peripheral.services?.first(where: { $0.uuid == expected }) else {
+      rejectGatt(peripheral, message: "LPC GATT service missing"); return
+    }
+    do {
+      try peripheral.discoverCharacteristics([
+        try characteristicUuid(expected, increment: 1),
+        try characteristicUuid(expected, increment: 2),
+        try characteristicUuid(expected, increment: 3)
+      ], for: service)
+    } catch {
+      rejectGatt(peripheral, message: error.localizedDescription)
+    }
+  }
+  public func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService,
+                         error: Error?) {
+    guard error == nil, let expected = expectedGattServices[peripheral.identifier] else {
+      rejectGatt(peripheral, message: "LPC GATT characteristic discovery failed"); return
+    }
+    do {
+      let required = [
+        try characteristicUuid(expected, increment: 1),
+        try characteristicUuid(expected, increment: 2),
+        try characteristicUuid(expected, increment: 3)
+      ]
+      let present = Set(service.characteristics?.map(\.uuid) ?? [])
+      guard required.allSatisfy(present.contains) else {
+        rejectGatt(peripheral, message: "LPC GATT characteristics missing"); return
+      }
+      guard let characteristics = service.characteristics,
+            let rx = characteristics.first(where: { $0.uuid == required[0] }),
+            let tx = characteristics.first(where: { $0.uuid == required[1] }),
+            let control = characteristics.first(where: { $0.uuid == required[2] }) else {
+        rejectGatt(peripheral, message: "LPC GATT characteristics missing"); return
+      }
+      gattClients[peripheral.identifier] = GattClient(peripheral: peripheral, rx: rx, tx: tx, control: control)
+      peripheral.setNotifyValue(true, for: tx)
+    } catch {
+      rejectGatt(peripheral, message: error.localizedDescription)
+    }
+  }
+  public func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic,
+                         error: Error?) {
+    guard error == nil, let client = gattClients[peripheral.identifier],
+          characteristic.uuid == client.tx.uuid, characteristic.isNotifying else {
+      rejectGatt(peripheral, message: error?.localizedDescription ?? "LPC TX subscription failed"); return
+    }
+    eventSink?(["type": "gattConnected", "endpointId": peripheral.identifier.uuidString,
+                "localRole": "central", "platformSafeWriteSize": peripheral.maximumWriteValueLength(for: .withResponse)])
+  }
+  public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic,
+                         error: Error?) {
+    guard error == nil, let client = gattClients[peripheral.identifier],
+          characteristic.uuid == client.tx.uuid, let value = characteristic.value else { return }
+    eventSink?(["type": "gattFragment", "endpointId": peripheral.identifier.uuidString,
+                "bytes": [UInt8](value)])
+  }
+  public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
+                             error: Error?) {
+    expectedGattServices.removeValue(forKey: peripheral.identifier)
+    gattClients.removeValue(forKey: peripheral.identifier)
+    eventSink?(["type": "gattDisconnected", "endpointId": peripheral.identifier.uuidString])
   }
   public func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
     if let error {
       eventSink?(FlutterError(code: "ADVERTISING_UNAVAILABLE", message: error.localizedDescription, details: nil))
     }
+  }
+  public func peripheralManager(_ peripheral: CBPeripheralManager,
+                                didReceiveWrite requests: [CBATTRequest]) {
+    for request in requests {
+      guard let service = activeServiceUuid,
+            request.characteristic.uuid == (try? characteristicUuid(service, increment: 1)),
+            request.offset == 0, let value = request.value else {
+        peripheral.respond(to: request, withResult: .requestNotSupported); continue
+      }
+      eventSink?(["type": "gattFragment", "endpointId": request.central.identifier.uuidString,
+                  "bytes": [UInt8](value)])
+      peripheral.respond(to: request, withResult: .success)
+    }
+  }
+  public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral,
+                                didSubscribeTo characteristic: CBCharacteristic) {
+    guard let service = gattService,
+          characteristic.uuid == (try? characteristicUuid(service.uuid, increment: 2)) else { return }
+    gattServerCentrals[central.identifier] = central
+    eventSink?(["type": "gattConnected", "endpointId": central.identifier.uuidString,
+                "localRole": "peripheral", "platformSafeWriteSize": 20])
+  }
+  public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral,
+                                didUnsubscribeFrom characteristic: CBCharacteristic) {
+    gattServerCentrals.removeValue(forKey: central.identifier)
+    eventSink?(["type": "gattDisconnected", "endpointId": central.identifier.uuidString])
+  }
+  public func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
+    // Dart owns the bounded fragment queue and will retry only after an
+    // explicit writable signal.
+    eventSink?(["type": "gattWritable"])
+  }
+
+  /// Hosts exactly the Section 11 service. The Dart GATT backend remains the
+  /// owner of fragment framing and LPC protocol state.
+  private func listenGatt(_ serviceUuid: CBUUID) throws {
+    peripheral.removeAllServices()
+    let service = CBMutableService(type: serviceUuid, primary: true)
+    let rx = CBMutableCharacteristic(
+      type: try characteristicUuid(serviceUuid, increment: 1),
+      properties: [.write, .writeWithoutResponse], value: nil,
+      permissions: [.writeable])
+    let tx = CBMutableCharacteristic(
+      type: try characteristicUuid(serviceUuid, increment: 2),
+      properties: [.notify], value: nil, permissions: [])
+    let control = CBMutableCharacteristic(
+      type: try characteristicUuid(serviceUuid, increment: 3),
+      properties: [.read, .write, .notify], value: nil,
+      permissions: [.readable, .writeable])
+    service.characteristics = [rx, tx, control]
+    peripheral.add(service)
+    gattService = service
   }
 
   private func backend(_ call: FlutterMethodCall, _ result: @escaping FlutterResult,
@@ -96,12 +268,56 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     catch let error as BackendError { result(FlutterError(code: error.code, message: error.message, details: nil)) }
     catch { result(FlutterError(code: "PLATFORM_ERROR", message: error.localizedDescription, details: nil)) }
   }
+  private func backendValue(_ call: FlutterMethodCall, _ result: @escaping FlutterResult,
+                            _ action: ([String: Any]) throws -> Any) {
+    guard let arguments = call.arguments as? [String: Any] else {
+      result(FlutterError(code: "PLATFORM_ERROR", message: "missing arguments", details: nil)); return
+    }
+    do { result(try action(arguments)) }
+    catch let error as BackendError { result(FlutterError(code: error.code, message: error.message, details: nil)) }
+    catch { result(FlutterError(code: "PLATFORM_ERROR", message: error.localizedDescription, details: nil)) }
+  }
+
+  private func submitGattFragment(_ arguments: [String: Any]) throws -> String {
+    guard let endpointId = arguments["endpointId"] as? String,
+          let identifier = UUID(uuidString: endpointId),
+          let fragment = arguments["fragment"] as? FlutterStandardTypedData,
+          let transmission = arguments["transmission"] as? String else {
+      throw BackendError("ENDPOINT_LOST", "unknown GATT connection")
+    }
+    if let central = gattServerCentrals[identifier], let service = gattService,
+       let tx = service.characteristics?.first(where: { $0.uuid == (try? characteristicUuid(service.uuid, increment: 2)) }) {
+      return peripheral.updateValue(fragment.data, for: tx, onSubscribedCentrals: [central])
+        ? "submitted" : "temporarilyUnavailable"
+    }
+    guard let client = gattClients[identifier] else {
+      throw BackendError("ENDPOINT_LOST", "unknown GATT connection")
+    }
+    if transmission == "notify" { return "terminalFailure" }
+    client.peripheral.writeValue(fragment.data, for: client.rx,
+      type: transmission == "writeWithoutResponse" ? .withoutResponse : .withResponse)
+    return "submitted"
+  }
 
   private func serviceUuid(_ arguments: [String: Any]) throws -> CBUUID {
     guard let bytes = arguments["serviceUuid"] as? FlutterStandardTypedData, bytes.data.count == 16 else {
       throw BackendError("PLATFORM_ERROR", "serviceUuid must be 16 bytes")
     }
     return CBUUID(data: bytes.data)
+  }
+  private func characteristicUuid(_ service: CBUUID, increment: UInt8) throws -> CBUUID {
+    var bytes = [UInt8](service.data)
+    guard bytes.count == 16, bytes[3] <= UInt8.max - increment else {
+      throw BackendError("UNSUPPORTED_CAPABILITY", "GATT characteristic UUID arithmetic wraps")
+    }
+    bytes[3] += increment
+    return CBUUID(data: Data(bytes))
+  }
+  private func rejectGatt(_ peripheral: CBPeripheral, message: String) {
+    expectedGattServices.removeValue(forKey: peripheral.identifier)
+    gattClients.removeValue(forKey: peripheral.identifier)
+    central.cancelPeripheralConnection(peripheral)
+    eventSink?(FlutterError(code: "PLATFORM_ERROR", message: message, details: nil))
   }
   private func requirePoweredOn(_ state: CBManagerState) throws {
     switch state {
@@ -142,4 +358,10 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   }
 
   private enum IdentityStorageError: Error { case invalidStoredSeed; case keychain(OSStatus) }
+  private struct GattClient {
+    let peripheral: CBPeripheral
+    let rx: CBCharacteristic
+    let tx: CBCharacteristic
+    let control: CBCharacteristic
+  }
 }

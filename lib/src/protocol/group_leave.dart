@@ -88,6 +88,20 @@ class GroupLeaveMembershipController {
   List<GroupMember> get members => List.unmodifiable(_members.values.toList()
     ..sort((a, b) => _compare(a.peerId.bytes, b.peerId.bytes)));
 
+  /// A coordinator commits a normal join into the current membership term.
+  /// Admission/authentication and capacity checks occur before this committed
+  /// membership boundary; ordinary joins never increment coordinator term.
+  GroupLeaveCommit admitMember(GroupMember member) {
+    if (_members.containsKey(member.peerId)) {
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    _members[member.peerId] = member;
+    return GroupLeaveCommit(
+      members: members,
+      coordinatorTerm: coordinatorTerm,
+    );
+  }
+
   GroupLeaveCommit accept(
     GroupLeavePayload payload, {
     required PeerId authenticatedSender,

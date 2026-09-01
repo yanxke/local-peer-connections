@@ -240,10 +240,16 @@ Applications MAY override the service UUID namespace, but both peers MUST use th
 If overridden:
 
 ```text
-RX UUID      = service UUID with final byte + 1
-TX UUID      = service UUID with final byte + 2
-Control UUID = service UUID with final byte + 3
+RX UUID      = service UUID with byte offset 3 + 1
+TX UUID      = service UUID with byte offset 3 + 2
+Control UUID = service UUID with byte offset 3 + 3
 ```
+
+Here, byte offset 3 is the least-significant byte of the UUID's leading
+big-endian 32-bit field. All other UUID bytes are unchanged. This rule is
+fixed by the default UUIDs above: `83F20A00-...` derives
+`83F20A01-...`, `83F20A02-...`, and `83F20A03-...`. An override whose byte at
+offset 3 is greater than `0xFC` cannot use this arithmetic.
 
 If UUID arithmetic is unavailable in a binding, the application MUST provide all four UUIDs explicitly.
 
@@ -960,6 +966,15 @@ Properties:
 Read
 Write
 Notify
+```
+
+Permissions:
+
+```text
+Readable: yes
+Writable: yes
+Encryption-required: no
+Authentication-required: no
 ```
 
 CONTROL MAY be unused after initial LPC protocol negotiation, but MUST exist for protocol-major-1 BLE Baseline Conformance.
@@ -6890,6 +6905,7 @@ Before protocol minor 1 is considered interoperable across independent implement
 
 - Section 12 GATT fragment envelope, including one-fragment `START|END` and
   segmented `START`/middle/`END` cases;
+- GATT service/RX/TX/CONTROL UUID derivation from the configured service UUID;
 - TransportWrite/SENT_TO_TRANSPORT completion trace for GATT fragmentation;
 - ACK-timer trace showing final physical GATT fragment of final LPC frame triggers timer start;
 - RESUME trace containing an unacknowledged ACK-required control operation and post-RESUME duplicate suppression;
@@ -7254,6 +7270,16 @@ expected parser result
   sequence 1 in both directions; a PeerConnection becomes READY only after
   local transport submission and remote authenticated READY, and ordinary
   encrypted traffic begins at sequence 2.
+- [x] UT-158 NearbyRuntime owns at most one active DiscoverySession per
+  configured service UUID, forwards only opaque platform endpoint handles,
+  and closes the session when the runtime closes.
+- [x] UT-159 NearbyRuntime owns explicit HostSessions, permits at most one
+  active advertising HostSession, and cascades their idempotent closure.
+- [x] UT-160 Platform GATT connect accepts only a local opaque
+  DiscoveryEndpointId and reports a completed Section 11 service discovery
+  separately from protocol identity.
+- [x] UT-161 Flutter's native GATT fragment binding preserves the exact
+  Section 44 submitted/transient-backpressure/terminal-failure distinction.
 
 # 55. Mandatory Physical Integration Tests
 
@@ -7294,38 +7320,38 @@ Every mobile release candidate MUST run:
 ## Automatic Coordinator Tests
 
 - [x] COORD-001 Three peers starting simultaneously converge on one coordinator without user host selection.
-- [ ] COORD-002 Existing healthy coordinator remains coordinator when a higher-ranked peer joins.
+- [x] COORD-002 Existing healthy coordinator remains coordinator when a higher-ranked peer joins.
 - [x] COORD-003 Coordinator disappears and remaining peers elect exactly one replacement.
 - [x] COORD-004 Coordinator migration retains the same GroupId.
 - [x] COORD-005 Coordinator migration retains all PeerIds.
-- [ ] COORD-006 Coordinator migration rebuilds star automatically.
+- [x] COORD-006 Coordinator migration rebuilds star automatically.
 - [x] COORD-007 Two singleton groups merge and deterministically retain lexicographically smaller GroupId.
 - [x] COORD-008 Same-term competing coordinator claims converge to higher CoordinatorRank.
 - [x] COORD-009 Higher election term always supersedes lower term.
 - [x] COORD-010 Latest committed membership snapshot survives coordinator loss.
 - [x] COORD-011 Coordinator checkpoint is available to newly promoted coordinator.
-- [ ] COORD-012 No UI/user approval callback is required for migration.
-- [ ] COORD-013 Two partitioned halves independently elect coordinators, reconnect, and converge to one coordinator.
-- [ ] COORD-014 Divergent same-GroupId membership snapshots reconcile at `max(termA, termB)+1`.
+- [x] COORD-012 No UI/user approval callback is required for migration.
+- [x] COORD-013 Two partitioned halves independently elect coordinators, reconnect, and converge to one coordinator.
+- [x] COORD-014 Divergent same-GroupId membership snapshots reconcile at `max(termA, termB)+1`.
 - [x] COORD-015 A 6-member group and 5-member group refuse automatic merge when effective_max_peers=8.
 - [x] COORD-016 Different maxPeers values negotiate `min(all member maxPeers)`.
 - [x] COORD-017 Winning coordinator learns complete losing membership from GROUP_INFO before merge.
-- [ ] COORD-018 Losing GroupId alias redirects an authenticated reconnecting member for exactly 30 seconds.
-- [ ] COORD-019 Three compatible groups discovered simultaneously converge deterministically on one GroupId.
-- [ ] COORD-020 Stale GROUP_MERGE from an older/equal already-superseded term is ignored.
+- [x] COORD-018 Losing GroupId alias redirects an authenticated reconnecting member for exactly 30 seconds.
+- [x] COORD-019 Three compatible groups discovered simultaneously converge deterministically on one GroupId.
+- [x] COORD-020 Stale GROUP_MERGE from an older/equal already-superseded term is ignored.
 - [x] COORD-021 Same namespace but different TOKEN_SCOPED join tokens never auto-merge.
 - [x] COORD-022 OPEN_PROXIMITY groups do auto-merge when all other compatibility checks pass.
 - [x] COORD-023 Split-brain union exceeding capacity does not arbitrarily evict existing committed members.
 - [x] COORD-024 GROUP_INFO carries every member's max_peers and remote peer computes the same effective_max_peers.
 - [x] COORD-025 Groups with different GroupTrustMode values refuse automatic merge.
 - [x] COORD-026 KNOWN_PEERS groups with knownPeersAutoMerge=false remain separate.
-- [ ] COORD-027 GROUP_MERGE_REJECT is emitted only by the would-be winning coordinator.
+- [x] COORD-027 GROUP_MERGE_REJECT is emitted only by the would-be winning coordinator.
 - [x] COORD-028 Normal member GROUP_LEAVE removes it and produces a same-term MEMBERSHIP_SNAPSHOT.
 - [x] COORD-029 Abrupt non-coordinator disconnect retains membership through reconnect window then removes it on terminal timeout.
 - [x] COORD-030 Coordinator voluntary leave triggers immediate election without waiting for heartbeat timeout.
 - [x] COORD-031 Replacement coordinator first snapshot excludes voluntarily/abruptly departed old coordinator.
 - [x] COORD-032 Coordinator KICKED leave removes only the target member and publishes a new snapshot.
-- [ ] COORD-033 Membership changes caused by normal join/leave/kick do not increment coordinator term.
+- [x] COORD-033 Membership changes caused by normal join/leave/kick do not increment coordinator term.
 - [x] COORD-034 Conflicting same-PeerId max_peers snapshots reconcile to the minimum value.
 - [x] COORD-035 MEMBERSHIP_SNAPSHOT final ACK timeout marks peer UNSYNCHRONIZED and forces reconnect/resynchronization.
 - [x] COORD-036 GROUP_MERGE final ACK timeout does not roll back merge and forces target peer to rebootstrap.

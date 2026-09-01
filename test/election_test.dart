@@ -158,4 +158,30 @@ void main() {
             .peerId,
         _peer(3));
   });
+
+  test('COORD-012/013 partitioned elections converge without UI approval', () {
+    final groupId = GroupId(List.filled(16, 1));
+    ElectionController controller(PeerId peer, int rank) => ElectionController(
+          groupId: groupId,
+          localRank: CoordinatorRank(0, rank, peer),
+          lastCommittedTerm: 7,
+          membershipHash: List.filled(32, 5),
+          startedAtMs: 0,
+        );
+    final firstHalf = controller(_peer(1), 1);
+    final secondHalf = controller(_peer(2), 2);
+    // Each partition elects locally while disconnected.
+    for (final candidate in [firstHalf, secondHalf]) {
+      candidate.poll(1200);
+      candidate.poll(1700);
+      expect(candidate.isCoordinator, isTrue);
+    }
+    // Once reachability returns, the protocol's deterministic candidate rule
+    // selects one coordinator without application/UI participation.
+    final winner = highestElectionCandidate([
+      firstHalf.localAnnouncement,
+      secondHalf.localAnnouncement,
+    ]);
+    expect(winner.rank.peerId, _peer(2));
+  });
 }

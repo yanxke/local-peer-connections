@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import '../backend.dart';
 import '../peer_connection_core.dart';
@@ -7,6 +8,7 @@ import 'control_payload.dart';
 import 'crypto.dart';
 import 'frame.dart';
 import 'handshake_exchange.dart';
+import 'reliability.dart';
 
 /// Backend-bound Section 16 handshake driver.
 ///
@@ -20,13 +22,17 @@ class HandshakeConnection {
     required this.backend,
     required this.exchange,
     required this.localPeerId,
-    required this.remotePeerId,
-  });
+    PeerId? remotePeerId,
+  }) : expectedRemotePeerId = remotePeerId;
 
   final BackendConnection backend;
   final HandshakeExchange exchange;
   final PeerId localPeerId;
-  final PeerId remotePeerId;
+
+  /// An initiator only has a platform-local discovery endpoint before HELLO.
+  /// This optional value is a policy assertion for callers that already know
+  /// the peer, never a substitute for the authenticated HELLO identity.
+  final PeerId? expectedRemotePeerId;
   final Completer<PeerConnectionCore> _ready = Completer<PeerConnectionCore>();
   StreamSubscription<BackendConnectionEvent>? _subscription;
   bool _started = false;
@@ -34,6 +40,15 @@ class HandshakeConnection {
   bool _remoteReadyAuthenticated = false;
 
   Future<PeerConnectionCore> get ready => _ready.future;
+
+  PeerId get remotePeerId {
+    final peerId = exchange.remoteHello?.peerId;
+    if (peerId == null) {
+      throw const LpcException(
+          LpcErrorCode.invalidState, 'remote PeerId is not authenticated');
+    }
+    return peerId;
+  }
 
   /// Begins the local HELLO. Call after the backend reports it is open.
   Future<void> start() async {
@@ -84,6 +99,11 @@ class HandshakeConnection {
           return;
         }
         if (exchange.state == HandshakeExchangeState.helloExchanged) {
+          final expected = expectedRemotePeerId;
+          if (expected != null && expected != remotePeerId) {
+            throw const LpcException(
+                LpcErrorCode.authenticationFailed, 'unexpected HELLO PeerId');
+          }
           await _send(await exchange.createAuth());
         }
         await _sendReadyIfAuthenticated();
@@ -102,7 +122,8 @@ class HandshakeConnection {
       return;
     }
     final result = exchange.result!;
-    final direction = _direction(localPeerId, remotePeerId);
+    final remote = remotePeerId;
+    final direction = _direction(localPeerId, remote);
     final key = await trafficKey(result.secrets.sessionRootKey, 1, direction);
     final clear = LpcFrame(
         type: FrameType.ready,
@@ -158,6 +179,8 @@ class HandshakeConnection {
         sessionId: exchange.result!.secrets.sessionId,
         localPeerId: localPeerId,
         remotePeerId: remotePeerId,
+        messageIdAllocator: MessageIdAllocator(
+            List<int>.generate(4, (_) => Random.secure().nextInt(256))),
         initialNextSequence: 2,
         initialHighestReceivedSequence: 1));
   }

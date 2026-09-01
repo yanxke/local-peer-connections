@@ -25,4 +25,47 @@ void main() {
     expect(
         GroupMergeRejectPayload.decode(reject.encode()).candidateUnionCount, 3);
   });
+
+  test('COORD-020 stale/equal superseded GROUP_MERGE is ignored', () {
+    final initial = GroupId(List.filled(16, 9));
+    final applied = GroupMergePayload(
+      winningGroupId: GroupId(List.filled(16, 1)),
+      losingGroupId: initial,
+      newCoordinatorTerm: 3,
+      effectiveMaxPeers: 8,
+      members: [GroupMember(_peer(1), 8), GroupMember(_peer(2), 8)],
+    );
+    final receiver = GroupMergeReceiver(
+      committedGroupId: initial,
+      committedTerm: 2,
+      committedMembers: [GroupMember(_peer(1), 8)],
+    );
+    expect(receiver.receive(applied), GroupMergeReceiveDisposition.applied);
+    expect(receiver.receive(applied), GroupMergeReceiveDisposition.duplicate);
+
+    final conflictingEqual = GroupMergePayload(
+      winningGroupId: GroupId(List.filled(16, 3)),
+      losingGroupId: initial,
+      newCoordinatorTerm: 3,
+      effectiveMaxPeers: 8,
+      members: [GroupMember(_peer(3), 8)],
+    );
+    expect(
+        receiver.receive(conflictingEqual), GroupMergeReceiveDisposition.stale);
+    expect(receiver.groupId, applied.winningGroupId);
+    expect(receiver.members, applied.members);
+  });
+
+  test('COORD-018 losing GroupId redirects for exactly 30 seconds', () {
+    final losing = GroupId(List.filled(16, 2));
+    final winning = GroupId(List.filled(16, 1));
+    final alias = GroupMergeAlias(
+      losingGroupId: losing,
+      winningGroupId: winning,
+      installedAtMs: 100,
+    );
+    expect(alias.redirect(losing, nowMs: 100), winning);
+    expect(alias.redirect(losing, nowMs: 30099), winning);
+    expect(alias.redirect(losing, nowMs: 30100), isNull);
+  });
 }

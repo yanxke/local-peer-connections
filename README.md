@@ -38,6 +38,8 @@ Implemented:
 - [x] READY agreement validation, exact pre-key `ERROR(PROTOCOL_MISMATCH)` codec, and encrypted-generation receive-sequence window
 - [x] Backend-driven portable HELLO/AUTH/READY PeerConnection lifecycle with encrypted READY gating and sequence-2 handoff to the authenticated core
 - [x] Android/iOS service-UUID-only BLE advertising/scanning bridge with platform endpoint events and stable error mapping
+- [x] Android/iOS Section 11 GATT service host with canonical RX/TX/CONTROL UUID derivation
+- [x] Android/iOS GATT client connection and Section 11 service/characteristic discovery validation
 - [x] Portable GATT BackendConnection adapter with bounded fragmentation queues, backpressure retention, final-fragment completion, and terminal-failure fanout
 - [x] Generic ACK payload, bounded ACK-required retention/deadlines, ACK correlation, and RESUME retry eligibility
 - [x] Deterministic coordinator rank and canonical committed-membership snapshot codec
@@ -96,7 +98,7 @@ Implemented:
 
 Not implemented yet (and therefore not claimable as V1.1 conformance):
 
-- [ ] Native BLE GATT service/client integration and permission-request UX
+- [ ] Native BLE GATT client I/O, Dart fragment binding, and permission-request UX
 - [ ] Automatic PeerConnection timers/retransmission, reconnect orchestration, and complete RESUME lifecycle (state guard, retention, terminal transport-loss, and codec primitives are implemented)
 - [ ] Automatic discovery-driven formation, timed election, merge application, and coordinator migration
 - [ ] End-to-end GroupSession/PeerConnection routing: live authenticated frame dispatch, hop ACK emission, scheduler submission, relay signaling, and automatic reroute after RESUME or coordinator migration

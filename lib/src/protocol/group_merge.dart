@@ -292,6 +292,182 @@ GroupMergeEvaluation evaluateGroupMerge(GroupMergeInfo a, GroupMergeInfo b) {
       unionCount: records.length);
 }
 
+/// Selects the deterministic winner while a set of mutually compatible groups
+/// converge. Every pair must be merge-compatible; the same GroupMergeRank used
+/// for pairwise merge is folded across the set.
+GroupMergeInfo selectConvergedMergeWinner(Iterable<GroupMergeInfo> groups) {
+  final values = groups.toList(growable: false);
+  if (values.isEmpty) throw ArgumentError.value(groups, 'groups');
+  var winner = values.first;
+  for (final candidate in values.skip(1)) {
+    final evaluation = evaluateGroupMerge(winner, candidate);
+    if (evaluation.decision != GroupMergeDecision.merge ||
+        evaluation.winner == null) {
+      throw const LpcException(LpcErrorCode.groupMergeRejected);
+    }
+    winner = evaluation.winner!;
+  }
+  return winner;
+}
+
+/// Section 31.3/31.4: only the would-be winning coordinator emits a rejection
+/// when the complete candidate union exceeds effective capacity. Compatibility
+/// failures simply prevent automatic merge and do not generate this frame.
+GroupMergeRejectPayload? groupMergeRejectForWinner({
+  required GroupMergeInfo local,
+  required GroupMergeInfo remote,
+  required GroupMergeEvaluation evaluation,
+}) {
+  if (evaluation.decision != GroupMergeDecision.groupFull ||
+      evaluation.winner != local) {
+    return null;
+  }
+  return GroupMergeRejectPayload(
+    localGroupId: local.groupId,
+    remoteGroupId: remote.groupId,
+    reason: GroupMergeRejectReason.groupFull,
+    effectiveMaxPeers: evaluation.effectiveMaxPeers,
+    candidateUnionCount: evaluation.unionCount,
+  );
+}
+
+/// Result of applying a complete authenticated GROUP_MERGE at one member.
+enum GroupMergeReceiveDisposition { applied, duplicate, stale }
+
+/// Section 31.6 stale-term boundary. The caller supplies only decoded,
+/// authenticated payloads; this state owner prevents an older/equal conflicting
+/// merge from replacing committed GroupId, term, or membership.
+class GroupMergeReceiver {
+  GroupMergeReceiver({
+    required GroupId committedGroupId,
+    required int committedTerm,
+    required Iterable<GroupMember> committedMembers,
+  })  : _groupId = committedGroupId,
+        _term = committedTerm,
+        _members = List.unmodifiable(committedMembers.toList());
+
+  GroupId _groupId;
+  int _term;
+  List<GroupMember> _members;
+  GroupMergePayload? _lastApplied;
+
+  GroupId get groupId => _groupId;
+  int get term => _term;
+  List<GroupMember> get members => _members;
+
+  GroupMergeReceiveDisposition receive(GroupMergePayload payload) {
+    if (payload.newCoordinatorTerm < _term) {
+      return GroupMergeReceiveDisposition.stale;
+    }
+    if (payload.newCoordinatorTerm == _term) {
+      return _matchesLastApplied(payload)
+          ? GroupMergeReceiveDisposition.duplicate
+          : GroupMergeReceiveDisposition.stale;
+    }
+    _groupId = payload.winningGroupId;
+    _term = payload.newCoordinatorTerm;
+    _members = payload.members;
+    _lastApplied = payload;
+    return GroupMergeReceiveDisposition.applied;
+  }
+
+  bool _matchesLastApplied(GroupMergePayload candidate) {
+    final applied = _lastApplied;
+    if (applied == null ||
+        applied.winningGroupId != candidate.winningGroupId ||
+        applied.losingGroupId != candidate.losingGroupId ||
+        applied.newCoordinatorTerm != candidate.newCoordinatorTerm ||
+        applied.effectiveMaxPeers != candidate.effectiveMaxPeers ||
+        applied.members.length != candidate.members.length) {
+      return false;
+    }
+    for (var index = 0; index < applied.members.length; index++) {
+      final left = applied.members[index];
+      final right = candidate.members[index];
+      if (left.peerId != right.peerId || left.maxPeers != right.maxPeers) {
+        return false;
+      }
+    }
+    return true;
+  }
+}
+
+/// Section 31.6 losing-GroupId alias. The authenticated reconnect owner calls
+/// [redirect] only after it has validated the joining peer's identity/trust.
+class GroupMergeAlias {
+  GroupMergeAlias({
+    required this.losingGroupId,
+    required this.winningGroupId,
+    required this.installedAtMs,
+  });
+
+  static const int lifetimeMs = 30000;
+  final GroupId losingGroupId;
+  final GroupId winningGroupId;
+  final int installedAtMs;
+
+  GroupId? redirect(GroupId presentedGroupId, {required int nowMs}) {
+    if (nowMs < installedAtMs || nowMs - installedAtMs >= lifetimeMs) {
+      return null;
+    }
+    return presentedGroupId == losingGroupId ? winningGroupId : null;
+  }
+}
+
+/// Reconciled same-GroupId state from Section 31.7. Conflicting authenticated
+/// capacity records collapse to their minimum; capacity overflow is surfaced
+/// rather than silently evicting a committed member.
+class SplitBrainReconciliation {
+  const SplitBrainReconciliation({
+    required this.coordinatorTerm,
+    required this.members,
+    required this.effectiveMaxPeers,
+  });
+
+  final int coordinatorTerm;
+  final List<GroupMember> members;
+  final int effectiveMaxPeers;
+}
+
+SplitBrainReconciliation reconcileSameGroupSplitBrain({
+  required int termA,
+  required int termB,
+  required Iterable<GroupMember> snapshotA,
+  required Iterable<GroupMember> snapshotB,
+  Iterable<GroupMember> reachableMembers = const [],
+}) {
+  if (termA < 0 || termB < 0) {
+    throw const LpcException(LpcErrorCode.protocolMismatch);
+  }
+  final records = <PeerId, GroupMember>{};
+  for (final record in [...snapshotA, ...snapshotB, ...reachableMembers]) {
+    final prior = records[record.peerId];
+    records[record.peerId] = prior == null
+        ? record
+        : GroupMember(
+            record.peerId,
+            prior.maxPeers < record.maxPeers
+                ? prior.maxPeers
+                : record.maxPeers);
+  }
+  if (records.isEmpty) {
+    throw const LpcException(LpcErrorCode.protocolMismatch);
+  }
+  final members = records.values.toList()
+    ..sort((left, right) => _compare(left.peerId.bytes, right.peerId.bytes));
+  final effectiveMaxPeers = members
+      .map((member) => member.maxPeers)
+      .reduce((left, right) => left < right ? left : right);
+  if (members.length > effectiveMaxPeers) {
+    throw const LpcException(LpcErrorCode.groupFull);
+  }
+  return SplitBrainReconciliation(
+    coordinatorTerm: (termA > termB ? termA : termB) + 1,
+    members: List.unmodifiable(members),
+    effectiveMaxPeers: effectiveMaxPeers,
+  );
+}
+
 int _compare(List<int> a, List<int> b) {
   for (var i = 0; i < a.length; i++) {
     final d = a[i].compareTo(b[i]);

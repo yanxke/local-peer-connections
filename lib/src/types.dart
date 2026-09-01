@@ -111,6 +111,8 @@ bool _same(List<int> a, List<int> b) {
 
 enum GroupTrustMode { openTofu, groupPsk32, pairwiseSas, knownPeers }
 
+enum HostTopology { star }
+
 enum DiscoveryMode { tokenScoped, openProximity }
 
 enum DeliveryMode { reliableOrdered, reliableAcked, realtimeLatest }
@@ -148,18 +150,22 @@ enum BroadcastState { active, completed, cancelled }
 
 class RuntimeConfig {
   const RuntimeConfig(
-      {this.keepaliveIntervalMs = 2000,
+      {List<int> serviceUuid = _defaultServiceUuid,
+      this.keepaliveIntervalMs = 2000,
       this.reconnectTimeoutMs = 15000,
       this.maxQueuedBytesPerPeer = 262144,
       this.maxQueuedMessagesPerPeer = 1024,
-      this.maxApplicationMessageBytes = 1048576});
+      this.maxApplicationMessageBytes = 1048576})
+      : serviceUuid = serviceUuid;
+  final List<int> serviceUuid;
   final int keepaliveIntervalMs,
       reconnectTimeoutMs,
       maxQueuedBytesPerPeer,
       maxQueuedMessagesPerPeer,
       maxApplicationMessageBytes;
   void validate() {
-    if (keepaliveIntervalMs < 1000 ||
+    if (serviceUuid.length != 16 ||
+        keepaliveIntervalMs < 1000 ||
         keepaliveIntervalMs > 10000 ||
         reconnectTimeoutMs < 1000 ||
         reconnectTimeoutMs > 60000) {
@@ -168,6 +174,47 @@ class RuntimeConfig {
     }
   }
 }
+
+/// Section 33.2 configuration for the advanced explicit-role host API.
+class HostConfig {
+  HostConfig({
+    this.maxPeers = 7,
+    this.topology = HostTopology.star,
+    List<int> applicationMetadata = const [],
+    this.autoAccept = false,
+    this.trustMode,
+  }) : applicationMetadata = Uint8List.fromList(applicationMetadata) {
+    if (maxPeers < 1 || maxPeers > 31 || this.applicationMetadata.length > 31) {
+      throw const LpcException(
+          LpcErrorCode.invalidState, 'invalid host configuration');
+    }
+  }
+
+  final int maxPeers;
+  final HostTopology topology;
+  final Uint8List applicationMetadata;
+  final bool autoAccept;
+  final GroupTrustMode? trustMode;
+}
+
+const _defaultServiceUuid = <int>[
+  0x83,
+  0xf2,
+  0x0a,
+  0x00,
+  0x8c,
+  0x5a,
+  0x4f,
+  0x5a,
+  0x9a,
+  0x3a,
+  0x2f,
+  0x0d,
+  0x7a,
+  0x96,
+  0xb1,
+  0x00,
+];
 
 class GroupConfig {
   GroupConfig(
