@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:cryptography/cryptography.dart';
 import 'backend.dart';
 import 'gatt_backend_connection.dart';
@@ -1091,13 +1092,12 @@ class NearbyRuntime {
           'discovery is already active for this service UUID');
     }
     try {
-      await backend.startDiscovery(config.serviceUuid);
-      late final StreamSubscription<PlatformBleEvent> subscription;
+      StreamSubscription<PlatformBleEvent>? subscription;
       late final DiscoverySession session;
       session = DiscoverySession(
         stopPlatformScan: backend.stopDiscovery,
         onStopped: () async {
-          await subscription.cancel();
+          await subscription?.cancel();
           _discoveries.remove(key);
         },
       );
@@ -1106,9 +1106,21 @@ class NearbyRuntime {
           session.recordEndpoint(DiscoveredEndpoint(event.endpointId,
               rssi: event.rssi, localName: event.localName));
         }
+      }, onError: (Object error, StackTrace stack) {
+        // A platform scan error should not terminate the runtime's discovery
+        // stream (the app may choose to retry or show its own diagnostics).
+        debugPrint('[LocalPeerConnections] discovery backend error: $error');
       });
+      // Attach the event listener before starting the native scan. Some BLE
+      // stacks report a cached advertisement synchronously from startScan;
+      // subscribing first prevents losing that first endpoint.
+      await backend.startDiscovery(config.serviceUuid);
       _discoveries[key] = session;
       return session;
+    } catch (_) {
+      // If native start fails, do not leave the listener behind.
+      // (The session is not published until startDiscovery succeeds.)
+      rethrow;
     } finally {
       _startingDiscovery.remove(key);
     }

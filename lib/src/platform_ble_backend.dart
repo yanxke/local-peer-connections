@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 
 import 'gatt_backend_connection.dart';
 import 'protocol/capabilities.dart';
@@ -28,12 +29,17 @@ class PlatformBleBackend {
   final MethodChannel _methods;
   final EventChannel _events;
   final Stream<PlatformBleEvent>? _eventStream;
+  late final Stream<PlatformBleEvent> _sharedEvents =
+      (_eventStream ??
+              _events.receiveBroadcastStream().map((Object? value) {
+                debugPrint('[LocalPeerConnections] native event: $value');
+                return PlatformBleEvent.fromPlatform(value);
+              }))
+          .asBroadcastStream();
 
-  Stream<PlatformBleEvent> get events =>
-      _eventStream ??
-      _events
-          .receiveBroadcastStream()
-          .map((Object? value) => PlatformBleEvent.fromPlatform(value));
+  /// A single shared stream is important: EventChannel has one native sink,
+  /// while discovery, GATT bindings, and apps may all listen concurrently.
+  Stream<PlatformBleEvent> get events => _sharedEvents;
 
   Future<LocalRuntimeCapabilityBitmap> queryCapabilities() async {
     final raw = await _invoke<List<Object?>>('queryCapabilities');

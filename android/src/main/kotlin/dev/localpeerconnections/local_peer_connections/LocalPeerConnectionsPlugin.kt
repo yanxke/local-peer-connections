@@ -20,9 +20,12 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.ParcelUuid
+import android.os.Handler
+import android.os.Looper
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -39,6 +42,7 @@ import javax.crypto.spec.GCMParameterSpec
 /** Registration shell. BLE platform events are translated into the portable
  * backend contract; protocol logic remains in Dart and never depends on GATT. */
 class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
+  private val logTag = "LocalPeerConnections"
   private lateinit var applicationContext: Context
   private lateinit var identityChannel: MethodChannel
   private lateinit var backendChannel: MethodChannel
@@ -93,8 +97,8 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     }
   }
 
-  override fun onListen(arguments: Any?, events: EventChannel.EventSink?) { eventSink = events }
-  override fun onCancel(arguments: Any?) { eventSink = null }
+  override fun onListen(arguments: Any?, events: EventChannel.EventSink?) { Log.d(logTag, "backend event stream listening"); eventSink = events }
+  override fun onCancel(arguments: Any?) { Log.d(logTag, "backend event stream cancelled"); eventSink = null }
 
   private fun queryCapabilities(): List<String> {
     val adapter = adapterOrNull() ?: return emptyList()
@@ -107,6 +111,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
   }
 
   private fun startAdvertising(serviceUuid: ParcelUuid, localName: String?) {
+    Log.d(logTag, "startAdvertising uuid=$serviceUuid")
     if (localName != null) {
       // Android's BLE APIs expose only the adapter-global device name, which a
       // library must not mutate. Do not silently advertise a different name.
@@ -119,10 +124,12 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
       .setConnectable(true).setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM).build()
     advertiserCallback = object : AdvertiseCallback() {
       override fun onStartFailure(errorCode: Int) {
-        eventSink?.error("ADVERTISING_UNAVAILABLE", "Android advertise error $errorCode", errorCode)
+        Log.e(logTag, "advertising failed code=$errorCode")
+        emitError("ADVERTISING_UNAVAILABLE", "Android advertise error $errorCode", errorCode)
       }
     }
     advertiser.startAdvertising(settings, data, advertiserCallback)
+    Log.d(logTag, "advertising requested")
   }
 
   private fun stopAdvertising() {
@@ -131,21 +138,29 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
   }
 
   private fun startDiscovery(serviceUuid: ParcelUuid) {
+    Log.d(logTag, "startDiscovery uuid=$serviceUuid")
     val scanner = adapterOrThrow().bluetoothLeScanner ?: throw BackendError("DISCOVERY_UNAVAILABLE")
     activeServiceUuid = serviceUuid
     stopDiscovery()
-    val filters = listOf(ScanFilter.Builder().setServiceUuid(serviceUuid).build())
     val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
     scanCallback = object : ScanCallback() {
       override fun onScanResult(callbackType: Int, result: ScanResult) {
-        eventSink?.success(mapOf("type" to "endpointFound", "endpointId" to result.device.address,
+        val advertised = result.scanRecord?.serviceUuids?.any { it == serviceUuid } == true
+        if (!advertised) return
+        Log.d(logTag, "scan match address=${result.device.address} name=${result.scanRecord?.deviceName} rssi=${result.rssi}")
+        emitSuccess(mapOf("type" to "endpointFound", "endpointId" to result.device.address,
           "localName" to result.scanRecord?.deviceName, "rssi" to result.rssi))
       }
       override fun onScanFailed(errorCode: Int) {
-        eventSink?.error("DISCOVERY_UNAVAILABLE", "Android scan error $errorCode", errorCode)
+        Log.e(logTag, "scan failed code=$errorCode")
+        emitError("DISCOVERY_UNAVAILABLE", "Android scan error $errorCode", errorCode)
       }
     }
-    scanner.startScan(filters, settings, scanCallback)
+    // Some Android stacks omit service UUIDs from the scan response when a
+    // hardware ScanFilter is used. Scan broadly and apply the UUID check above
+    // so discovery remains reliable across vendors.
+    scanner.startScan(null, settings, scanCallback)
+    Log.d(logTag, "discovery requested")
   }
 
   private fun stopDiscovery() {
@@ -167,17 +182,17 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
           gattServerPeers[device.address] = device
         } else {
           gattServerPeers.remove(device.address)
-          eventSink?.success(mapOf("type" to "gattDisconnected", "endpointId" to device.address))
+          emitSuccess(mapOf("type" to "gattDisconnected", "endpointId" to device.address))
         }
         if (status != BluetoothGatt.GATT_SUCCESS) {
-          eventSink?.error("PLATFORM_ERROR", "GATT connection error $status", status)
+          emitError("PLATFORM_ERROR", "GATT connection error $status", status)
         }
       }
       override fun onCharacteristicWriteRequest(device: BluetoothDevice, requestId: Int,
           characteristic: BluetoothGattCharacteristic, preparedWrite: Boolean,
           responseNeeded: Boolean, offset: Int, value: ByteArray) {
         if (characteristic.uuid == characteristicUuid(serviceUuid, 1) && !preparedWrite && offset == 0) {
-          eventSink?.success(mapOf("type" to "gattFragment", "endpointId" to device.address,
+          emitSuccess(mapOf("type" to "gattFragment", "endpointId" to device.address,
             "bytes" to value.toList()))
           if (responseNeeded) sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
         } else if (responseNeeded) {
@@ -193,7 +208,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
             (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
              value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE))) {
           if (responseNeeded) sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-          eventSink?.success(mapOf("type" to "gattConnected", "endpointId" to device.address,
+          emitSuccess(mapOf("type" to "gattConnected", "endpointId" to device.address,
               "localRole" to "peripheral", "platformSafeWriteSize" to 20))
         } else if (responseNeeded) {
           sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
@@ -248,13 +263,13 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
       override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
         if (status != BluetoothGatt.GATT_SUCCESS || newState != BluetoothProfile.STATE_CONNECTED) {
           gattClients.remove(endpointId)?.gatt?.close()
-          eventSink?.error("ENDPOINT_LOST", "GATT connection error $status", status)
+          emitError("ENDPOINT_LOST", "GATT connection error $status", status)
           return
         }
         if (!gatt.discoverServices()) {
           gatt.close()
           gattClients.remove(endpointId)
-          eventSink?.error("PLATFORM_ERROR", "GATT service discovery did not start", null)
+          emitError("PLATFORM_ERROR", "GATT service discovery did not start", null)
         }
       }
       override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
@@ -284,12 +299,12 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         if (status != BluetoothGatt.GATT_SUCCESS) {
           rejectGatt(endpointId, gatt, "LPC TX subscription failed"); return
         }
-        eventSink?.success(mapOf("type" to "gattConnected", "endpointId" to endpointId,
+        emitSuccess(mapOf("type" to "gattConnected", "endpointId" to endpointId,
             "localRole" to "central", "platformSafeWriteSize" to 20))
       }
       override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
         if (characteristic.uuid == txUuid) {
-          characteristic.value?.let { value -> eventSink?.success(mapOf("type" to "gattFragment",
+          characteristic.value?.let { value -> emitSuccess(mapOf("type" to "gattFragment",
               "endpointId" to endpointId, "bytes" to value.toList())) }
         }
       }
@@ -330,7 +345,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     gattClients.remove(endpointId)
     gatt.disconnect()
     gatt.close()
-    eventSink?.error("PLATFORM_ERROR", message, null)
+    emitError("PLATFORM_ERROR", message, null)
   }
 
   private fun characteristicUuid(serviceUuid: ParcelUuid, increment: Int): UUID {
@@ -366,6 +381,14 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     catch (error: SecurityException) { result.error("PERMISSION_DENIED", error.message, null) }
     catch (error: BackendError) { result.error(error.code, error.message, null) }
     catch (error: Exception) { result.error("PLATFORM_ERROR", error.message, null) }
+  }
+
+  private fun emitSuccess(value: Any) {
+    Handler(Looper.getMainLooper()).post { eventSink?.success(value) }
+  }
+
+  private fun emitError(code: String, message: String, details: Any?) {
+    Handler(Looper.getMainLooper()).post { eventSink?.error(code, message, details) }
   }
 
   private fun runBackendValue(result: MethodChannel.Result, block: () -> Any?) {

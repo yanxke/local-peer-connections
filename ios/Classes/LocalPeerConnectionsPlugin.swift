@@ -35,6 +35,7 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    print("[LocalPeerConnections] method \(call.method)")
     switch call.method {
     case "loadOrCreateEd25519Seed":
       do { result(try loadOrCreateSeed()) }
@@ -58,6 +59,7 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
           advertisement[CBAdvertisementDataLocalNameKey] = localName
         }
         self.peripheral.startAdvertising(advertisement)
+        print("[LocalPeerConnections] advertising requested uuid=\(uuid.uuidString)")
       }
     case "stopAdvertising":
       peripheral.stopAdvertising(); result(nil)
@@ -67,6 +69,7 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
         let serviceUuid = try self.serviceUuid(arguments)
         self.activeServiceUuid = serviceUuid
         self.central.scanForPeripherals(withServices: [serviceUuid], options: nil)
+        print("[LocalPeerConnections] discovery requested uuid=\(serviceUuid.uuidString)")
       }
     case "stopDiscovery":
       central.stopScan(); result(nil)
@@ -116,11 +119,16 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     return nil
   }
 
-  public func centralManagerDidUpdateState(_ central: CBCentralManager) {}
-  public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {}
+  public func centralManagerDidUpdateState(_ central: CBCentralManager) {
+    print("[LocalPeerConnections] central state=\(central.state.rawValue)")
+  }
+  public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
+    print("[LocalPeerConnections] peripheral state=\(peripheral.state.rawValue)")
+  }
   public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                              advertisementData: [String : Any], rssi RSSI: NSNumber) {
     discoveredPeripherals[peripheral.identifier] = peripheral
+    print("[LocalPeerConnections] endpoint found id=\(peripheral.identifier.uuidString) name=\(advertisementData[CBAdvertisementDataLocalNameKey] ?? "") rssi=\(RSSI)")
     eventSink?(["type": "endpointFound", "endpointId": peripheral.identifier.uuidString,
                 "localName": advertisementData[CBAdvertisementDataLocalNameKey] as? String,
                 "rssi": RSSI.intValue])
