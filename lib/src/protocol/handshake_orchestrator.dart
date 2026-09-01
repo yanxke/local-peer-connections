@@ -14,12 +14,18 @@ class HandshakeResult {
       required this.localAuthPayload,
       required this.secrets,
       required this.negotiatedMinor,
-      this.sas});
+      required List<int> transcript,
+      this.sas})
+      : transcript = Uint8List.fromList(transcript);
   final HelloPayload localHello;
   final HelloPayload remoteHello;
   final Uint8List localAuthPayload;
   final HandshakeSecrets secrets;
   final int negotiatedMinor;
+
+  /// The canonical candidate-handshake transcript T2 used by Section 26's
+  /// RESUME proofs. It is retained only by the handshake/result owner.
+  final Uint8List transcript;
   final String? sas;
 
   int get negotiatedPeerCapabilities =>
@@ -122,6 +128,7 @@ Future<HandshakeResult> verifyHandshake(
           identityKeyPair: localIdentityKeyPair, transcript: transcript),
       secrets: secrets,
       negotiatedMinor: minor!,
+      transcript: transcript,
       sas: remote.trustMode == HandshakeTrustMode.sas
           ? await sasFor(baseRootKey: base, transcript: transcript)
           : null);

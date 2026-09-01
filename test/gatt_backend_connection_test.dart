@@ -80,7 +80,7 @@ void main() {
         sessionId: List.filled(16, 2),
         localPeerId: PeerId(List.filled(16, 3)),
         remotePeerId: PeerId(List.filled(16, 4)));
-    final write = peer.submitEncrypted(FrameType.ping, [1]);
+    final write = peer.submitEncrypted(FrameType.data, [1]);
     await _turn();
     expect(peer.state, PeerConnectionState.ready);
 
@@ -114,7 +114,7 @@ void main() {
         sessionId: List.filled(16, 2),
         localPeerId: PeerId(List.filled(16, 3)),
         remotePeerId: PeerId(List.filled(16, 4)));
-    expect(await peer.submitEncrypted(FrameType.ping, [1]),
+    expect(await peer.submitEncrypted(FrameType.data, [1]),
         TransportWriteState.failed);
     await _turn();
     expect(peer.state, PeerConnectionState.reconnecting);

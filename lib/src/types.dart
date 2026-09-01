@@ -117,6 +117,10 @@ enum DiscoveryMode { tokenScoped, openProximity }
 
 enum DeliveryMode { reliableOrdered, reliableAcked, realtimeLatest }
 
+/// The pairwise HELLO trust mode defined by Section 16.1.  This is part of
+/// the public runtime configuration rather than a platform Bluetooth setting.
+enum HandshakeTrustMode { knownPeer, sas, psk32, tofu }
+
 enum SendPriority { interactive, normal, bulk }
 
 enum GroupState {
@@ -151,13 +155,27 @@ enum BroadcastState { active, completed, cancelled }
 class RuntimeConfig {
   const RuntimeConfig(
       {List<int> serviceUuid = _defaultServiceUuid,
+      this.trustMode = HandshakeTrustMode.sas,
+      this.expectedPeerId,
+      this.allowedPeerIds = const [],
+      List<int>? psk32,
+      this.enableGatt = true,
+      this.enableL2cap = true,
+      this.enableLan = true,
+      this.autoReconnect = true,
       this.keepaliveIntervalMs = 2000,
       this.reconnectTimeoutMs = 15000,
       this.maxQueuedBytesPerPeer = 262144,
       this.maxQueuedMessagesPerPeer = 1024,
       this.maxApplicationMessageBytes = 1048576})
-      : serviceUuid = serviceUuid;
+      : serviceUuid = serviceUuid,
+        psk32 = psk32;
   final List<int> serviceUuid;
+  final HandshakeTrustMode trustMode;
+  final PeerId? expectedPeerId;
+  final List<PeerId> allowedPeerIds;
+  final List<int>? psk32;
+  final bool enableGatt, enableL2cap, enableLan, autoReconnect;
   final int keepaliveIntervalMs,
       reconnectTimeoutMs,
       maxQueuedBytesPerPeer,
@@ -171,6 +189,24 @@ class RuntimeConfig {
         reconnectTimeoutMs > 60000) {
       throw const LpcException(
           LpcErrorCode.invalidState, 'invalid runtime timing configuration');
+    }
+    if (trustMode == HandshakeTrustMode.psk32 && psk32?.length != 32) {
+      throw const LpcException(
+          LpcErrorCode.invalidState, 'PSK_32 requires a 32-byte psk32');
+    }
+    if (trustMode != HandshakeTrustMode.psk32 && psk32 != null) {
+      throw const LpcException(
+          LpcErrorCode.invalidState, 'psk32 requires PSK_32 trust mode');
+    }
+    if (trustMode == HandshakeTrustMode.knownPeer) {
+      if ((expectedPeerId == null && allowedPeerIds.isEmpty) ||
+          (expectedPeerId != null && allowedPeerIds.isNotEmpty)) {
+        throw const LpcException(LpcErrorCode.invalidState,
+            'KNOWN_PEER requires exactly one peer policy');
+      }
+    } else if (expectedPeerId != null || allowedPeerIds.isNotEmpty) {
+      throw const LpcException(LpcErrorCode.invalidState,
+          'peer policy requires KNOWN_PEER trust mode');
     }
   }
 }
@@ -194,7 +230,10 @@ class HostConfig {
   final HostTopology topology;
   final Uint8List applicationMetadata;
   final bool autoAccept;
-  final GroupTrustMode? trustMode;
+
+  /// Optional Section 33.2 override for the runtime's low-level pairwise
+  /// trust mode. Credential material remains owned by [RuntimeConfig].
+  final HandshakeTrustMode? trustMode;
 }
 
 const _defaultServiceUuid = <int>[

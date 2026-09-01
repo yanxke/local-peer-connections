@@ -11,52 +11,76 @@ import 'protocol/application_payload.dart';
 import 'protocol/checkpoint.dart';
 import 'protocol/reliable_data_receiver.dart';
 import 'protocol/reliability.dart';
+import 'protocol/keepalive.dart';
+import 'protocol/reassembly.dart';
 import 'types.dart';
 
 /// Authenticated-generation transport core. Handshake orchestration owns its
 /// creation; this object has no platform BLE dependency.
 class PeerConnectionCore {
   PeerConnectionCore(
-      {required this.backend,
+      {required BackendConnection backend,
       required List<int> sessionRootKey,
       required List<int> sessionId,
+      List<int>? resumeSecret,
       required this.localPeerId,
       required this.remotePeerId,
+      this.securityLevel,
       AckRetentionSet? ackRetention,
       this.messageIdAllocator,
+      KeepaliveTiming? keepaliveTiming,
+      int Function()? monotonicNowMs,
       this.generation = 1,
       int initialNextSequence = 1,
       int initialHighestReceivedSequence = 0})
-      : _sessionRootKey = Uint8List.fromList(sessionRootKey),
+      : _backend = backend,
+        _sessionRootKey = Uint8List.fromList(sessionRootKey),
         _sessionId = Uint8List.fromList(sessionId),
+        _resumeSecret =
+            resumeSecret == null ? null : Uint8List.fromList(resumeSecret),
         ackRetention = ackRetention ?? AckRetentionSet(),
+        _monotonicStopwatch = Stopwatch()..start(),
         _nextSequence = initialNextSequence {
-    if (_sessionRootKey.length != 32 || _sessionId.length != 16)
+    if (_sessionRootKey.length != 32 ||
+        _sessionId.length != 16 ||
+        (_resumeSecret != null && _resumeSecret!.length != 32))
       throw ArgumentError('invalid session key or id');
     if (generation < 1 ||
         initialNextSequence < 1 ||
         initialHighestReceivedSequence < 0) {
       throw ArgumentError('invalid generation or sequence');
     }
+    _monotonicNowMs =
+        monotonicNowMs ?? (() => _monotonicStopwatch.elapsedMilliseconds);
     _receiveSequences.seedHighest(initialHighestReceivedSequence);
+    _keepalive = keepaliveTiming == null
+        ? null
+        : KeepaliveController(keepaliveTiming, nowMs: _monotonicNowMs());
     _state.requireTransition(PeerConnectionState.connecting);
     _state.requireTransition(PeerConnectionState.transportConnected);
     _state.requireTransition(PeerConnectionState.authenticating);
     _state.requireTransition(PeerConnectionState.ready);
-    _backendSubscription = backend.events
-        .listen(_onBackendEvent, onError: (_, __) => _handleTransportLoss());
+    _bindBackend(backend);
   }
-  final BackendConnection backend;
+  BackendConnection _backend;
+  BackendConnection get backend => _backend;
   final Uint8List _sessionRootKey, _sessionId;
+  Uint8List? _resumeSecret;
   final PeerId localPeerId, remotePeerId;
+  final SecurityLevel? securityLevel;
   final PeerStateMachine _state = PeerStateMachine();
   final ReceiveSequenceWindow _receiveSequences = ReceiveSequenceWindow();
   final AckRetentionSet ackRetention;
+  final Stopwatch _monotonicStopwatch;
+  late final int Function() _monotonicNowMs;
+  late final KeepaliveController? _keepalive;
 
   /// Session-direction allocator shared by DATA and ACK-required control
   /// operations when the handshake owner provides the retained prefix.
   final MessageIdAllocator? messageIdAllocator;
   final ReliableDataReceiver _dataReceiver = ReliableDataReceiver();
+  final RealtimeSequenceFilter _realtimeReceiver = RealtimeSequenceFilter();
+  final Map<int, int> _nextRealtimeSequence = <int, int>{};
   final Map<String, _AckRequiredFrame> _ackRequiredFrames = {};
   final Map<String, List<CoordinatorCheckpointChunk>> _checkpointOperations =
       {};
@@ -64,11 +88,25 @@ class PeerConnectionCore {
   final Set<TransportWrite> _pendingWrites = <TransportWrite>{};
   final StreamController<LpcFrame> _receivedFrames =
       StreamController<LpcFrame>.broadcast(sync: true);
-  late final StreamSubscription<BackendConnectionEvent> _backendSubscription;
+  late StreamSubscription<BackendConnectionEvent> _backendSubscription;
   int generation;
   int _nextSequence;
+  bool _pollingKeepalive = false;
+  bool _pollingAckTimeouts = false;
   PeerConnectionState get state => _state.state;
+  int get monotonicNowMs => _monotonicNowMs();
   Uint8List get sessionId => Uint8List.fromList(_sessionId);
+
+  /// The retained Section 26 secret for this logical SessionId. It is present
+  /// only for handshake-owned cores, never synthesized for test/manual cores.
+  Uint8List get resumeSecret {
+    final secret = _resumeSecret;
+    if (secret == null) {
+      throw const LpcException(
+          LpcErrorCode.invalidState, 'RESUME secret is unavailable');
+    }
+    return Uint8List.fromList(secret);
+  }
 
   /// Authenticated, replay-filtered frames in receive order. Higher layers
   /// own the frame-specific application/group dispatch.
@@ -77,6 +115,9 @@ class PeerConnectionCore {
       {int flags = 0, List<int>? messageId}) async {
     if (state != PeerConnectionState.ready)
       throw const LpcException(LpcErrorCode.invalidState);
+    if (type == FrameType.ping || type == FrameType.pong) {
+      PingPayload.decode(payload);
+    }
     final sequence = _nextSequence++;
     final direction =
         _compare(localPeerId.bytes, remotePeerId.bytes) < 0 ? 0 : 1;
@@ -103,6 +144,9 @@ class PeerConnectionCore {
     // never a per-frame same-generation retry (Sections 44.1.2-44.1.3).
     unawaited(write.completion.then((result) {
       _pendingWrites.remove(write);
+      if (result == TransportWriteState.submittedToPlatform) {
+        _keepalive?.encryptedFrameSubmitted(_monotonicNowMs());
+      }
       if (result == TransportWriteState.failed) {
         _handleTransportLoss();
       }
@@ -426,6 +470,18 @@ class PeerConnectionCore {
         await const FrameProtector().decrypt(frame, await key.extractBytes());
     if (_receiveSequences.accept(clear.sequenceNumber) ==
         SequenceAcceptance.replay) return null;
+    if (clear.type == FrameType.ping || clear.type == FrameType.pong) {
+      // Parsing enforces the exact 16-byte payload before a PONG echoes it
+      // byte-for-byte (Section 24).
+      PingPayload.decode(clear.payload);
+    }
+    _keepalive?.authenticatedFrameReceived(_monotonicNowMs());
+    if (clear.type == FrameType.ping) {
+      final result = await submitEncrypted(FrameType.pong, clear.payload);
+      if (result != TransportWriteState.submittedToPlatform) {
+        throw const LpcException(LpcErrorCode.transportClosed);
+      }
+    }
     if (clear.type == FrameType.ack) {
       final ack = parseAck(clear);
       if (ack != null && ackRetention.acknowledge(ack.messageId)) {
@@ -438,6 +494,75 @@ class PeerConnectionCore {
     return clear;
   }
 
+  /// Drives the negotiated Section 24 keepalive from the owning runtime's
+  /// serialized timer. It never emits duplicate PINGs while one is pending.
+  Future<void> pollKeepalive() async {
+    final keepalive = _keepalive;
+    if (keepalive == null ||
+        state != PeerConnectionState.ready ||
+        _pollingKeepalive) {
+      return;
+    }
+    _pollingKeepalive = true;
+    try {
+      final nowMs = _monotonicNowMs();
+      final decision = keepalive.poll(
+          nowMs: nowMs,
+          monotonicUs: nowMs * Duration.microsecondsPerMillisecond);
+      switch (decision) {
+        case KeepaliveNoAction():
+          return;
+        case KeepaliveReconnect():
+          _handleTransportLoss();
+          return;
+        case KeepalivePing(:final ping):
+          final result = await submitEncrypted(FrameType.ping, ping.encode());
+          if (result == TransportWriteState.submittedToPlatform) {
+            keepalive.pingSubmitted(_monotonicNowMs());
+          } else {
+            keepalive.pingSubmissionFailed();
+          }
+      }
+    } finally {
+      _pollingKeepalive = false;
+    }
+  }
+
+  /// Drives Section 23 ACK timers for operations owned by this connection.
+  /// Group-routing owners retain their own logical encoders and continue to
+  /// consume their retained entries explicitly.
+  Future<void> pollAckTimeouts() async {
+    if (state != PeerConnectionState.ready || _pollingAckTimeouts) return;
+    _pollingAckTimeouts = true;
+    try {
+      final nowMs = _monotonicNowMs();
+      for (final messageId in ackRetention.dueMessageIds(nowMs: nowMs)) {
+        final key = _messageKey(messageId);
+        if (_ackRequiredFrames.containsKey(key)) {
+          await retryAckRequiredFrame(messageId, nowMs: nowMs);
+        } else if (_checkpointOperations.containsKey(key)) {
+          await retryAckRequiredCheckpoint(messageId, nowMs: nowMs);
+        } else {
+          final operation = _reliableDataOperations[key];
+          if (operation == null ||
+              operation.deliveryMode != DeliveryMode.reliableAcked) {
+            continue;
+          }
+          final result = ackRetention.onTimer(messageId, nowMs: nowMs);
+          if (result == AckTimeoutResult.retransmitWholeOperation) {
+            await _submitReliableDataAttempt(operation, nowMs: nowMs);
+          } else if (result == AckTimeoutResult.terminalAckTimeout) {
+            _reliableDataOperations.remove(key);
+            operation.handleController?.complete(SendState.failed);
+          }
+        }
+        if (state != PeerConnectionState.ready) return;
+      }
+    } finally {
+      _pollingAckTimeouts = false;
+    }
+  }
+
   Future<TransportWriteState> submitAck(List<int> acknowledgedMessageId) =>
       submitEncrypted(
           FrameType.ack, AckPayload(acknowledgedMessageId).encode());
@@ -446,6 +571,31 @@ class PeerConnectionCore {
   /// It is deliberately neither ACK_REQUIRED nor retained for retry/RESUME.
   Future<TransportWriteState> submitRealtime(RealtimeDatagram datagram) =>
       submitEncrypted(FrameType.realtimeDatagram, datagram.encode());
+
+  RealtimeDatagram allocateRealtimeDatagram({
+    required int channelId,
+    required int senderTick,
+    required List<int> bytes,
+  }) {
+    final sequence = _nextRealtimeSequence[channelId] ?? 1;
+    _nextRealtimeSequence[channelId] = (sequence + 1) & 0xffffffff;
+    return RealtimeDatagram(
+        channelId: channelId,
+        sequence: sequence,
+        senderTick: senderTick,
+        bytes: bytes);
+  }
+
+  /// Parses an authenticated realtime frame and applies Section 22's
+  /// per-channel serial-number suppression. The filter deliberately survives
+  /// RESUME while the SessionId remains unchanged.
+  RealtimeDatagram? receiveRealtime(LpcFrame frame) {
+    if (frame.type != FrameType.realtimeDatagram) {
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    final datagram = RealtimeDatagram.decode(frame.payload);
+    return _realtimeReceiver.accept(datagram) ? datagram : null;
+  }
 
   /// Completes authenticated DATA reassembly and applies Section 23.3's
   /// completed-ID deduplication. Callers deliver a non-null result to the
@@ -467,6 +617,22 @@ class PeerConnectionCore {
     }
   }
 
+  /// Commits one authenticated DATA frame before the runtime can emit an
+  /// application callback. Invalid DATA framing is terminal for this
+  /// connection generation, just like any other malformed encrypted frame.
+  Future<ReliableDataReceiveResult> receiveDataFrame(LpcFrame frame) async {
+    if (frame.type != FrameType.data) {
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    try {
+      return await receiveDataChunk(
+          frame.messageId, DataChunk.decode(frame.payload));
+    } on Object {
+      await close();
+      rethrow;
+    }
+  }
+
   AckPayload? parseAck(LpcFrame frame) {
     if (frame.type != FrameType.ack) return null;
     if (frame.flags != 0 || frame.messageId.any((byte) => byte != 0))
@@ -480,12 +646,32 @@ class PeerConnectionCore {
   }
 
   void completeResume(
-      {required int newGeneration, required List<int> resumedSessionRootKey}) {
+      {required int newGeneration,
+      required List<int> resumedSessionRootKey,
+      List<int>? newResumeSecret,
+      BackendConnection? resumedBackend}) {
     if (resumedSessionRootKey.length != 32)
       throw ArgumentError.value(resumedSessionRootKey, 'resumedSessionRootKey');
     if (state != PeerConnectionState.reconnecting)
       throw const LpcException(LpcErrorCode.invalidState);
+    if (resumedBackend != null) {
+      if (resumedBackend.state != TransportConnectionState.open) {
+        throw const LpcException(
+            LpcErrorCode.transportClosed, 'resumed backend is not open');
+      }
+      // The source identity guard in [_bindBackend] makes a late close/error
+      // callback from the failed physical generation harmless after handoff.
+      unawaited(_backendSubscription.cancel());
+      _backend = resumedBackend;
+      _bindBackend(resumedBackend);
+    }
     _sessionRootKey.setRange(0, 32, resumedSessionRootKey);
+    if (newResumeSecret != null) {
+      if (newResumeSecret.length != 32) {
+        throw ArgumentError.value(newResumeSecret, 'newResumeSecret');
+      }
+      _resumeSecret = Uint8List.fromList(newResumeSecret);
+    }
     generation = newGeneration;
     _nextSequence = 1;
     _receiveSequences.reset();
@@ -553,6 +739,14 @@ class PeerConnectionCore {
     if (event is BackendClosed || event is BackendError) {
       _handleTransportLoss();
     }
+  }
+
+  void _bindBackend(BackendConnection source) {
+    _backendSubscription = source.events.listen((event) {
+      if (identical(source, _backend)) _onBackendEvent(event);
+    }, onError: (_, __) {
+      if (identical(source, _backend)) _handleTransportLoss();
+    });
   }
 
   Future<void> _receiveBackendFrame(List<int> encoded) async {

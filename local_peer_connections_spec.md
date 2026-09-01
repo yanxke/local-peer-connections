@@ -7280,6 +7280,43 @@ expected parser result
   separately from protocol identity.
 - [x] UT-161 Flutter's native GATT fragment binding preserves the exact
   Section 44 submitted/transient-backpressure/terminal-failure distinction.
+- [x] UT-162 A live authenticated PeerConnection sends a 16-byte PING after
+  its negotiated idle interval, returns a byte-identical PONG, and enters
+  reconnecting after its derived receive-liveness timeout.
+- [x] UT-163 A live authenticated PeerConnection starts ACK timing only at
+  final-frame submission, retransmits the complete retained operation at each
+  3-second deadline, and reaches terminal timeout after two retransmissions.
+- [x] UT-164 `NearbyRuntime.close()` cancels every nonterminal connection
+  attempt and disconnects every authenticated PeerConnection it owns.
+- [x] UT-165 `HostSession.peers()` returns an immutable authenticated-peer
+  snapshot, and an empty explicit-host broadcast completes immediately.
+- [x] UT-166 Authenticated peer realtime delivery applies the Section 22
+  latest-sequence filter independently for each channel before callback.
+- [x] UT-167 Peer realtime sequence allocation starts at one independently per
+  channel and preserves valid sequence gaps caused by latest-state replacement.
+- [x] UT-168 A malformed authenticated DATA frame closes the PeerConnection
+  before any application delivery callback can be emitted.
+- [x] UT-169 A SAS handshake emits the same six-digit verification value on
+  both peers and sends no READY until each side explicitly accepts it.
+- [x] UT-170 RuntimeConfig defaults low-level explicit connections to SAS and
+  rejects malformed PSK_32 and KNOWN_PEER credential configuration.
+- [x] UT-171 HostSession validates credentials for a low-level trust-mode
+  override before beginning advertising or accepting inbound connections.
+- [x] UT-172 RuntimeConfig.enableGatt prevents GATT discovery, explicit-host
+  advertising, and outgoing GATT connection attempts when disabled.
+- [x] UT-173 A backend-bound candidate RESUME exchange uses only generation-0
+  candidate control until RESUME_ACCEPT, then returns success only after both
+  peers send and authenticate generation-specific RESUME_READY.
+- [x] UT-174 A responder that cannot verify an authenticated candidate
+  RESUME_REQUEST sends encrypted generation-0 RESUME_REJECT before closing.
+- [x] UT-175 Successful RESUME rebinds the continuing logical session to the
+  fresh backend, restarts generation sequence at one, and ignores stale
+  terminal callbacks from the failed physical backend.
+- [x] UT-176 Handshake-owned PeerConnectionCore retains the current
+  resume_secret and replaces it only with the newly derived secret after a
+  successful RESUME.
+- [x] UT-177 A fresh candidate handshake authenticates HELLO/AUTH with a new
+  transcript but emits no normal READY before candidate RESUME begins.
 
 # 55. Mandatory Physical Integration Tests
 

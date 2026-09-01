@@ -44,6 +44,42 @@ class _Backend implements BackendConnection {
 }
 
 void main() {
+  test('UT-175 RESUME rebinds the logical core to the fresh backend only',
+      () async {
+    final failedBackend = _Backend();
+    final resumedBackend = _Backend();
+    final peer = PeerConnectionCore(
+        backend: failedBackend,
+        sessionRootKey: List.filled(32, 1),
+        sessionId: List.filled(16, 2),
+        resumeSecret: List.filled(32, 7),
+        localPeerId: PeerId(List.filled(16, 3)),
+        remotePeerId: PeerId(List.filled(16, 4)));
+
+    failedBackend.controller.add(const BackendClosed());
+    await Future<void>.delayed(Duration.zero);
+    expect(peer.state, PeerConnectionState.reconnecting);
+    peer.completeResume(
+        newGeneration: 2,
+        resumedSessionRootKey: List.filled(32, 5),
+        newResumeSecret: List.filled(32, 8),
+        resumedBackend: resumedBackend);
+    expect(peer.backend, same(resumedBackend));
+    expect(peer.state, PeerConnectionState.ready);
+    expect(peer.resumeSecret, List.filled(32, 8));
+
+    // Late notifications from the old physical generation cannot tear down
+    // the newly resumed logical generation.
+    failedBackend.controller.add(const BackendClosed());
+    await Future<void>.delayed(Duration.zero);
+    expect(peer.state, PeerConnectionState.ready);
+    await peer.submitEncrypted(FrameType.data, [1]);
+    expect(failedBackend.writes, isEmpty);
+    final frame = LpcFrame.decode(resumedBackend.writes.single);
+    expect(frame.transportGeneration, 2);
+    expect(frame.sequenceNumber, 1);
+  });
+
   test('UT-044 checkpoint chunks share one MessageId and use fresh sequences',
       () async {
     final backend = _Backend();
@@ -378,6 +414,78 @@ void main() {
     expect(bBackend.writes, isEmpty);
   });
 
+  test('UT-166 authenticated realtime delivery is latest-only per channel', () {
+    final peer = PeerConnectionCore(
+      backend: _Backend(),
+      sessionRootKey: List.filled(32, 1),
+      sessionId: List.filled(16, 2),
+      localPeerId: PeerId(List.filled(16, 3)),
+      remotePeerId: PeerId(List.filled(16, 4)),
+    );
+    LpcFrame frame(int sequence) => LpcFrame(
+        type: FrameType.realtimeDatagram,
+        flags: 0,
+        transportGeneration: 1,
+        sequenceNumber: sequence,
+        messageId: List.filled(8, 0),
+        sessionId: List.filled(16, 2),
+        nonce: List.filled(12, 0),
+        payload: RealtimeDatagram(
+            channelId: 3,
+            sequence: sequence,
+            senderTick: 7,
+            bytes: [9]).encode());
+
+    expect(peer.receiveRealtime(frame(5))!.bytes, [9]);
+    expect(peer.receiveRealtime(frame(4)), isNull);
+    expect(peer.receiveRealtime(frame(6))!.sequence, 6);
+  });
+
+  test('UT-167 realtime sequence allocation is independent per channel', () {
+    final peer = PeerConnectionCore(
+      backend: _Backend(),
+      sessionRootKey: List.filled(32, 1),
+      sessionId: List.filled(16, 2),
+      localPeerId: PeerId(List.filled(16, 3)),
+      remotePeerId: PeerId(List.filled(16, 4)),
+    );
+    expect(
+        peer.allocateRealtimeDatagram(
+            channelId: 1, senderTick: 0, bytes: []).sequence,
+        1);
+    expect(
+        peer.allocateRealtimeDatagram(
+            channelId: 2, senderTick: 0, bytes: []).sequence,
+        1);
+    expect(
+        peer.allocateRealtimeDatagram(
+            channelId: 1, senderTick: 0, bytes: []).sequence,
+        2);
+  });
+
+  test('UT-168 malformed authenticated DATA closes before delivery', () async {
+    final peer = PeerConnectionCore(
+      backend: _Backend(),
+      sessionRootKey: List.filled(32, 1),
+      sessionId: List.filled(16, 2),
+      localPeerId: PeerId(List.filled(16, 3)),
+      remotePeerId: PeerId(List.filled(16, 4)),
+    );
+    final frame = LpcFrame(
+        type: FrameType.data,
+        flags: 0,
+        transportGeneration: 1,
+        sequenceNumber: 1,
+        messageId: List.filled(8, 1),
+        sessionId: List.filled(16, 2),
+        nonce: List.filled(12, 0),
+        payload: [0]);
+
+    await expectLater(
+        peer.receiveDataFrame(frame), throwsA(isA<LpcException>()));
+    expect(peer.state, PeerConnectionState.disconnected);
+  });
+
   test('RT-002 realtime DATA is not retransmitted after transport loss',
       () async {
     final backend = _Backend();
@@ -490,7 +598,7 @@ void main() {
         sessionId: List.filled(16, 2),
         localPeerId: PeerId(List.filled(16, 3)),
         remotePeerId: PeerId(List.filled(16, 4)));
-    expect(await peer.submitEncrypted(FrameType.ping, [7]),
+    expect(await peer.submitEncrypted(FrameType.data, [7]),
         TransportWriteState.submittedToPlatform);
     expect(LpcFrame.decode(backend.writes.single).encrypted, isTrue);
   });
@@ -502,7 +610,7 @@ void main() {
         sessionId: List.filled(16, 2),
         localPeerId: PeerId(List.filled(16, 3)),
         remotePeerId: PeerId(List.filled(16, 4)));
-    final submission = peer.submitEncrypted(FrameType.ping, [7]);
+    final submission = peer.submitEncrypted(FrameType.data, [7]);
     await Future<void>.delayed(Duration.zero);
     expect(backend.writes, hasLength(1));
     expect(backend.pendingWrites.single.state, TransportWriteState.pending);
@@ -526,10 +634,89 @@ void main() {
         sessionId: List.filled(16, 2),
         localPeerId: PeerId(List.filled(16, 4)),
         remotePeerId: PeerId(List.filled(16, 3)));
-    await a.submitEncrypted(FrameType.ping, [9]);
+    await a.submitEncrypted(FrameType.data, [9]);
     expect((await b.receiveEncrypted(aBackend.writes.single))!.payload, [9]);
     expect(await b.receiveEncrypted(aBackend.writes.single), isNull);
   });
+
+  test(
+      'UT-162 live core schedules PING, echoes PONG, and detects liveness loss',
+      () async {
+    var nowMs = 0;
+    final aBackend = _Backend();
+    final a = PeerConnectionCore(
+        backend: aBackend,
+        sessionRootKey: List.filled(32, 1),
+        sessionId: List.filled(16, 2),
+        localPeerId: PeerId(List.filled(16, 3)),
+        remotePeerId: PeerId(List.filled(16, 4)),
+        keepaliveTiming: KeepaliveTiming.negotiate(2000, 2000),
+        monotonicNowMs: () => nowMs);
+    final bBackend = _Backend();
+    final b = PeerConnectionCore(
+        backend: bBackend,
+        sessionRootKey: List.filled(32, 1),
+        sessionId: List.filled(16, 2),
+        localPeerId: PeerId(List.filled(16, 4)),
+        remotePeerId: PeerId(List.filled(16, 3)));
+
+    nowMs = 2000;
+    await a.pollKeepalive();
+    expect(LpcFrame.decode(aBackend.writes.single).type, FrameType.ping);
+    final ping = await b.receiveEncrypted(aBackend.writes.single);
+    expect(ping!.payload, hasLength(16));
+    expect(LpcFrame.decode(bBackend.writes.single).type, FrameType.pong);
+    expect((await a.receiveEncrypted(bBackend.writes.single))!.payload,
+        ping.payload);
+
+    nowMs = 0;
+    final lostBackend = _Backend();
+    final lost = PeerConnectionCore(
+        backend: lostBackend,
+        sessionRootKey: List.filled(32, 1),
+        sessionId: List.filled(16, 2),
+        localPeerId: PeerId(List.filled(16, 5)),
+        remotePeerId: PeerId(List.filled(16, 6)),
+        keepaliveTiming: KeepaliveTiming.negotiate(2000, 2000),
+        monotonicNowMs: () => nowMs);
+    nowMs = 6000;
+    await lost.pollKeepalive();
+    expect(lost.state, PeerConnectionState.reconnecting);
+  });
+
+  test('UT-163 live core retransmits ACK-required operations on deadline',
+      () async {
+    var nowMs = 0;
+    final backend = _Backend();
+    final peer = PeerConnectionCore(
+        backend: backend,
+        sessionRootKey: List.filled(32, 1),
+        sessionId: List.filled(16, 2),
+        localPeerId: PeerId(List.filled(16, 3)),
+        remotePeerId: PeerId(List.filled(16, 4)),
+        monotonicNowMs: () => nowMs);
+    final messageId = List.filled(8, 9);
+    await peer.submitAckRequiredFrame(
+        type: FrameType.membershipSnapshot,
+        payload: [7],
+        messageId: messageId,
+        nowMs: nowMs);
+
+    nowMs = 2999;
+    await peer.pollAckTimeouts();
+    expect(backend.writes, hasLength(1));
+    nowMs = 3000;
+    await peer.pollAckTimeouts();
+    expect(backend.writes, hasLength(2));
+    nowMs = 6000;
+    await peer.pollAckTimeouts();
+    expect(backend.writes, hasLength(3));
+    nowMs = 9000;
+    await peer.pollAckTimeouts();
+    expect(backend.writes, hasLength(3));
+    expect(peer.ackRetention.length, 0);
+  });
+
   test('PeerConnection sends generic ACK with mandated zero header fields',
       () async {
     final aBackend = _Backend();
@@ -563,7 +750,7 @@ void main() {
         sessionId: List.filled(16, 2),
         localPeerId: PeerId(List.filled(16, 3)),
         remotePeerId: PeerId(List.filled(16, 4)));
-    expect(await peer.submitEncrypted(FrameType.ping, [7]),
+    expect(await peer.submitEncrypted(FrameType.data, [7]),
         TransportWriteState.failed);
     await Future<void>.delayed(Duration.zero);
     expect(peer.state, PeerConnectionState.reconnecting);
@@ -582,7 +769,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(peer.state, PeerConnectionState.reconnecting);
     await expectLater(
-        peer.submitEncrypted(FrameType.ping, [7]),
+        peer.submitEncrypted(FrameType.data, [7]),
         throwsA(isA<LpcException>()
             .having((error) => error.code, 'code', LpcErrorCode.invalidState)));
   });
@@ -610,7 +797,7 @@ void main() {
     expect(events, hasLength(1));
     expect(events.single, isA<DiscoveryStopped>());
     expect(peer.state, PeerConnectionState.ready);
-    expect(await peer.submitEncrypted(FrameType.ping, [1]),
+    expect(await peer.submitEncrypted(FrameType.data, [1]),
         TransportWriteState.submittedToPlatform);
     await subscription.cancel();
   });
@@ -624,8 +811,8 @@ void main() {
         sessionId: List.filled(16, 2),
         localPeerId: PeerId(List.filled(16, 3)),
         remotePeerId: PeerId(List.filled(16, 4)));
-    final first = peer.submitEncrypted(FrameType.ping, [1]);
-    final second = peer.submitEncrypted(FrameType.pong, [2]);
+    final first = peer.submitEncrypted(FrameType.data, [1]);
+    final second = peer.submitEncrypted(FrameType.data, [2]);
     await Future<void>.delayed(Duration.zero);
     backend.controller.add(const BackendClosed());
     expect(await first, TransportWriteState.failed);
@@ -650,7 +837,7 @@ void main() {
     expect(peer.state, PeerConnectionState.reconnecting);
     expect(
         peer.ackRetention.onTimer(id, nowMs: 10000), AckTimeoutResult.ignored);
-    await expectLater(peer.submitEncrypted(FrameType.ping, [1]),
+    await expectLater(peer.submitEncrypted(FrameType.data, [1]),
         throwsA(isA<LpcException>()));
   });
 
@@ -663,11 +850,11 @@ void main() {
         sessionId: List.filled(16, 2),
         localPeerId: PeerId(List.filled(16, 3)),
         remotePeerId: PeerId(List.filled(16, 4)));
-    await peer.submitEncrypted(FrameType.ping, [1]);
+    await peer.submitEncrypted(FrameType.data, [1]);
     peer.beginReconnect();
     peer.completeResume(
         newGeneration: 2, resumedSessionRootKey: List.filled(32, 5));
-    await peer.submitEncrypted(FrameType.ping, [2]);
+    await peer.submitEncrypted(FrameType.data, [2]);
 
     final resumedFrame = LpcFrame.decode(backend.writes.last);
     expect(resumedFrame.transportGeneration, 2);

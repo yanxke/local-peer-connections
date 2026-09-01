@@ -108,8 +108,13 @@ class KeepaliveController {
       throw const LpcException(LpcErrorCode.invalidState, 'no pending PING');
     }
     _pendingPing = null;
-    _tracker.encryptedFrameSent(nowMs);
+    encryptedFrameSubmitted(nowMs);
   }
+
+  /// Any encrypted frame—not merely PING—resets the send-idle interval.
+  /// The owning PeerConnection calls this only at the Section 44 submission
+  /// boundary.
+  void encryptedFrameSubmitted(int nowMs) => _tracker.encryptedFrameSent(nowMs);
 
   /// A failed PING is not retried on the same failed transport generation.
   /// The owner will enter reconnecting through its terminal transport path.

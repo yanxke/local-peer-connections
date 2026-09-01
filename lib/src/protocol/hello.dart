@@ -6,8 +6,6 @@ enum HelloTopology { pointToPoint, explicitStar, autoGroup }
 
 enum HelloRole { host, client, peer }
 
-enum HandshakeTrustMode { knownPeer, sas, psk32, tofu }
-
 class HelloPayload {
   HelloPayload(
       {required this.peerId,

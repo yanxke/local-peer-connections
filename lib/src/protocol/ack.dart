@@ -145,6 +145,15 @@ class AckRetentionSet {
     return result;
   }
 
+  /// Snapshot of operations whose active ACK deadline has elapsed. The
+  /// operation-specific PeerConnection owner consumes each entry through
+  /// [onTimer], preserving its own complete-operation encoder.
+  List<Uint8List> dueMessageIds({required int nowMs}) =>
+      List.unmodifiable(_entries.values
+          .where(
+              (entry) => entry.deadlineMs != null && nowMs >= entry.deadlineMs!)
+          .map((entry) => Uint8List.fromList(entry.operation.messageId)));
+
   /// Pauses active ACK deadlines on transport loss. Retention remains intact
   /// for RESUME; no ACK timer is active while reconnecting.
   void transportLost() {

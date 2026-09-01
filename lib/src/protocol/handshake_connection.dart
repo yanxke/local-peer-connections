@@ -8,6 +8,7 @@ import 'control_payload.dart';
 import 'crypto.dart';
 import 'frame.dart';
 import 'handshake_exchange.dart';
+import 'handshake_orchestrator.dart';
 import 'reliability.dart';
 
 /// Backend-bound Section 16 handshake driver.
@@ -23,6 +24,8 @@ class HandshakeConnection {
     required this.exchange,
     required this.localPeerId,
     PeerId? remotePeerId,
+    this.onSasRequired,
+    this.candidateOnly = false,
   }) : expectedRemotePeerId = remotePeerId;
 
   final BackendConnection backend;
@@ -33,13 +36,23 @@ class HandshakeConnection {
   /// This optional value is a policy assertion for callers that already know
   /// the peer, never a substitute for the authenticated HELLO identity.
   final PeerId? expectedRemotePeerId;
+  final void Function(PeerId peerId, String sas)? onSasRequired;
+
+  /// Section 26.1 candidate handshakes authenticate HELLO/AUTH but must not
+  /// send normal READY; their owner immediately starts candidate RESUME.
+  final bool candidateOnly;
   final Completer<PeerConnectionCore> _ready = Completer<PeerConnectionCore>();
+  final Completer<HandshakeResult> _authenticated =
+      Completer<HandshakeResult>();
   StreamSubscription<BackendConnectionEvent>? _subscription;
   bool _started = false;
   bool _localReadySubmitted = false;
   bool _remoteReadyAuthenticated = false;
+  bool _sasNotified = false;
+  Timer? _sasTimeout;
 
   Future<PeerConnectionCore> get ready => _ready.future;
+  Future<HandshakeResult> get authenticated => _authenticated.future;
 
   PeerId get remotePeerId {
     final peerId = exchange.remoteHello?.peerId;
@@ -77,6 +90,8 @@ class HandshakeConnection {
   /// Confirms an SAS-authenticated exchange and, when accepted, starts READY.
   Future<void> confirmSas(bool accepted) async {
     try {
+      _sasTimeout?.cancel();
+      _sasTimeout = null;
       exchange.confirmSas(accepted);
       await _sendReadyIfAuthenticated();
     } catch (error, stackTrace) {
@@ -106,6 +121,7 @@ class HandshakeConnection {
           }
           await _send(await exchange.createAuth());
         }
+        _notifySasIfRequired();
         await _sendReadyIfAuthenticated();
         return;
       }
@@ -115,10 +131,27 @@ class HandshakeConnection {
     }
   }
 
+  void _notifySasIfRequired() {
+    if (_sasNotified ||
+        exchange.state != HandshakeExchangeState.awaitingSasConfirmation) {
+      return;
+    }
+    _sasNotified = true;
+    _sasTimeout = Timer(const Duration(seconds: 30), () {
+      _fail(const LpcException(
+          LpcErrorCode.authenticationFailed, 'SAS verification timed out'));
+    });
+    onSasRequired?.call(remotePeerId, exchange.result!.sas!);
+  }
+
   Future<void> _sendReadyIfAuthenticated() async {
     if (exchange.state != HandshakeExchangeState.authenticated ||
         _localReadySubmitted ||
         _ready.isCompleted) {
+      return;
+    }
+    if (candidateOnly) {
+      await _completeCandidateHandshake();
       return;
     }
     final result = exchange.result!;
@@ -142,6 +175,12 @@ class HandshakeConnection {
     }
     _localReadySubmitted = true;
     await _completeIfReady();
+  }
+
+  Future<void> _completeCandidateHandshake() async {
+    if (_authenticated.isCompleted) return;
+    await _subscription?.cancel();
+    _authenticated.complete(exchange.result!);
   }
 
   Future<void> _receiveReady(LpcFrame frame) async {
@@ -177,8 +216,11 @@ class HandshakeConnection {
         backend: backend,
         sessionRootKey: exchange.result!.secrets.sessionRootKey,
         sessionId: exchange.result!.secrets.sessionId,
+        resumeSecret: exchange.result!.secrets.resumeSecret,
         localPeerId: localPeerId,
         remotePeerId: remotePeerId,
+        securityLevel: exchange.result!.createReady().securityLevel,
+        keepaliveTiming: exchange.result!.keepaliveTiming,
         messageIdAllocator: MessageIdAllocator(
             List<int>.generate(4, (_) => Random.secure().nextInt(256))),
         initialNextSequence: 2,
@@ -196,7 +238,12 @@ class HandshakeConnection {
       backend.write(frame.encode()).completion;
 
   Future<void> _closeWithError(Object error, [StackTrace? stackTrace]) async {
+    _sasTimeout?.cancel();
+    _sasTimeout = null;
     if (!_ready.isCompleted) _ready.completeError(error, stackTrace);
+    if (candidateOnly && !_authenticated.isCompleted) {
+      _authenticated.completeError(error, stackTrace);
+    }
     await _subscription?.cancel();
     await backend.close();
   }

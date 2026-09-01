@@ -42,7 +42,8 @@ class _Backend implements BackendConnection {
   }
 }
 
-Future<HandshakeExchange> _exchange(int identitySeed, int ephemeralSeed) async {
+Future<HandshakeExchange> _exchange(int identitySeed, int ephemeralSeed,
+    {HandshakeTrustMode trustMode = HandshakeTrustMode.tofu}) async {
   final identity =
       await Ed25519().newKeyPairFromSeed(List.filled(32, identitySeed));
   final ephemeral =
@@ -58,10 +59,11 @@ Future<HandshakeExchange> _exchange(int identitySeed, int ephemeralSeed) async {
           connectionNonce: List.filled(16, identitySeed),
           peerCapabilities: 3,
           keepaliveIntervalMs: identitySeed == 1 ? 1000 : 2000,
-          trustMode: HandshakeTrustMode.tofu),
+          trustMode: trustMode),
       localIdentityKeyPair: identity,
       localEphemeralKeyPair: ephemeral,
-      tofuStore: TofuIdentityStore());
+      tofuStore:
+          trustMode == HandshakeTrustMode.tofu ? TofuIdentityStore() : null);
 }
 
 void main() {
@@ -91,6 +93,8 @@ void main() {
 
     expect(cores.map((core) => core.state),
         everyElement(PeerConnectionState.ready));
+    expect(cores.map((core) => core.securityLevel),
+        everyElement(SecurityLevel.encryptedTofu));
     expect(exchangeA.result!.keepaliveTiming.intervalMs, 2000);
     expect(exchangeB.result!.keepaliveTiming.intervalMs, 2000);
     expect(exchangeA.result!.keepaliveTiming.deadTimeoutMs, 6000);
@@ -105,14 +109,14 @@ void main() {
       expect(readyFrames.single.transportGeneration, 1);
       expect(readyFrames.single.sequenceNumber, 1);
     }
-    await cores[0].submitEncrypted(FrameType.ping, [9]);
+    await cores[0].submitEncrypted(FrameType.data, [9]);
     expect(LpcFrame.decode(backendA.writes.last).sequenceNumber, 2);
 
     final replayedReadySequence = await _encryptedFrame(
         exchangeB.result!,
         exchangeB.localHello.peerId,
         exchangeA.localHello.peerId,
-        FrameType.ping,
+        FrameType.data,
         1,
         [1]);
     expect(await cores[0].receiveEncrypted(replayedReadySequence), isNull);
@@ -120,10 +124,83 @@ void main() {
         exchangeB.result!,
         exchangeB.localHello.peerId,
         exchangeA.localHello.peerId,
-        FrameType.ping,
+        FrameType.data,
         2,
         [2]);
     expect((await cores[0].receiveEncrypted(nextInbound))!.payload, [2]);
+  });
+
+  test('UT-169 SAS handshake exposes both verification values before READY',
+      () async {
+    final backendA = _Backend('sas-a');
+    final backendB = _Backend('sas-b');
+    backendA.remote = backendB;
+    backendB.remote = backendA;
+    final exchangeA =
+        await _exchange(11, 13, trustMode: HandshakeTrustMode.sas);
+    final exchangeB =
+        await _exchange(12, 14, trustMode: HandshakeTrustMode.sas);
+    String? sasA;
+    String? sasB;
+    late final HandshakeConnection a;
+    late final HandshakeConnection b;
+    a = HandshakeConnection(
+        backend: backendA,
+        exchange: exchangeA,
+        localPeerId: exchangeA.localHello.peerId,
+        onSasRequired: (_, sas) {
+          sasA = sas;
+          unawaited(a.confirmSas(true));
+        });
+    b = HandshakeConnection(
+        backend: backendB,
+        exchange: exchangeB,
+        localPeerId: exchangeB.localHello.peerId,
+        onSasRequired: (_, sas) {
+          sasB = sas;
+          unawaited(b.confirmSas(true));
+        });
+
+    await Future.wait([a.start(), b.start()]);
+    final cores = await Future.wait([a.ready, b.ready])
+        .timeout(const Duration(seconds: 2));
+
+    expect(sasA, isNotNull);
+    expect(sasA, sasB);
+    expect(cores.map((core) => core.securityLevel),
+        everyElement(SecurityLevel.authenticatedSas));
+  });
+
+  test('UT-177 candidate handshake authenticates without normal READY',
+      () async {
+    final backendA = _Backend('candidate-a');
+    final backendB = _Backend('candidate-b');
+    backendA.remote = backendB;
+    backendB.remote = backendA;
+    final exchangeA = await _exchange(21, 23);
+    final exchangeB = await _exchange(22, 24);
+    final a = HandshakeConnection(
+        backend: backendA,
+        exchange: exchangeA,
+        localPeerId: exchangeA.localHello.peerId,
+        candidateOnly: true);
+    final b = HandshakeConnection(
+        backend: backendB,
+        exchange: exchangeB,
+        localPeerId: exchangeB.localHello.peerId,
+        candidateOnly: true);
+
+    await Future.wait([a.start(), b.start()]);
+    final results = await Future.wait([a.authenticated, b.authenticated])
+        .timeout(const Duration(seconds: 2));
+
+    expect(results.map((result) => result.secrets.sessionRootKey),
+        everyElement(isNotEmpty));
+    expect(
+        [...backendA.writes, ...backendB.writes]
+            .map(LpcFrame.decode)
+            .where((frame) => frame.type == FrameType.ready),
+        isEmpty);
   });
 }
 

@@ -24,7 +24,8 @@ Implemented:
 - [x] Protocol constants, fixed frame header, frame-type registry, and bounds checks
 - [x] PeerId derivation from an Ed25519 public key
 - [x] GATT fragment envelope parsing/serialization with START/END flags, per-frame uint32 sequences, bounded payloads, and expiry-aware reassembly
-- [x] Group/runtime configuration validation
+- [x] Group/runtime configuration validation, including SAS-by-default low-level trust, PSK_32 and KNOWN_PEER credential validation
+- [x] Runtime transport enablement flags enforced at public GATT discovery, host, and connection entry points
 - [x] Serialized GroupSession snapshots, deterministic broadcast target snapshots, and event dispatch foundation
 - [x] BroadcastHandle and RealtimeBroadcastHandle aggregate lifecycle state, completion, and local cancellation
 - [x] Serialized GroupSession callbacks with reentrant public-method command queuing
@@ -33,10 +34,12 @@ Implemented:
 - [x] ChaCha20-Poly1305 frame protection, Section 17 AAD/nonce layout, and traffic-key derivation
 - [x] HELLO/AUTH plaintext frame envelopes, HELLO codec (including negotiated keepalive input), transcript/base-root/session derivation, and SAS formatting primitives
 - [x] Serialized HELLO/AUTH handshake controller with version-mismatch close and explicit SAS confirmation gate
+- [x] Runtime/HostSession SAS verification events and explicit confirmation APIs, with the required 30-second authentication timeout and runtime-scoped TOFU continuity
 - [x] X25519 shared-secret, Ed25519 AUTH signing/verification, and in-memory TOFU continuity helper
 - [x] Android/iOS protected persistent Ed25519 key-storage adapter (Android Keystore-encrypted seed; iOS device-only Keychain seed)
 - [x] READY agreement validation, exact pre-key `ERROR(PROTOCOL_MISMATCH)` codec, and encrypted-generation receive-sequence window
 - [x] Backend-driven portable HELLO/AUTH/READY PeerConnection lifecycle with encrypted READY gating and sequence-2 handoff to the authenticated core
+- [x] Fresh candidate-only HELLO/AUTH mode for Section 26 reconnects; it exposes the authenticated candidate transcript/secrets without emitting normal READY
 - [x] Android/iOS service-UUID-only BLE advertising/scanning bridge with platform endpoint events and stable error mapping
 - [x] Android/iOS Section 11 GATT service host with canonical RX/TX/CONTROL UUID derivation
 - [x] Android/iOS GATT client connection and Section 11 service/characteristic discovery validation
@@ -85,21 +88,26 @@ Implemented:
 - [x] Checkpoint reassembly, collision detection, expiry, and generation-loss discard
 - [x] Exact PeerConnection lifecycle transition guard
 - [x] Portable backend connection/write-completion contract
+- [x] Runtime ownership and idempotent cascade-close of connection attempts and authenticated PeerConnections
+- [x] Public PeerConnection identity/session diagnostics, authenticated security level, active transport, direct reliable send, latest-only realtime send/receive streams, and disconnect lifecycle
+- [x] PeerConnection lifecycle event stream for committed reconnecting, reconnected, and disconnected transitions
+- [x] Authenticated DATA framing/commit boundary before application callbacks, with terminal malformed-frame handling
+- [x] Explicit HostSession authenticated-peer snapshot and direct unicast/broadcast send entry points
 - [x] Authenticated PeerConnection frame submission through backend completion and generation-wide terminal-write failure handling
 - [x] Bounded per-peer scheduler with realtime coalescing, expiry removal, and fairness
-- [x] Keepalive timing negotiation, exact PING/PONG payload, timer-free liveness bookkeeping, and deterministic pending-PING controller
-- [x] RESUME request/accept proofs and payload codecs, resumed-root rotation, and RESUME_READY codec
+- [x] Keepalive timing negotiation, exact PING/PONG payload, authenticated liveness bookkeeping, deterministic pending-PING controller, and automatic live-connection PING/PONG/dead-time polling
+- [x] Backend-bound candidate RESUME request/accept/reject exchange with generation-0 candidate encryption, resumed-root rotation, and bidirectional RESUME_READY gating
 - [x] Deterministic Section 25 reconnect-attempt backoff/timeout schedule primitive
 - [x] Section 28 UPGRADE_OFFER/ACCEPT/REJECT, candidate BIND/ACK, and SWITCH payload codecs; binding-proof verification; and failure-phase lifecycle guard
 - [x] Section 29 TCP endpoint and Section 30 L2CAP PSM upgrade-data codecs
 - [x] Section 22.4 UDP sidecar offer/accept/close codecs and directional key derivation
 - [x] Section 22.4 LPU1 encrypted packet codec, independent UDP sequence allocator, 256-packet replay window, and probe activation controller
 - [x] Binary vector for HELLO keepalive negotiation and unit tests for implemented binary/layout and lifecycle rules
+- [x] Native BLE GATT client I/O, Dart fragment binding, and permission-request UX
 
 Not implemented yet (and therefore not claimable as V1.1 conformance):
 
-- [ ] Native BLE GATT client I/O, Dart fragment binding, and permission-request UX
-- [ ] Automatic PeerConnection timers/retransmission, reconnect orchestration, and complete RESUME lifecycle (state guard, retention, terminal transport-loss, and codec primitives are implemented)
+- [ ] Complete reconnect and RESUME lifecycle (outbound GATT reconnect now uses the Section 25 schedule, fresh KNOWN_PEER candidate handshake, candidate RESUME, core rebind, and direct-operation recovery; inbound candidate-session matching and group-operation recovery remain)
 - [ ] Automatic discovery-driven formation, timed election, merge application, and coordinator migration
 - [ ] End-to-end GroupSession/PeerConnection routing: live authenticated frame dispatch, hop ACK emission, scheduler submission, relay signaling, and automatic reroute after RESUME or coordinator migration
 - [ ] L2CAP, LAN TCP, and authenticated UDP sidecar upgrades

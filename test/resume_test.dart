@@ -1,5 +1,34 @@
+import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:local_peer_connections/local_peer_connections.dart';
+
+class _ResumeBackend implements BackendConnection {
+  _ResumeBackend(this.connectionId);
+  @override
+  final String connectionId;
+  _ResumeBackend? remote;
+  final writes = <Uint8List>[];
+  final _events = StreamController<BackendConnectionEvent>.broadcast();
+  @override
+  TransportType get transportType => TransportType.gatt;
+  @override
+  TransportConnectionState get state => TransportConnectionState.open;
+  @override
+  int get maxWriteSize => 512;
+  @override
+  Stream<BackendConnectionEvent> get events => _events.stream;
+  @override
+  Future<void> close() async {}
+  @override
+  TransportWrite write(Uint8List frame) {
+    writes.add(frame);
+    final write = TransportWrite()..submittedToPlatform();
+    Future<void>.microtask(
+        () => remote!._events.add(BackendBytesReceived(frame)));
+    return write;
+  }
+}
 
 void main() {
   test('UT-023 candidate RESUME frame uses generation zero and candidate key',
@@ -110,5 +139,95 @@ void main() {
         generation: 2);
     expect(one.sessionRootKey, isNot(two.sessionRootKey));
     expect(one.resumeSecret, isNot(two.resumeSecret));
+  });
+
+  test('UT-173 candidate exchange gates success on both RESUME_READY frames',
+      () async {
+    final aBackend = _ResumeBackend('a');
+    final bBackend = _ResumeBackend('b');
+    aBackend.remote = bBackend;
+    bBackend.remote = aBackend;
+    final a = CandidateResumeConnection(
+        backend: aBackend,
+        candidateSessionRootKey: List.filled(32, 1),
+        candidateSessionId: List.filled(16, 2),
+        candidateTranscript: List.filled(32, 3),
+        localPeerId: PeerId(List.filled(16, 4)),
+        remotePeerId: PeerId(List.filled(16, 5)),
+        previousSessionId: List.filled(16, 6),
+        previousResumeSecret: List.filled(32, 7),
+        previousGeneration: 1,
+        requester: true,
+        randomNonce: () => List.filled(16, 8));
+    final b = CandidateResumeConnection(
+        backend: bBackend,
+        candidateSessionRootKey: List.filled(32, 1),
+        candidateSessionId: List.filled(16, 2),
+        candidateTranscript: List.filled(32, 3),
+        localPeerId: PeerId(List.filled(16, 5)),
+        remotePeerId: PeerId(List.filled(16, 4)),
+        previousSessionId: List.filled(16, 6),
+        previousResumeSecret: List.filled(32, 7),
+        previousGeneration: 1,
+        requester: false,
+        randomNonce: () => List.filled(16, 9));
+
+    await b.start();
+    await a.start();
+    final sessions = await Future.wait([a.completed, b.completed])
+        .timeout(const Duration(seconds: 2));
+
+    expect(sessions.map((session) => session.sessionId),
+        everyElement(List.filled(16, 6)));
+    expect(sessions.map((session) => session.generation), everyElement(2));
+    expect(aBackend.writes.map(LpcFrame.decode).map((frame) => frame.type),
+        [FrameType.resumeRequest, FrameType.resumeReady]);
+    expect(bBackend.writes.map(LpcFrame.decode).map((frame) => frame.type),
+        [FrameType.resumeAccept, FrameType.resumeReady]);
+    expect(LpcFrame.decode(aBackend.writes[0]).transportGeneration, 0);
+    expect(LpcFrame.decode(aBackend.writes[1]).transportGeneration, 2);
+  });
+
+  test('UT-174 an unresumable request receives candidate RESUME_REJECT',
+      () async {
+    final aBackend = _ResumeBackend('a');
+    final bBackend = _ResumeBackend('b');
+    aBackend.remote = bBackend;
+    bBackend.remote = aBackend;
+    final a = CandidateResumeConnection(
+        backend: aBackend,
+        candidateSessionRootKey: List.filled(32, 1),
+        candidateSessionId: List.filled(16, 2),
+        candidateTranscript: List.filled(32, 3),
+        localPeerId: PeerId(List.filled(16, 4)),
+        remotePeerId: PeerId(List.filled(16, 5)),
+        previousSessionId: List.filled(16, 6),
+        previousResumeSecret: List.filled(32, 7),
+        previousGeneration: 1,
+        requester: true,
+        randomNonce: () => List.filled(16, 8));
+    final b = CandidateResumeConnection(
+        backend: bBackend,
+        candidateSessionRootKey: List.filled(32, 1),
+        candidateSessionId: List.filled(16, 2),
+        candidateTranscript: List.filled(32, 3),
+        localPeerId: PeerId(List.filled(16, 5)),
+        remotePeerId: PeerId(List.filled(16, 4)),
+        previousSessionId: List.filled(16, 6),
+        previousResumeSecret: List.filled(32, 9),
+        previousGeneration: 1,
+        requester: false,
+        randomNonce: () => List.filled(16, 10));
+
+    await b.start();
+    await a.start();
+    final rejected = isA<LpcException>()
+        .having((error) => error.code, 'code', LpcErrorCode.resumeRejected);
+    await Future.wait([
+      expectLater(a.completed, throwsA(rejected)),
+      expectLater(b.completed, throwsA(rejected)),
+    ]);
+    expect(
+        LpcFrame.decode(bBackend.writes.single).type, FrameType.resumeReject);
   });
 }

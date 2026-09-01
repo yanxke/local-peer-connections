@@ -165,7 +165,16 @@ class BroadcastHandle {
 }
 
 class RealtimeSendHandle extends SendHandle {
-  RealtimeSendHandle._(SendState state) : super._(state);
+  RealtimeSendHandle._(SendState state, {void Function()? onCancel})
+      : super._(state, onCancel: onCancel);
+}
+
+class RealtimeSendHandleController {
+  RealtimeSendHandleController.queued({void Function()? onCancel})
+      : handle = RealtimeSendHandle._(SendState.queued, onCancel: onCancel);
+  final RealtimeSendHandle handle;
+  void transmitting() => handle._transition(SendState.transmitting);
+  void complete(SendState state) => handle._complete(state);
 }
 
 class RealtimeBroadcastHandle {
