@@ -73,7 +73,7 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     case "listenGatt":
       backend(call, result) { arguments in
         try self.requirePoweredOn(self.peripheral.state)
-        self.listenGatt(try self.serviceUuid(arguments))
+        try self.listenGatt(try self.serviceUuid(arguments))
       }
     case "stopGatt":
       peripheral.removeAllServices(); gattService = nil; gattServerCentrals.removeAll(); result(nil)
@@ -286,7 +286,7 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
       throw BackendError("ENDPOINT_LOST", "unknown GATT connection")
     }
     if let central = gattServerCentrals[identifier], let service = gattService,
-       let tx = service.characteristics?.first(where: { $0.uuid == (try? characteristicUuid(service.uuid, increment: 2)) }) {
+       let tx = service.characteristics?.first(where: { $0.uuid == (try? characteristicUuid(service.uuid, increment: 2)) }) as? CBMutableCharacteristic {
       return peripheral.updateValue(fragment.data, for: tx, onSubscribedCentrals: [central])
         ? "submitted" : "temporarilyUnavailable"
     }
@@ -328,7 +328,14 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     default: throw BackendError("BLUETOOTH_UNAVAILABLE", "Bluetooth is unavailable")
     }
   }
-  private struct BackendError: Error { let code: String; let message: String }
+  private struct BackendError: Error {
+    let code: String
+    let message: String
+    init(_ code: String, _ message: String? = nil) {
+      self.code = code
+      self.message = message ?? code
+    }
+  }
 
   private func loadOrCreateSeed() throws -> Data {
     let query: [CFString: Any] = [
