@@ -242,6 +242,11 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   /// owner of fragment framing and LPC protocol state.
   private func listenGatt(_ serviceUuid: CBUUID) throws {
     peripheral.removeAllServices()
+    // The peripheral-side RX callback derives the exact service
+    // characteristics from this value.  Discovery also sets this field for
+    // central connections, but a peripheral-only host never starts scanning.
+    // Without this assignment every valid incoming RX write was rejected.
+    activeServiceUuid = serviceUuid
     let service = CBMutableService(type: serviceUuid, primary: true)
     let rx = CBMutableCharacteristic(
       type: try characteristicUuid(serviceUuid, increment: 1),

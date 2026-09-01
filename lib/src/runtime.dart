@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'backend.dart';
 import 'gatt_backend_connection.dart';
@@ -7,16 +9,31 @@ import 'group.dart';
 import 'identity_store.dart';
 import 'platform_ble_backend.dart';
 import 'protocol/capabilities.dart';
+import 'protocol/connection_rank.dart';
 import 'protocol/application_payload.dart';
+import 'protocol/ack.dart';
 import 'protocol/auth.dart';
 import 'protocol/control_payload.dart';
 import 'protocol/frame.dart';
 import 'protocol/handshake_connection.dart';
 import 'protocol/handshake_exchange.dart';
+import 'protocol/handshake_orchestrator.dart';
 import 'protocol/hello.dart';
 import 'protocol/peer_state.dart';
 import 'protocol/reconnect.dart';
 import 'protocol/resume.dart';
+import 'protocol/group_reliable.dart';
+import 'protocol/group_realtime.dart';
+import 'protocol/group_routing_send.dart';
+import 'protocol/group_member_router.dart';
+import 'protocol/group_destination_router.dart';
+import 'protocol/group_coordinator_router.dart';
+import 'protocol/group_routing_validation.dart';
+import 'protocol/coordinator_relay_controller.dart';
+import 'protocol/group_relay.dart';
+import 'protocol/group_signaling.dart';
+import 'protocol/group_merge.dart';
+import 'protocol/membership.dart';
 import 'peer_connection_core.dart';
 import 'types.dart';
 
@@ -205,6 +222,8 @@ class PeerConnection {
       StreamController<PeerRealtimeDatagramReceived>.broadcast(sync: true);
   final StreamController<PeerConnectionEvent> _events =
       StreamController<PeerConnectionEvent>.broadcast(sync: true);
+  final StreamController<LpcFrame> _groupFrames =
+      StreamController<LpcFrame>.broadcast(sync: true);
   final Map<int, _QueuedRealtime> _queuedRealtime = <int, _QueuedRealtime>{};
   bool _submittingRealtime = false;
   bool _disconnected = false;
@@ -217,6 +236,7 @@ class PeerConnection {
   Stream<PeerRealtimeDatagramReceived> get realtimeMessages =>
       _realtimeMessages.stream;
   Stream<PeerConnectionEvent> get events => _events.stream;
+  Stream<LpcFrame> get groupFrames => _groupFrames.stream;
   SendHandle send(List<int> bytes,
       {SendOptions options = const SendOptions()}) {
     if (_disconnected || _core.state != PeerConnectionState.ready) {
@@ -271,11 +291,21 @@ class PeerConnection {
     _events.add(PeerDisconnected(_core.monotonicNowMs));
     await _messages.close();
     await _realtimeMessages.close();
+    await _groupFrames.close();
     await _events.close();
     _onDisconnected?.call(this);
   }
 
   void _onFrame(LpcFrame frame) {
+    if (frame.type == FrameType.groupReliable ||
+        frame.type == FrameType.groupRealtimeDatagram ||
+        frame.type == FrameType.groupDeliveryAck ||
+        frame.type == FrameType.groupRelayStatus ||
+        frame.type == FrameType.groupInfo ||
+        frame.type == FrameType.membershipSnapshot) {
+      _groupFrames.add(frame);
+      return;
+    }
     if (frame.type == FrameType.realtimeDatagram) {
       final datagram = _core.receiveRealtime(frame);
       if (datagram != null) {
@@ -564,6 +594,56 @@ class _GattReconnect {
   }
 }
 
+/// Physical-link facts can change after RESUME.  Only a local GATT central
+/// owns a platform endpoint that may be passed back to `connectGatt`.
+class _GattLink {
+  _GattLink(this.endpointId, this.localCanInitiateReconnect);
+  String endpointId;
+  bool localCanInitiateReconnect;
+}
+
+/// The only GroupConfig information that must be selected before HELLO on a
+/// shared service advertisement (Section 32.3.1). Namespace and join scope
+/// are deliberately excluded: they are authenticated GROUP_INFO data.
+class _AutoGroupHandshakeProfile {
+  _AutoGroupHandshakeProfile(GroupConfig config)
+      : trustMode = switch (config.groupTrustMode) {
+          GroupTrustMode.openTofu => HandshakeTrustMode.tofu,
+          GroupTrustMode.groupPsk32 => HandshakeTrustMode.psk32,
+          GroupTrustMode.pairwiseSas => HandshakeTrustMode.sas,
+          GroupTrustMode.knownPeers => HandshakeTrustMode.knownPeer,
+        },
+        psk32 = config.groupPsk32 == null
+            ? null
+            : List<int>.unmodifiable(config.groupPsk32!),
+        allowedPeerIds = Set<PeerId>.unmodifiable(config.allowedPeerIds);
+
+  final HandshakeTrustMode trustMode;
+  final List<int>? psk32;
+  final Set<PeerId> allowedPeerIds;
+
+  KnownPeerPolicy? get knownPeerPolicy =>
+      trustMode == HandshakeTrustMode.knownPeer
+          ? AllowlistedPeers(allowedPeerIds)
+          : null;
+
+  bool matches(_AutoGroupHandshakeProfile other) {
+    if (trustMode != other.trustMode) return false;
+    if (!_sameBytes(psk32, other.psk32)) return false;
+    return allowedPeerIds.length == other.allowedPeerIds.length &&
+        allowedPeerIds.containsAll(other.allowedPeerIds);
+  }
+}
+
+bool _sameBytes(List<int>? a, List<int>? b) {
+  if (a == null || b == null) return a == null && b == null;
+  if (a.length != b.length) return false;
+  for (var index = 0; index < a.length; index++) {
+    if (a[index] != b[index]) return false;
+  }
+  return true;
+}
+
 /// Top-level owner for LPC objects. Native BLE implementations are attached via
 /// the platform backend; this portable core intentionally owns no BLE types.
 class NearbyRuntime {
@@ -582,9 +662,13 @@ class NearbyRuntime {
   final Map<String, ConnectionAttempt> _attempts = {};
   final Map<String, PlatformGattConnectionBinding> _gattBindings = {};
   final Map<String, _GattReconnect> _gattReconnects = {};
+  final Map<PeerConnection, _GattLink> _gattLinks = {};
+  final Map<PeerConnection, List<int>> _connectionRanks = {};
   final Set<PeerConnection> _peers = <PeerConnection>{};
   RuntimeState _state;
   final List<GroupSession> _groups = [];
+  final Map<GroupSession, _RuntimeGroupRouteTransport> _groupRouting = {};
+  _AutoGroupHandshakeProfile? _autoGroupProfile;
   final List<HostSession> _hosts = [];
   final Map<String, DiscoverySession> _discoveries = {};
   final Set<String> _startingDiscovery = {};
@@ -658,7 +742,9 @@ class NearbyRuntime {
     HostSession? host;
     if (attempt == null) {
       host = _advertisingHost;
-      if (host == null || !host.config.autoAccept) return;
+      final groupProfile = _autoGroupProfile;
+      if (host == null && groupProfile == null) return;
+      if (host != null && !host.config.autoAccept) return;
       final backend = _platformBleBackend!;
       attempt = ConnectionAttempt._(event.endpointId,
           () => backend.closeGattConnection(event.endpointId));
@@ -666,16 +752,24 @@ class NearbyRuntime {
         if (outcome is ConnectionAttemptConnected)
           host?._peerConnected(outcome.connection);
       });
+      if (host == null) {
+        unawaited(
+            _startGattHandshake(event, attempt, groupProfile: groupProfile));
+        return;
+      }
     }
     unawaited(_startGattHandshake(event, attempt, host: host));
   }
 
   Future<void> _startGattHandshake(
       PlatformGattConnected event, ConnectionAttempt attempt,
-      {HostSession? host}) async {
+      {HostSession? host, _AutoGroupHandshakeProfile? groupProfile}) async {
     final backend = _platformBleBackend!;
     final identity = _identity!;
     try {
+      // A platform may reuse an opaque endpoint after a disconnect.  Replace
+      // the old fragment-event binding before installing the new generation.
+      await _gattBindings.remove(event.endpointId)?.close();
       final connection = GattBackendConnection(
           connectionId: event.endpointId,
           platform: PlatformGattFragmentPlatform(
@@ -692,11 +786,17 @@ class NearbyRuntime {
           connection: connection);
       final ephemeral = await X25519().newKeyPair();
       final ephemeralPublic = await ephemeral.extractPublicKey();
-      final trustMode = host?.config.trustMode ?? config.trustMode;
+      final trustMode =
+          groupProfile?.trustMode ?? host?.config.trustMode ?? config.trustMode;
       late final HandshakeConnection handshake;
       handshake = HandshakeConnection(
           backend: connection,
           localPeerId: localPeerId,
+          // An accepted inbound physical link can be either an ordinary
+          // explicit-host connection or the responder side of Section 26
+          // reconnect.  Do not emit a normal READY before its first encrypted
+          // frame selects one of those two protocol paths.
+          acceptCandidateResume: host != null || groupProfile != null,
           exchange: HandshakeExchange(
               serviceUuid: config.serviceUuid,
               localHello: HelloPayload(
@@ -713,19 +813,39 @@ class NearbyRuntime {
                   trustMode: trustMode),
               localIdentityKeyPair: identity.keyPair,
               localEphemeralKeyPair: ephemeral,
-              knownPeerPolicy: _knownPeerPolicyFor(config, trustMode),
+              knownPeerPolicy: groupProfile?.knownPeerPolicy ??
+                  _knownPeerPolicyFor(config, trustMode),
               tofuStore:
                   trustMode == HandshakeTrustMode.tofu ? _tofuStore : null,
-              psk32: config.psk32),
+              psk32: groupProfile?.psk32 ?? config.psk32),
           onSasRequired: (peerId, sas) {
             attempt._verificationRequired(peerId, sas, handshake.confirmSas);
             host?._peerVerificationRequired(attempt, peerId, sas);
           });
       await handshake.start();
+      if (host != null || groupProfile != null) {
+        final outcome = await Future.any<Object>([
+          handshake.ready.then<Object>((core) => core),
+          handshake.authenticated.then<Object>((candidate) => candidate),
+        ]);
+        if (outcome is HandshakeResult) {
+          await _completeInboundGattResume(
+              event, connection, handshake, outcome);
+          return;
+        }
+        final core = outcome as PeerConnectionCore;
+        attempt._connected(await _ownPeer(core,
+            securityLevel:
+                handshake.exchange.result!.createReady().securityLevel,
+            gattEndpointId: event.endpointId,
+            connectionRank: await _rankFor(handshake)));
+        return;
+      }
       final core = await handshake.ready;
-      attempt._connected(_ownPeer(core,
+      attempt._connected(await _ownPeer(core,
           securityLevel: handshake.exchange.result!.createReady().securityLevel,
-          gattEndpointId: event.endpointId));
+          gattEndpointId: event.endpointId,
+          connectionRank: await _rankFor(handshake)));
     } on Object catch (error) {
       attempt._failed(_asLpcError(error));
       await _gattBindings.remove(event.endpointId)?.close();
@@ -733,8 +853,76 @@ class NearbyRuntime {
     }
   }
 
-  void _beginGattReconnect(PeerConnection peer, String endpointId) {
+  /// Completes the responder side of a fresh inbound candidate connection.
+  /// Matching is by the authenticated candidate PeerId plus a reconnecting
+  /// logical peer; the RESUME proof then binds the exact prior SessionId and
+  /// secret before any core state is reattached.
+  Future<void> _completeInboundGattResume(
+      PlatformGattConnected event,
+      GattBackendConnection connection,
+      HandshakeConnection handshake,
+      HandshakeResult candidate) async {
+    final candidates = _peers
+        .where((peer) =>
+            peer.peerId == handshake.remotePeerId &&
+            peer.state == PeerConnectionState.reconnecting)
+        .toList(growable: false);
+    if (candidates.length != 1) {
+      throw const LpcException(
+          LpcErrorCode.resumeRejected, 'no unique reconnecting logical peer');
+    }
+    final peer = candidates.single;
+    final previousEndpoint = _gattLinks[peer]?.endpointId;
+    final resume = CandidateResumeConnection(
+        backend: connection,
+        candidateSessionRootKey: candidate.secrets.sessionRootKey,
+        candidateSessionId: candidate.secrets.sessionId,
+        candidateTranscript: candidate.transcript,
+        localPeerId: localPeerId,
+        remotePeerId: peer.peerId,
+        previousSessionId: peer.sessionId,
+        previousResumeSecret: peer._core.resumeSecret,
+        previousGeneration: peer._core.generation,
+        requester: false,
+        initialEncodedFrame: await handshake.candidateInitialFrame);
+    await resume.start();
+    final resumed = await resume.completed;
+    peer._core.completeResume(
+        newGeneration: resumed.generation,
+        resumedSessionRootKey: resumed.sessionRootKey,
+        newResumeSecret: resumed.resumeSecret,
+        resumedBackend: connection);
+    await peer._core
+        .retransmitReliableDataAfterResume(nowMs: peer._core.monotonicNowMs);
+    await peer._core.retransmitAckRequiredFramesAfterResume(
+        nowMs: peer._core.monotonicNowMs);
+    await peer._core.retransmitAckRequiredCheckpointsAfterResume(
+        nowMs: peer._core.monotonicNowMs);
+    _gattLinks[peer] =
+        _GattLink(event.endpointId, event.localRole == 'central');
+    if (previousEndpoint != null && previousEndpoint != event.endpointId) {
+      await _gattBindings.remove(previousEndpoint)?.close();
+    }
+    _GattReconnect? reconnect;
+    for (final value in _gattReconnects.values) {
+      if (identical(value.peer, peer)) {
+        reconnect = value;
+        break;
+      }
+    }
+    if (reconnect != null) {
+      _gattReconnects.remove(reconnect.endpointId);
+      reconnect.dispose();
+    }
+  }
+
+  void _beginGattReconnect(PeerConnection peer) {
     if (!config.autoReconnect || _state != RuntimeState.ready) return;
+    final link = _gattLinks[peer];
+    // An inbound peripheral-side link exposes the remote central identifier,
+    // not a discovery endpoint.  The remote central owns the next attempt.
+    if (link == null || !link.localCanInitiateReconnect) return;
+    final endpointId = link.endpointId;
     final existing = _gattReconnects[endpointId];
     if (existing != null) return;
     final reconnect = _GattReconnect(
@@ -795,6 +983,7 @@ class NearbyRuntime {
       if (peer.state != PeerConnectionState.reconnecting) {
         throw const LpcException(LpcErrorCode.invalidState);
       }
+      final previousEndpoint = _gattLinks[peer]?.endpointId;
       await _gattBindings.remove(event.endpointId)?.close();
       final connection = GattBackendConnection(
           connectionId: event.endpointId,
@@ -857,6 +1046,13 @@ class NearbyRuntime {
           .retransmitReliableDataAfterResume(nowMs: peer._core.monotonicNowMs);
       await peer._core.retransmitAckRequiredFramesAfterResume(
           nowMs: peer._core.monotonicNowMs);
+      await peer._core.retransmitAckRequiredCheckpointsAfterResume(
+          nowMs: peer._core.monotonicNowMs);
+      _gattLinks[peer] =
+          _GattLink(event.endpointId, event.localRole == 'central');
+      if (previousEndpoint != null && previousEndpoint != event.endpointId) {
+        await _gattBindings.remove(previousEndpoint)?.close();
+      }
       _gattReconnects.remove(event.endpointId);
       reconnect.dispose();
     } on Object {
@@ -921,10 +1117,33 @@ class NearbyRuntime {
   GroupSession joinOrCreateGroup(GroupConfig config) {
     if (_state != RuntimeState.ready)
       throw const LpcException(LpcErrorCode.invalidState);
+    final profile = _AutoGroupHandshakeProfile(config);
+    final activeProfile = _autoGroupProfile;
+    if (activeProfile != null && !activeProfile.matches(profile)) {
+      throw const LpcException(LpcErrorCode.invalidState,
+          'active GroupSessions require one AUTO_GROUP handshake profile');
+    }
     final random = Random.secure();
     final group = GroupSession.internal(config, localPeerId,
         GroupId(List<int>.generate(16, (_) => random.nextInt(256))));
+    final routing = _RuntimeGroupRouteTransport(
+        group: group,
+        peers: () => Set.unmodifiable(_peers),
+        maxReservedBytesPerDestination: this.config.maxQueuedBytesPerPeer,
+        maxReservedMessagesPerDestination:
+            this.config.maxQueuedMessagesPerPeer);
+    _groupRouting[group] = routing;
     _groups.add(group);
+    _autoGroupProfile = profile;
+    // Keep an unconnected group usable by deterministic unit-test transports,
+    // but bind the production route owner as soon as Runtime has a live peer.
+    // A group with no authenticated peers cannot submit a live route anyway.
+    if (_peers.isNotEmpty) {
+      group.attachRouteTransport(routing);
+      for (final peer in _peers) {
+        routing.observePeer(peer);
+      }
+    }
     return group;
   }
 
@@ -998,9 +1217,11 @@ class NearbyRuntime {
     }
     _peers.clear();
     for (final group in List<GroupSession>.from(_groups)) {
+      _groupRouting.remove(group)?.dispose();
       group.close();
     }
     _groups.clear();
+    _autoGroupProfile = null;
     for (final host in List<HostSession>.from(_hosts)) {
       await host.close();
     }
@@ -1017,20 +1238,837 @@ class NearbyRuntime {
     _state = RuntimeState.closed;
   }
 
-  PeerConnection _ownPeer(PeerConnectionCore core,
-      {required SecurityLevel securityLevel, String? gattEndpointId}) {
+  Future<List<int>> _rankFor(HandshakeConnection handshake) async {
+    final remote = handshake.exchange.remoteHello;
+    if (remote == null) {
+      throw const LpcException(
+          LpcErrorCode.protocolMismatch, 'missing authenticated HELLO');
+    }
+    return connectionRank(
+        peerA: localPeerId,
+        peerB: remote.peerId,
+        connectionNonceA: handshake.exchange.localHello.connectionNonce,
+        connectionNonceB: remote.connectionNonce);
+  }
+
+  Future<PeerConnection> _ownPeer(PeerConnectionCore core,
+      {required SecurityLevel securityLevel,
+      String? gattEndpointId,
+      List<int>? connectionRank}) async {
+    final duplicate = _peers
+        .where((peer) =>
+            peer.peerId == core.remotePeerId &&
+            peer.state == PeerConnectionState.ready)
+        .toList(growable: false);
+    if (duplicate.isNotEmpty && connectionRank != null) {
+      final existing = duplicate.first;
+      final existingRank = _connectionRanks[existing];
+      if (existingRank != null &&
+          retainedConnectionRankIndex(existingRank, connectionRank) == 0) {
+        await core.close();
+        throw const LpcException(LpcErrorCode.duplicateConnection);
+      }
+      // Explicit disconnect prevents the losing physical link from starting
+      // a second automatic reconnect while the retained link is healthy.
+      await existing.disconnect();
+    }
     late final PeerConnection peer;
     peer = PeerConnection._(core, securityLevel: securityLevel,
         onDisconnected: (_) {
       _peers.remove(peer);
-      _gattReconnects.remove(gattEndpointId)?.dispose();
+      _connectionRanks.remove(peer);
+      final link = _gattLinks.remove(peer);
+      _gattReconnects.remove(link?.endpointId ?? gattEndpointId)?.dispose();
+      if (link != null) {
+        unawaited(_gattBindings.remove(link.endpointId)?.close());
+      }
     },
-        onReconnecting: gattEndpointId == null
-            ? null
-            : (_) => _beginGattReconnect(peer, gattEndpointId));
+        onReconnecting:
+            gattEndpointId == null ? null : (_) => _beginGattReconnect(peer));
     _peers.add(peer);
+    for (final entry in _groupRouting.entries) {
+      if (!entry.key.hasRouteTransport) {
+        entry.key.attachRouteTransport(entry.value);
+      }
+      entry.value.observePeer(peer);
+    }
+    if (connectionRank != null) {
+      _connectionRanks[peer] = List<int>.unmodifiable(connectionRank);
+    }
+    if (gattEndpointId != null && core.backend is GattBackendConnection) {
+      _gattLinks[peer] = _GattLink(
+          gattEndpointId,
+          (core.backend as GattBackendConnection).localRole ==
+              GattLinkRole.central);
+    }
     return peer;
   }
+}
+
+/// Runtime adapter for the Section 43 routing cores.  It owns no BLE API: all
+/// bytes enter and leave through authenticated [PeerConnection] instances.
+/// The coordinator-star decision is made from committed GroupSession state;
+/// a `send(destination, ...)` never opens a destination shortcut link.
+class _RuntimeGroupRouteTransport implements GroupRouteTransport {
+  _RuntimeGroupRouteTransport({
+    required this.group,
+    required this.peers,
+    required this.maxReservedBytesPerDestination,
+    required this.maxReservedMessagesPerDestination,
+  }) {
+    _timer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+      unawaited(_pollAckTimeouts());
+    });
+    _groupEvents = group.events.listen(_onGroupEvent);
+  }
+
+  final GroupSession group;
+  final Set<PeerConnection> Function() peers;
+  final int maxReservedBytesPerDestination;
+  final int maxReservedMessagesPerDestination;
+  late final Timer _timer;
+  late final StreamSubscription<GroupEvent> _groupEvents;
+  final Map<PeerConnection, StreamSubscription<LpcFrame>> _frameSubscriptions =
+      {};
+  final Map<PeerConnection, StreamSubscription<Uint8List>> _ackSubscriptions =
+      {};
+  final Map<PeerConnection, StreamSubscription<PeerConnectionEvent>>
+      _peerEventSubscriptions = {};
+  final Map<PeerConnection, GroupReliableReassembler> _reassemblers = {};
+  final MembershipSnapshotOrderTable _membershipOrdering =
+      MembershipSnapshotOrderTable();
+  final Map<PeerConnection, GroupInfoPayload> _remoteGroupInfo = {};
+  final Map<String, _LiveGroupHop> _ackHops = {};
+  final Map<GroupMessageId, SendHandleController> _sourceHandles = {};
+  GroupMemberRouter? _memberRouter;
+  GroupCoordinatorRouter? _coordinatorRouter;
+  GroupDestinationRouter? _destinationRouter;
+  String? _coordinatorView;
+  String? _destinationView;
+  bool _disposed = false;
+
+  void observePeer(PeerConnection peer) {
+    if (_disposed || _frameSubscriptions.containsKey(peer)) return;
+    _reassemblers[peer] = GroupReliableReassembler(
+        maxIncompleteMessages: 64, maxIncompleteBytes: 1048576);
+    _frameSubscriptions[peer] = peer.groupFrames.listen(
+        (frame) => unawaited(_receiveFrame(peer, frame)),
+        onError: (_) => _onPeerLost(peer));
+    _ackSubscriptions[peer] = peer._core.acknowledgedMessageIds
+        .listen((messageId) => unawaited(_receiveGenericAck(peer, messageId)));
+    _peerEventSubscriptions[peer] = peer.events.listen((event) {
+      if (event is PeerReconnecting) {
+        _reassemblers[peer]?.onTransportGenerationLost();
+      } else if (event is PeerReconnected) {
+        unawaited(_onPeerReconnected(peer));
+      } else if (event is PeerDisconnected) {
+        unawaited(_onPeerDisconnected(peer));
+      }
+    });
+    unawaited(_sendGroupInfo(peer));
+    if (!group.isCoordinator && peer.peerId == group.coordinatorPeerId) {
+      unawaited(_rerouteMemberOperations());
+    }
+  }
+
+  @override
+  void submitReliable(
+      RoutedGroupOperation operation, SendHandleController controller) {
+    _sourceHandles[operation.groupMessageId] = controller;
+    unawaited(() async {
+      try {
+        if (group.isCoordinator) {
+          await _admitLocalCoordinatorOperation(operation);
+          return;
+        }
+        final coordinator = group.coordinatorPeerId;
+        final peer = coordinator == null ? null : _readyPeer(coordinator);
+        if (peer == null) {
+          controller.complete(SendState.failed);
+          _sourceHandles.remove(operation.groupMessageId);
+          return;
+        }
+        _member().begin(operation);
+        await _submitHop(peer, operation,
+            finalHop: false, sourceOperation: operation);
+      } on Object {
+        controller.complete(SendState.failed);
+        _sourceHandles.remove(operation.groupMessageId);
+      }
+    }());
+  }
+
+  @override
+  void cancelReliable(GroupMessageId groupMessageId) {
+    _sourceHandles.remove(groupMessageId);
+    _memberRouter?.cancel(groupMessageId);
+    for (final entry in _ackHops.entries.toList()) {
+      if (entry.value.operation.groupMessageId != groupMessageId) continue;
+      entry.value.peer._core.ackRetention.cancel(entry.value.messageId);
+      _ackHops.remove(entry.key);
+    }
+  }
+
+  @override
+  void submitRealtime(
+      GroupRealtimeDatagram datagram, RealtimeSendHandleController controller) {
+    unawaited(() async {
+      try {
+        final target = group.isCoordinator
+            ? _readyPeer(datagram.destinationPeerId)
+            : _readyPeer(group.coordinatorPeerId!);
+        if (target == null) {
+          controller.complete(SendState.failed);
+          return;
+        }
+        final result = await target._core.submitEncrypted(
+            FrameType.groupRealtimeDatagram, datagram.encode());
+        controller.complete(result == TransportWriteState.submittedToPlatform
+            ? SendState.sentToTransport
+            : SendState.failed);
+      } on Object {
+        controller.complete(SendState.failed);
+      }
+    }());
+  }
+
+  GroupMemberRouter _member() {
+    final coordinator = group.coordinatorPeerId;
+    if (coordinator == null)
+      throw const LpcException(LpcErrorCode.invalidState);
+    final existing = _memberRouter;
+    if (existing != null &&
+        existing.validator.currentCoordinatorPeerId == coordinator) {
+      return existing;
+    }
+    return _memberRouter = GroupMemberRouter(
+        validator: _validator(coordinator),
+        sends: RoutedSendTable(localPeerId: group.localPeerId));
+  }
+
+  GroupCoordinatorRouter _coordinator() {
+    if (!group.isCoordinator) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    final view = _routingView(group.localPeerId);
+    final existing = _coordinatorRouter;
+    if (existing != null && _coordinatorView == view) return existing;
+    if (existing != null) {
+      _coordinatorView = view;
+      // Committed membership may change while an already-admitted relay is
+      // active. Preserve that bounded relay table while replacing only the
+      // validator used for subsequently received traffic.
+      return _coordinatorRouter = GroupCoordinatorRouter(
+          validator: _validator(group.localPeerId),
+          reliableController: existing.reliableController,
+          realtimePending: existing.realtimePending);
+    }
+    _coordinatorView = view;
+    final relays = CoordinatorRelayTable(
+        coordinatorPeerId: group.localPeerId,
+        maxReservedBytesPerDestination: maxReservedBytesPerDestination,
+        maxReservedMessagesPerDestination: maxReservedMessagesPerDestination);
+    return _coordinatorRouter = GroupCoordinatorRouter(
+        validator: _validator(group.localPeerId),
+        reliableController: CoordinatorRelayController(
+            canonicalGroupId: group.groupId,
+            coordinatorPeerId: group.localPeerId,
+            relays: relays),
+        realtimePending: CoordinatorRealtimePending(maxPendingDatagrams: 128));
+  }
+
+  /// A destination router retains both the group-wide completed-message cache
+  /// and its `(source, channel)` latest-state filters for the life of one
+  /// committed coordinator/membership view. Recreating it per frame would
+  /// turn retransmissions into duplicate application deliveries.
+  GroupDestinationRouter _destination() {
+    final coordinator = group.coordinatorPeerId;
+    if (coordinator == null) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    final view = _routingView(coordinator);
+    final existing = _destinationRouter;
+    if (existing != null && _destinationView == view) return existing;
+    _destinationView = view;
+    return _destinationRouter =
+        GroupDestinationRouter(validator: _validator(coordinator));
+  }
+
+  String _routingView(PeerId coordinator) {
+    final members = group.members
+        .map((member) => '${member.peerId}:${member.maxPeers}')
+        .toList()
+      ..sort();
+    return '${group.groupId}:$coordinator:${members.join('|')}';
+  }
+
+  GroupRoutingValidator _validator(PeerId coordinator) => GroupRoutingValidator(
+      canonicalGroupId: group.groupId,
+      localPeerId: group.localPeerId,
+      currentCoordinatorPeerId: coordinator,
+      committedMembers: group.members.map((member) => member.peerId).toSet());
+
+  PeerConnection? _readyPeer(PeerId peerId) {
+    for (final peer in peers()) {
+      if (peer.peerId == peerId && peer.state == PeerConnectionState.ready) {
+        observePeer(peer);
+        return peer;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _admitLocalCoordinatorOperation(
+      RoutedGroupOperation operation) async {
+    final destination = _readyPeer(operation.destinationPeerId);
+    final incoming = ReassembledGroupReliable(
+        pairwiseMessageId: List<int>.filled(8, 0),
+        groupId: operation.groupId,
+        sourcePeerId: operation.sourcePeerId,
+        destinationPeerId: operation.destinationPeerId,
+        groupMessageId: operation.groupMessageId,
+        deliveryMode: operation.deliveryMode,
+        priority: operation.priority,
+        bytes: operation.bytes);
+    final actions = _coordinator().receiveReliableFromMember(incoming,
+        authenticatedSendingPeerId: group.localPeerId,
+        destinationReady: destination != null,
+        reservationBytes: operation.bytes.length,
+        destinationPairwiseMessageId:
+            destination == null ? null : _nextMessageId(destination));
+    await _applyCoordinatorActions(null, actions,
+        localSourceMessageId: operation.groupMessageId);
+  }
+
+  Future<void> _receiveFrame(PeerConnection peer, LpcFrame frame) async {
+    if (_disposed) return;
+    try {
+      switch (frame.type) {
+        case FrameType.groupReliable:
+          await _receiveReliable(peer, frame);
+        case FrameType.groupDeliveryAck:
+          await _receiveDeliveryAck(peer, frame);
+        case FrameType.groupRelayStatus:
+          await _receiveRelayStatus(peer, frame);
+        case FrameType.groupRealtimeDatagram:
+          await _receiveRealtime(peer, frame);
+        case FrameType.groupInfo:
+          await _receiveGroupInfo(peer, frame);
+        case FrameType.membershipSnapshot:
+          await _receiveMembershipSnapshot(peer, frame);
+        default:
+          return;
+      }
+    } on Object {
+      // Group routing violations are authenticated peer protocol violations;
+      // do not leave the same connection accepting later group traffic.
+      await peer.disconnect();
+    }
+  }
+
+  Future<void> _sendGroupInfo(PeerConnection peer) async {
+    if (_disposed || peer.state != PeerConnectionState.ready) return;
+    final config = group.config;
+    final namespaceHash = await _scopedHash(
+        'LPC1-application-namespace', config.applicationNamespace);
+    final tokenHash = config.discoveryMode == DiscoveryMode.openProximity
+        ? List<int>.filled(32, 0)
+        : await _scopedHash('LPC1-group-join-token', config.groupJoinToken!);
+    final payload = GroupInfoPayload(
+        info: GroupMergeInfo(
+            namespaceHash: namespaceHash,
+            discoveryMode: config.discoveryMode,
+            autoMerge: config.autoMerge,
+            trustMode: config.groupTrustMode,
+            knownPeersAutoMerge: config.knownPeersAutoMerge,
+            tokenHash: tokenHash,
+            groupId: group.groupId,
+            members: group.members),
+        coordinatorTerm: group.coordinatorTerm,
+        coordinatorPeerId: group.coordinatorPeerId);
+    final result = await peer._core
+        .submitEncrypted(FrameType.groupInfo, await payload.encode());
+    if (result != TransportWriteState.submittedToPlatform) {
+      throw const LpcException(LpcErrorCode.transportClosed);
+    }
+  }
+
+  Future<List<int>> _scopedHash(String label, List<int> value) async =>
+      (await Sha256().hash([...utf8.encode(label), ...value])).bytes;
+
+  Future<void> _receiveGroupInfo(PeerConnection peer, LpcFrame frame) async {
+    if (frame.flags != 0) {
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    final info = await GroupInfoPayload.decode(frame.payload);
+    _remoteGroupInfo[peer] = info;
+    // GROUP_INFO is not membership admission. Its complete authenticated
+    // records are retained for the subsequent explicit join/merge decision.
+  }
+
+  Future<void> _receiveMembershipSnapshot(
+      PeerConnection peer, LpcFrame frame) async {
+    if (frame.flags != 1) {
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    final snapshot = await MembershipSnapshot.decode(frame.payload);
+    if (snapshot.groupId != group.groupId ||
+        peer.peerId != group.coordinatorPeerId) {
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    final disposition = _membershipOrdering.observe(
+        coordinatorPeerId: peer.peerId,
+        coordinatorTerm: snapshot.coordinatorTerm,
+        sessionId: peer.sessionId,
+        senderMessageId: frame.messageId);
+    if (disposition == MembershipSnapshotOrderDisposition.accepted) {
+      group.commitMembership(snapshot.members,
+          coordinator: peer.peerId, coordinatorTerm: snapshot.coordinatorTerm);
+    }
+    await peer._core.submitAck(frame.messageId);
+  }
+
+  Future<void> _receiveReliable(PeerConnection peer, LpcFrame frame) async {
+    final chunk = GroupReliableChunk.decode(frame.payload);
+    final expectedAck = chunk.deliveryMode == DeliveryMode.reliableAcked;
+    if ((frame.flags & 1 != 0) != expectedAck) {
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    final complete = _reassemblers[peer]!.add(frame.messageId, chunk);
+    if (complete == null) return;
+    if (group.isCoordinator) {
+      final destination = _readyPeer(complete.destinationPeerId);
+      final actions = _coordinator().receiveReliableFromMember(complete,
+          authenticatedSendingPeerId: peer.peerId,
+          destinationReady: complete.destinationPeerId == group.localPeerId ||
+              destination != null,
+          reservationBytes: complete.bytes.length,
+          destinationPairwiseMessageId:
+              complete.destinationPeerId == group.localPeerId ||
+                      destination == null
+                  ? null
+                  : _nextMessageId(destination));
+      await _applyCoordinatorActions(peer, actions);
+      return;
+    }
+    final result = _destination()
+        .receiveReliable(complete, authenticatedSendingPeerId: peer.peerId);
+    if (complete.deliveryMode == DeliveryMode.reliableAcked) {
+      await peer._core.submitAck(complete.pairwiseMessageId);
+    }
+    if (result.disposition == ReliableDestinationDisposition.deliver) {
+      group.receiveReliable(
+          source: complete.sourcePeerId,
+          id: complete.groupMessageId,
+          mode: complete.deliveryMode,
+          priority: complete.priority,
+          bytes: complete.bytes);
+    }
+  }
+
+  Future<void> _receiveDeliveryAck(PeerConnection peer, LpcFrame frame) async {
+    if (frame.flags != 1)
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    final ack = GroupDeliveryAck.decode(frame.payload);
+    final result = _member()
+        .receiveDeliveryAckResult(ack, authenticatedSendingPeerId: peer.peerId);
+    if (result.requiresGenericAck) await peer._core.submitAck(frame.messageId);
+    final state = result.state;
+    if (state != null) _completeSource(ack.groupMessageId, state);
+  }
+
+  Future<void> _receiveRelayStatus(PeerConnection peer, LpcFrame frame) async {
+    if (frame.flags != 1)
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    final status = GroupRelayStatusPayload.decode(frame.payload);
+    final result = _member().receiveRelayStatusResult(status,
+        authenticatedSendingPeerId: peer.peerId);
+    if (result.requiresGenericAck) await peer._core.submitAck(frame.messageId);
+    final state = result.state;
+    if (state != null) _completeSource(status.groupMessageId, state);
+  }
+
+  Future<void> _receiveRealtime(PeerConnection peer, LpcFrame frame) async {
+    if (frame.flags != 0)
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    final datagram = GroupRealtimeDatagram.decode(frame.payload);
+    if (group.isCoordinator) {
+      final target = _readyPeer(datagram.destinationPeerId);
+      final result = _coordinator().receiveRealtimeFromMember(datagram,
+          authenticatedSendingPeerId: peer.peerId,
+          destinationReady: datagram.destinationPeerId == group.localPeerId ||
+              target != null);
+      if (result == CoordinatorRealtimeEnqueueResult.droppedCapacity) {
+        group.reportError(LpcErrorCode.resourceExhausted,
+            peerId: datagram.destinationPeerId);
+        return;
+      }
+      if (result ==
+          CoordinatorRealtimeEnqueueResult.droppedDestinationUnavailable) {
+        return;
+      }
+      final accepted = _coordinator().realtimePending.take(
+          datagram.sourcePeerId,
+          datagram.destinationPeerId,
+          datagram.channelId);
+      if (accepted == null) return;
+      if (accepted.destinationPeerId == group.localPeerId) {
+        group.receiveRealtime(
+            source: accepted.sourcePeerId,
+            channelId: accepted.channelId,
+            senderTick: accepted.senderTick,
+            datagramSequence: accepted.sequence,
+            bytes: accepted.bytes);
+      } else {
+        final destination = _readyPeer(accepted.destinationPeerId);
+        if (destination != null) {
+          await destination._core.submitEncrypted(
+              FrameType.groupRealtimeDatagram, accepted.encode());
+        }
+      }
+      return;
+    }
+    final accepted = _destination()
+        .receiveRealtime(datagram, authenticatedSendingPeerId: peer.peerId);
+    if (accepted) {
+      group.receiveRealtime(
+          source: datagram.sourcePeerId,
+          channelId: datagram.channelId,
+          senderTick: datagram.senderTick,
+          datagramSequence: datagram.sequence,
+          bytes: datagram.bytes);
+    }
+  }
+
+  Future<void> _applyCoordinatorActions(
+      PeerConnection? sourcePeer, CoordinatorRelayActions actions,
+      {GroupMessageId? localSourceMessageId}) async {
+    final sourceAck = actions.sourceHopGenericAckMessageId;
+    if (sourceAck != null && sourcePeer != null) {
+      await sourcePeer._core.submitAck(sourceAck);
+    }
+    final local = actions.deliverLocally;
+    if (local != null) {
+      group.receiveReliable(
+          source: local.sourcePeerId,
+          id: local.groupMessageId,
+          mode: local.deliveryMode,
+          priority: local.priority,
+          bytes: local.bytes);
+    }
+    final state = actions.localSourceState;
+    if (state != null) {
+      final messageId = local?.groupMessageId ?? localSourceMessageId;
+      if (messageId != null) _completeSource(messageId, state);
+    }
+    final ack = actions.deliveryAck;
+    if (ack != null)
+      await _sendSignal(
+          ack.sourcePeerId, FrameType.groupDeliveryAck, ack.encode());
+    final status = actions.relayStatus;
+    if (status != null)
+      await _sendSignal(
+          status.sourcePeerId, FrameType.groupRelayStatus, status.encode());
+    final forward = actions.forward;
+    if (forward != null) await _submitForward(forward);
+  }
+
+  Future<void> _submitForward(ReassembledGroupReliable operation) async {
+    final destination = _readyPeer(operation.destinationPeerId);
+    if (destination == null) {
+      final actions = _coordinator().reliableController.finalHopFailed(
+          operation.sourcePeerId,
+          operation.groupMessageId,
+          GroupRelayStatus.destinationUnavailable);
+      await _applyCoordinatorActions(null, actions,
+          localSourceMessageId: operation.groupMessageId);
+      return;
+    }
+    await _submitHop(destination, null, finalHop: true, reassembled: operation);
+  }
+
+  Future<void> _submitHop(PeerConnection peer, RoutedGroupOperation? operation,
+      {required bool finalHop,
+      ReassembledGroupReliable? reassembled,
+      RoutedGroupOperation? sourceOperation}) async {
+    final source = reassembled?.sourcePeerId ?? operation!.sourcePeerId;
+    final destination =
+        reassembled?.destinationPeerId ?? operation!.destinationPeerId;
+    final messageId = reassembled?.pairwiseMessageId ?? _nextMessageId(peer);
+    final mode = reassembled?.deliveryMode ?? operation!.deliveryMode;
+    final priority = reassembled?.priority ?? operation!.priority;
+    final bytes = reassembled?.bytes ?? operation!.bytes;
+    final groupMessageId =
+        reassembled?.groupMessageId ?? operation!.groupMessageId;
+    final chunks = chunkGroupReliable(
+        groupId: group.groupId,
+        source: source,
+        destination: destination,
+        messageId: groupMessageId,
+        mode: mode,
+        priority: priority,
+        bytes: bytes);
+    if (mode == DeliveryMode.reliableAcked) {
+      peer._core.ackRetention.retain(
+          messageId: messageId,
+          logicalContent: [for (final chunk in chunks) ...chunk.encode()]);
+    }
+    for (final chunk in chunks) {
+      final result = await peer._core.submitEncrypted(
+          FrameType.groupReliable, chunk.encode(),
+          flags: mode == DeliveryMode.reliableAcked ? 1 : 0,
+          messageId: messageId);
+      if (result != TransportWriteState.submittedToPlatform) {
+        throw const LpcException(LpcErrorCode.transportClosed);
+      }
+    }
+    if (mode == DeliveryMode.reliableAcked) {
+      peer._core.ackRetention
+          .finalFrameSubmitted(messageId, nowMs: peer._core.monotonicNowMs);
+      _ackHops[_hopKey(peer, messageId)] = _LiveGroupHop(
+          peer: peer,
+          messageId: messageId,
+          chunks: chunks,
+          operation: ReassembledGroupReliable(
+              pairwiseMessageId: messageId,
+              groupId: group.groupId,
+              sourcePeerId: source,
+              destinationPeerId: destination,
+              groupMessageId: groupMessageId,
+              deliveryMode: mode,
+              priority: priority,
+              bytes: bytes),
+          finalHop: finalHop);
+    } else if (finalHop) {
+      final actions = _coordinator()
+          .reliableController
+          .finalHopSubmitted(source, groupMessageId);
+      await _applyCoordinatorActions(null, actions);
+    }
+  }
+
+  Future<void> _receiveGenericAck(
+      PeerConnection peer, List<int> messageId) async {
+    final hop = _ackHops.remove(_hopKey(peer, messageId));
+    if (hop == null || !hop.finalHop) return;
+    final actions = _coordinator().reliableController.finalHopAcknowledged(
+        hop.operation.sourcePeerId, hop.operation.groupMessageId);
+    await _applyCoordinatorActions(null, actions,
+        localSourceMessageId: hop.operation.groupMessageId);
+  }
+
+  Future<void> _sendSignal(
+      PeerId source, FrameType type, List<int> payload) async {
+    final peer = _readyPeer(source);
+    if (peer == null) {
+      group.reportError(LpcErrorCode.destinationUnavailable, peerId: source);
+      return;
+    }
+    await peer._core.submitAckRequiredFrame(
+        type: type, payload: payload, nowMs: peer._core.monotonicNowMs);
+  }
+
+  Future<void> _retransmitHopsFor(PeerConnection peer) async {
+    for (final hop
+        in _ackHops.values.where((hop) => identical(hop.peer, peer)).toList()) {
+      final retry =
+          peer._core.ackRetention.retransmitOneAfterResume(hop.messageId);
+      if (retry == AckTimeoutResult.retransmitWholeOperation) {
+        for (final chunk in hop.chunks) {
+          await peer._core.submitEncrypted(
+              FrameType.groupReliable, chunk.encode(),
+              flags: 1, messageId: hop.messageId);
+        }
+        peer._core.ackRetention.finalFrameSubmitted(hop.messageId,
+            nowMs: peer._core.monotonicNowMs);
+      } else if (retry == AckTimeoutResult.terminalAckTimeout) {
+        _ackHops.remove(_hopKey(peer, hop.messageId));
+      }
+    }
+  }
+
+  Future<void> _onPeerReconnected(PeerConnection peer) async {
+    await _retransmitHopsFor(peer);
+    if (group.isCoordinator) {
+      // ACK-required final hops were replayed above through their retained
+      // encoders. Ordered relays have no generic ACK retention, so only they
+      // are resubmitted from chunk 0 after a successful destination RESUME.
+      for (final actions
+          in _coordinator().destinationResumeSucceeded(peer.peerId)) {
+        final forward = actions.forward;
+        if (forward != null &&
+            forward.deliveryMode == DeliveryMode.reliableOrdered) {
+          await _submitHop(peer, null, finalHop: true, reassembled: forward);
+        }
+      }
+      return;
+    }
+    // A source's ordered operation remains nonterminal until the coordinator
+    // reports final-hop submission. On a recovered coordinator route, resend
+    // the complete operation with a fresh source-hop attempt.
+    if (peer.peerId == group.coordinatorPeerId) {
+      for (final operation in _member().coordinatorRouteLost()) {
+        if (operation.deliveryMode == DeliveryMode.reliableOrdered) {
+          await _submitHop(peer, operation, finalHop: false);
+        }
+      }
+    }
+  }
+
+  Future<void> _onPeerDisconnected(PeerConnection peer) async {
+    _onPeerLost(peer);
+    if (!group.isCoordinator) return;
+    for (final actions in _coordinator().destinationResumeFailed(peer.peerId)) {
+      await _applyCoordinatorActions(null, actions);
+    }
+  }
+
+  void _onGroupEvent(GroupEvent event) {
+    if (_disposed) return;
+    if (event is MemberLeft && group.isCoordinator) {
+      final router = _coordinatorRouter;
+      if (router != null) {
+        unawaited(() async {
+          for (final actions in router.destinationRemoved(event.peerId)) {
+            await _applyCoordinatorActions(null, actions);
+          }
+        }());
+      }
+      return;
+    }
+    if (event is! CoordinatorChanged) return;
+    if (event.previous == group.localPeerId &&
+        event.current != group.localPeerId) {
+      _coordinatorRouter?.coordinatorAuthorityLost();
+      _coordinatorRouter = null;
+      _coordinatorView = null;
+    }
+    final member = _memberRouter;
+    if (member != null) {
+      // The source table and cancellation tombstones survive coordinator
+      // migration; only the authenticated-current-coordinator validator is
+      // replaced. The new READY route triggers whole-operation rerouting.
+      _memberRouter = GroupMemberRouter(
+          validator: _validator(event.current),
+          sends: member.sends,
+          tombstones: member.tombstones);
+      unawaited(_rerouteMemberOperations());
+    }
+  }
+
+  Future<void> _rerouteMemberOperations() async {
+    if (_disposed || group.isCoordinator) return;
+    final coordinator = group.coordinatorPeerId;
+    if (coordinator == null) return;
+    final peer = _readyPeer(coordinator);
+    if (peer == null) return;
+    // These are new source-hop attempts after authority change, so prior
+    // source-hop ACK retention must not retry through the former coordinator.
+    for (final entry in _ackHops.entries.toList()) {
+      if (entry.value.finalHop) continue;
+      entry.value.peer._core.ackRetention.cancel(entry.value.messageId);
+      _ackHops.remove(entry.key);
+    }
+    for (final operation in _member().coordinatorRouteLost()) {
+      await _submitHop(peer, operation, finalHop: false);
+    }
+  }
+
+  /// GROUP_RELIABLE owns its chunk encoder, so PeerConnectionCore deliberately
+  /// leaves these retained ACK operations for this adapter to retry. Each
+  /// retry is a complete logical hop from chunk 0 with the original hop-local
+  /// MessageId (Section 43.1.8).
+  Future<void> _pollAckTimeouts() async {
+    if (_disposed) return;
+    for (final hop in _ackHops.values.toList()) {
+      final peer = hop.peer;
+      if (peer.state != PeerConnectionState.ready) continue;
+      final nowMs = peer._core.monotonicNowMs;
+      final result =
+          peer._core.ackRetention.onTimer(hop.messageId, nowMs: nowMs);
+      if (result == AckTimeoutResult.ignored) continue;
+      if (result == AckTimeoutResult.retransmitWholeOperation) {
+        try {
+          for (final chunk in hop.chunks) {
+            final submitted = await peer._core.submitEncrypted(
+                FrameType.groupReliable, chunk.encode(),
+                flags: 1, messageId: hop.messageId);
+            if (submitted != TransportWriteState.submittedToPlatform) {
+              throw const LpcException(LpcErrorCode.transportClosed);
+            }
+          }
+          peer._core.ackRetention.finalFrameSubmitted(hop.messageId,
+              nowMs: peer._core.monotonicNowMs);
+        } on Object {
+          // Transport-loss handling pauses the retained deadline. The normal
+          // reconnect path will replay the whole hop once READY again.
+        }
+        continue;
+      }
+      _ackHops.remove(_hopKey(peer, hop.messageId));
+      if (hop.finalHop) {
+        final actions = _coordinator().reliableController.finalHopFailed(
+            hop.operation.sourcePeerId,
+            hop.operation.groupMessageId,
+            GroupRelayStatus.destinationAckTimeout);
+        await _applyCoordinatorActions(null, actions,
+            localSourceMessageId: hop.operation.groupMessageId);
+      } else {
+        final timeout =
+            _memberRouter?.sourceHopAckTimedOut(hop.operation.groupMessageId);
+        if (timeout != null) {
+          _completeSource(hop.operation.groupMessageId, timeout.state);
+        }
+      }
+    }
+  }
+
+  void _onPeerLost(PeerConnection peer) {
+    _reassemblers[peer]?.onTransportGenerationLost();
+  }
+
+  List<int> _nextMessageId(PeerConnection peer) =>
+      peer._core.messageIdAllocator!.allocate();
+  String _hopKey(PeerConnection peer, List<int> id) =>
+      '${peer.peerId}:${id.join(',')}';
+  void _completeSource(GroupMessageId id, SendState state) {
+    _sourceHandles.remove(id)?.complete(state);
+  }
+
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    _timer.cancel();
+    unawaited(_groupEvents.cancel());
+    for (final subscription in _frameSubscriptions.values) {
+      unawaited(subscription.cancel());
+    }
+    for (final subscription in _ackSubscriptions.values) {
+      unawaited(subscription.cancel());
+    }
+    for (final subscription in _peerEventSubscriptions.values) {
+      unawaited(subscription.cancel());
+    }
+    _frameSubscriptions.clear();
+    _ackSubscriptions.clear();
+    _peerEventSubscriptions.clear();
+    _memberRouter?.close();
+  }
+}
+
+class _LiveGroupHop {
+  const _LiveGroupHop({
+    required this.peer,
+    required this.messageId,
+    required this.chunks,
+    required this.operation,
+    required this.finalHop,
+  });
+  final PeerConnection peer;
+  final List<int> messageId;
+  final List<GroupReliableChunk> chunks;
+  final ReassembledGroupReliable operation;
+  final bool finalHop;
 }
 
 /// Convenience factory matching the specification's conceptual entry point.

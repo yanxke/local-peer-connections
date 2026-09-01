@@ -236,12 +236,16 @@ class CandidateResumeConnection {
     required this.previousGeneration,
     required this.requester,
     List<int> Function()? randomNonce,
+    List<int>? initialEncodedFrame,
   })  : _candidateSessionRootKey = Uint8List.fromList(candidateSessionRootKey),
         _candidateSessionId = Uint8List.fromList(candidateSessionId),
         _candidateTranscript = Uint8List.fromList(candidateTranscript),
         _previousSessionId = Uint8List.fromList(previousSessionId),
         _previousResumeSecret = Uint8List.fromList(previousResumeSecret),
-        _randomNonce = randomNonce ?? _secureNonce {
+        _randomNonce = randomNonce ?? _secureNonce,
+        _initialEncodedFrame = initialEncodedFrame == null
+            ? null
+            : Uint8List.fromList(initialEncodedFrame) {
     if (_candidateSessionRootKey.length != 32 ||
         _candidateSessionId.length != 16 ||
         _candidateTranscript.length != 32 ||
@@ -263,6 +267,7 @@ class CandidateResumeConnection {
   final int previousGeneration;
   final bool requester;
   final List<int> Function() _randomNonce;
+  final Uint8List? _initialEncodedFrame;
   final Completer<ResumedSession> _completed = Completer<ResumedSession>();
   StreamSubscription<BackendConnectionEvent>? _subscription;
   Future<void> _inbound = Future<void>.value();
@@ -287,6 +292,13 @@ class CandidateResumeConnection {
     _started = true;
     _subscription = backend.events.listen(_onBackendEvent,
         onError: (Object error, StackTrace stack) => _fail(error, stack));
+    final initial = _initialEncodedFrame;
+    if (initial != null) {
+      // The selectable handshake owns exactly the first RESUME_REQUEST, then
+      // hands it over after this listener is installed.  Process it through
+      // the same serialized receive path as backend-delivered bytes.
+      _inbound = _inbound.then((_) => _receive(initial));
+    }
     if (!requester) return;
     final nonce = Uint8List.fromList(_randomNonce());
     if (nonce.length != 16)

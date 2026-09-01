@@ -4311,6 +4311,41 @@ Rules:
 - For `KNOWN_PEERS`, GroupSession MUST configure pairwise `KnownPeerPolicy=ALLOWLIST` with exactly `GroupConfig.allowedPeerIds`; the authenticated remote `PeerId` MUST be present or the connection fails `AUTHENTICATION_FAILED`.
 - `OPEN_TOFU` provides encrypted first-contact continuity only. It MUST NOT be described as verified human/device identity.
 
+### 32.3.1 Shared-service AUTO_GROUP Profile Selection
+
+BLE advertising for protocol 1.1 exposes only the LPC service UUID.  An
+inbound physical connection therefore arrives before the remote group,
+application namespace, and join-token scope are known; those values first
+arrive in authenticated `GROUP_INFO`, after HELLO/AUTH.  The runtime MUST NOT
+guess a `GroupTrustMode` from an unauthenticated endpoint, Bluetooth identity,
+or application metadata.
+
+For this reason, all simultaneously active `GroupSession`s on one Runtime
+that accept automatic-group bootstrap connections MUST have one identical
+pre-HELLO group handshake profile:
+
+```text
+mapped HELLO trust_mode
+PSK bytes, when mapped mode is PSK_32
+complete allowed PeerId set, when mapped mode is KNOWN_PEER
+```
+
+`joinOrCreateGroup()` MUST fail with `INVALID_STATE` before advertising,
+scanning, or creating the new session when its profile differs from the
+already active Runtime AUTO_GROUP profile.  A Runtime with no active
+GroupSession has no AUTO_GROUP profile and MUST NOT accept an unsolicited
+AUTO_GROUP bootstrap connection.
+
+For an inbound AUTO_GROUP bootstrap connection, the Runtime selects this
+unique shared profile before sending local HELLO.  For an outbound AUTO_GROUP
+bootstrap connection, the initiating GroupSession selects the same profile.
+Only after authentication may `GROUP_INFO` determine namespace compatibility,
+join scope, and whether the connected peer is merged or remains in an
+independent group.
+
+This rule does not affect explicit `connect()` or `HostSession` connections:
+they continue to use `RuntimeConfig`/`HostConfig` as specified for those APIs.
+
 
 ## 32.4 GroupConfig
 

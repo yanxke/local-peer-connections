@@ -188,6 +188,51 @@ void main() {
     expect(LpcFrame.decode(aBackend.writes[1]).transportGeneration, 2);
   });
 
+  test(
+      'UT-180 responder accepts the candidate request handed off by a handshake',
+      () async {
+    final aBackend = _ResumeBackend('handoff-a');
+    final bBackend = _ResumeBackend('handoff-b');
+    aBackend.remote = bBackend;
+    bBackend.remote = aBackend;
+    final requester = CandidateResumeConnection(
+        backend: aBackend,
+        candidateSessionRootKey: List.filled(32, 1),
+        candidateSessionId: List.filled(16, 2),
+        candidateTranscript: List.filled(32, 3),
+        localPeerId: PeerId(List.filled(16, 4)),
+        remotePeerId: PeerId(List.filled(16, 5)),
+        previousSessionId: List.filled(16, 6),
+        previousResumeSecret: List.filled(32, 7),
+        previousGeneration: 1,
+        requester: true,
+        randomNonce: () => List.filled(16, 8));
+    await requester.start();
+    final initial = aBackend.writes.single;
+    // Model the handshake-owned first frame: it has already been consumed and
+    // is no longer pending on the backend stream when the candidate driver
+    // subscribes.
+    await Future<void>.delayed(Duration.zero);
+    final responder = CandidateResumeConnection(
+        backend: bBackend,
+        candidateSessionRootKey: List.filled(32, 1),
+        candidateSessionId: List.filled(16, 2),
+        candidateTranscript: List.filled(32, 3),
+        localPeerId: PeerId(List.filled(16, 5)),
+        remotePeerId: PeerId(List.filled(16, 4)),
+        previousSessionId: List.filled(16, 6),
+        previousResumeSecret: List.filled(32, 7),
+        previousGeneration: 1,
+        requester: false,
+        initialEncodedFrame: initial,
+        randomNonce: () => List.filled(16, 9));
+    await responder.start();
+    final completed =
+        await Future.wait([requester.completed, responder.completed])
+            .timeout(const Duration(seconds: 2));
+    expect(completed.map((value) => value.generation), everyElement(2));
+  });
+
   test('UT-174 an unresumable request receives candidate RESUME_REJECT',
       () async {
     final aBackend = _ResumeBackend('a');

@@ -202,6 +202,36 @@ void main() {
             .where((frame) => frame.type == FrameType.ready),
         isEmpty);
   });
+
+  test(
+      'UT-179 selectable inbound handshake waits for READY before normal completion',
+      () async {
+    final backendA = _Backend('selectable-a');
+    final backendB = _Backend('selectable-b');
+    backendA.remote = backendB;
+    backendB.remote = backendA;
+    final exchangeA = await _exchange(31, 33);
+    final exchangeB = await _exchange(32, 34);
+    final initiator = HandshakeConnection(
+        backend: backendA,
+        exchange: exchangeA,
+        localPeerId: exchangeA.localHello.peerId);
+    final responder = HandshakeConnection(
+        backend: backendB,
+        exchange: exchangeB,
+        localPeerId: exchangeB.localHello.peerId,
+        acceptCandidateResume: true);
+
+    await Future.wait([initiator.start(), responder.start()]);
+    final cores = await Future.wait([initiator.ready, responder.ready])
+        .timeout(const Duration(seconds: 2));
+    expect(cores, everyElement(isA<PeerConnectionCore>()));
+    expect(
+        backendB.writes
+            .map(LpcFrame.decode)
+            .where((frame) => frame.type == FrameType.ready),
+        hasLength(1));
+  });
 }
 
 Future<Uint8List> _encryptedFrame(HandshakeResult result, PeerId sender,

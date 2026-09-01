@@ -210,6 +210,32 @@ void main() {
     expect(frames.skip(2).map((frame) => frame.sequenceNumber), [1, 2]);
   });
 
+  test('all retained checkpoints are replayed after RESUME', () async {
+    final backend = _Backend();
+    final peer = PeerConnectionCore(
+        backend: backend,
+        sessionRootKey: List.filled(32, 1),
+        sessionId: List.filled(16, 2),
+        localPeerId: PeerId(List.filled(16, 3)),
+        remotePeerId: PeerId(List.filled(16, 4)));
+    await peer.submitAckRequiredCheckpoint(
+        chunks: chunkCheckpoint(List.filled(4001, 1), term: 1, sequence: 1),
+        messageId: List.filled(8, 9),
+        nowMs: 0);
+    peer.beginReconnect();
+    peer.completeResume(
+        newGeneration: 2, resumedSessionRootKey: List.filled(32, 5));
+    final replayed =
+        await peer.retransmitAckRequiredCheckpointsAfterResume(nowMs: 1);
+    expect(replayed, hasLength(1));
+    expect(
+        backend.writes
+            .skip(2)
+            .map(LpcFrame.decode)
+            .map((frame) => frame.messageId),
+        everyElement(List.filled(8, 9)));
+  });
+
   test(
       'UT-077 partially submitted ordered DATA restarts from chunk zero after RESUME',
       () async {
@@ -956,8 +982,10 @@ void main() {
         localPeerId: PeerId(List.filled(16, 4)),
         remotePeerId: PeerId(List.filled(16, 3)));
     a.ackRetention.retain(messageId: List.filled(8, 5), logicalContent: [1]);
+    final acknowledged = a.acknowledgedMessageIds.first;
     await b.submitAck(List.filled(8, 5));
     await a.receiveEncrypted(bBackend.writes.single);
     expect(a.ackRetention.length, 0);
+    expect(await acknowledged, List.filled(8, 5));
   });
 }

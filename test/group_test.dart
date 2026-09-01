@@ -5,6 +5,30 @@ import 'package:local_peer_connections/local_peer_connections.dart';
 
 PeerId peer(int n) => PeerId(List<int>.filled(16, n));
 
+class _RecordingGroupTransport implements GroupRouteTransport {
+  final List<RoutedGroupOperation> reliable = [];
+  final List<GroupRealtimeDatagram> realtime = [];
+  SendHandleController? reliableController;
+  RealtimeSendHandleController? realtimeController;
+
+  @override
+  void cancelReliable(GroupMessageId groupMessageId) {}
+
+  @override
+  void submitReliable(
+      RoutedGroupOperation operation, SendHandleController controller) {
+    reliable.add(operation);
+    reliableController = controller;
+  }
+
+  @override
+  void submitRealtime(
+      GroupRealtimeDatagram datagram, RealtimeSendHandleController controller) {
+    realtime.add(datagram);
+    realtimeController = controller;
+  }
+}
+
 void main() {
   test('GroupConfig validates the normative scoped-token rules', () {
     expect(() => GroupConfig(applicationNamespace: [1]),
@@ -13,6 +37,25 @@ void main() {
         () => GroupConfig(
             applicationNamespace: [1], groupJoinToken: List.filled(15, 0)),
         throwsA(isA<LpcException>()));
+  });
+
+  test('active automatic groups require one pre-HELLO trust profile', () async {
+    final runtime = await createRuntime(localPeerId: peer(1));
+    runtime.joinOrCreateGroup(GroupConfig(
+        applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
+    expect(
+        () => runtime.joinOrCreateGroup(GroupConfig(
+            applicationNamespace: [2],
+            groupJoinToken: List.filled(16, 1),
+            groupTrustMode: GroupTrustMode.pairwiseSas)),
+        throwsA(isA<LpcException>()));
+    // Namespace/scope remain GROUP_INFO concerns, so compatible pre-HELLO
+    // profiles can coexist on the shared service advertisement.
+    expect(
+        () => runtime.joinOrCreateGroup(GroupConfig(
+            applicationNamespace: [2], groupJoinToken: List.filled(16, 1))),
+        returnsNormally);
+    await runtime.close();
   });
 
   // UT-114: committed membership is visible before MemberJoined delivery.
@@ -90,6 +133,24 @@ void main() {
     expect(group.coordinatorPeerId, peer(2));
     expect(group.members.map((member) => member.peerId),
         [peer(1), peer(2), peer(3)]);
+    await runtime.close();
+  });
+
+  test('merged membership commits a new GroupId and coordinator term',
+      () async {
+    final runtime = await createRuntime(localPeerId: peer(1));
+    final group = runtime.joinOrCreateGroup(GroupConfig(
+        applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
+    final merged = GroupId(List.filled(16, 9));
+    group.commitMergedMembership(
+        groupId: merged,
+        members: [GroupMember(peer(1), 8), GroupMember(peer(2), 8)],
+        coordinator: peer(2),
+        coordinatorTerm: 1);
+    expect(group.groupId, merged);
+    expect(group.coordinatorPeerId, peer(2));
+    expect(group.coordinatorTerm, 1);
+    expect(group.members.map((member) => member.peerId), [peer(1), peer(2)]);
     await runtime.close();
   });
 
@@ -186,8 +247,11 @@ void main() {
     group.commitMembership([GroupMember(peer(1), 8), GroupMember(peer(2), 8)],
         coordinator: peer(1));
     expect(sendWasQueuedDuringCallback, isTrue);
+    // A committed member alone is not a transport route.  The public group
+    // API must not synthesize final-hop success before runtime routing is
+    // bound.
     expect(await sent.future.timeout(const Duration(seconds: 1)),
-        SendState.sentToTransport);
+        SendState.failed);
     await sub.cancel();
     await runtime.close();
   });
@@ -250,6 +314,35 @@ void main() {
         applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
     final handle = group.send(peer(2), [1]);
     expect(await handle.completed, SendState.failed);
+    await runtime.close();
+  });
+
+  test(
+      'UT-178 GroupSession submits stable routed operations only through its bound transport',
+      () async {
+    final runtime = await createRuntime(localPeerId: peer(1));
+    final group = runtime.joinOrCreateGroup(GroupConfig(
+        applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
+    group.commitMembership([GroupMember(peer(1), 8), GroupMember(peer(2), 8)],
+        coordinator: peer(1));
+    final transport = _RecordingGroupTransport();
+    group.attachRouteTransport(transport);
+
+    final reliable = group.send(peer(2), [7, 8],
+        options: const SendOptions(deliveryMode: DeliveryMode.reliableOrdered));
+    expect(reliable.state, SendState.transmitting);
+    expect(transport.reliable, hasLength(1));
+    expect(transport.reliable.single.sourcePeerId, peer(1));
+    expect(transport.reliable.single.destinationPeerId, peer(2));
+    expect(transport.reliable.single.bytes, [7, 8]);
+    transport.reliableController!.complete(SendState.sentToTransport);
+    expect(await reliable.completed, SendState.sentToTransport);
+
+    final realtime = group.sendRealtime(peer(2), 7, [9]);
+    expect(transport.realtime, hasLength(1));
+    expect(transport.realtime.single.sequence, 1);
+    transport.realtimeController!.complete(SendState.sentToTransport);
+    expect(await realtime.completed, SendState.sentToTransport);
     await runtime.close();
   });
 

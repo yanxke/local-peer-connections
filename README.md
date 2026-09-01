@@ -9,12 +9,12 @@ It targets Android and iOS first, uses BLE as the baseline transport, and is des
 This repository now contains an installable Flutter plugin scaffold and a
 portable Dart foundation for configuration validation, LPC frame encoding,
 GATT fragment envelopes, identity-derived PeerIds, serialized GroupSession
-state/event handling, authenticated handshake and RESUME primitives, and unit
-tests. It is **not yet a Full V1.1 Mobile Conformance implementation**:
-native BLE GATT service/client I/O, automatic connection/reconnect and RESUME
-orchestration, discovery-driven formation/election/migration, end-to-end
-routed delivery, optional transport upgrades, and the mandatory full
-conformance suite are still required before that claim can be made.
+state/event handling, authenticated handshake and RESUME primitives, native
+BLE GATT service/client fragment I/O, direct GATT reconnect/RESUME recovery,
+and unit tests. It is **not yet a Full V1.1 Mobile Conformance
+implementation**: automatic group formation/election/migration, the remaining
+group-control recovery paths, optional transport upgrades, and the mandatory
+full conformance suite are still required before that claim can be made.
 
 ### Implementation checklist
 
@@ -107,9 +107,9 @@ Implemented:
 
 Not implemented yet (and therefore not claimable as V1.1 conformance):
 
-- [ ] Complete reconnect and RESUME lifecycle (outbound GATT reconnect now uses the Section 25 schedule, fresh KNOWN_PEER candidate handshake, candidate RESUME, core rebind, and direct-operation recovery; inbound candidate-session matching and group-operation recovery remain)
+- [ ] Complete reconnect and RESUME lifecycle (direct GATT reconnect uses the Section 25 schedule, fresh KNOWN_PEER candidate handshakes, candidate RESUME in either direction, connection-rank duplicate-link selection, core rebind, and recovery of direct DATA, single-frame controls, and multi-frame checkpoints; live membership/merge/leave and route-signaling control recovery remains)
 - [ ] Automatic discovery-driven formation, timed election, merge application, and coordinator migration
-- [ ] End-to-end GroupSession/PeerConnection routing: live authenticated frame dispatch, hop ACK emission, scheduler submission, relay signaling, and automatic reroute after RESUME or coordinator migration
+- [x] Live GroupSession/PeerConnection routing: authenticated frame dispatch, hop ACK emission, bounded relay submission, relay signaling, and automatic reroute/recovery after RESUME or coordinator change
 - [ ] L2CAP, LAN TCP, and authenticated UDP sidecar upgrades
 - [ ] Remaining mandatory binary vectors and the full mandatory unit/integration test suite
 
@@ -138,8 +138,9 @@ usage-description string in their application `Info.plist`. A denied or
 powered-off Bluetooth state is returned as the matching stable LPC error.
 
 The current native bridge advertises and scans by service UUID only. Its
-platform endpoint IDs are transient discovery handles, never protocol PeerIds;
-GATT transport remains unfinished.
+platform endpoint IDs are transient discovery handles, never protocol PeerIds.
+Native GATT fragment transport is implemented, but automatic group formation
+and routed group delivery are not yet wired to it.
 
 ## What the library provides
 

@@ -26,6 +26,7 @@ class HandshakeConnection {
     PeerId? remotePeerId,
     this.onSasRequired,
     this.candidateOnly = false,
+    this.acceptCandidateResume = false,
   }) : expectedRemotePeerId = remotePeerId;
 
   final BackendConnection backend;
@@ -41,18 +42,28 @@ class HandshakeConnection {
   /// Section 26.1 candidate handshakes authenticate HELLO/AUTH but must not
   /// send normal READY; their owner immediately starts candidate RESUME.
   final bool candidateOnly;
+
+  /// Responder-side Section 26 handoff.  This is used only for a newly
+  /// accepted physical connection while an existing logical peer is
+  /// reconnecting: wait for either its normal READY or its first candidate
+  /// RESUME_REQUEST.  Waiting avoids sending a normal READY onto a candidate
+  /// connection, which would make a valid reconnect fail.
+  final bool acceptCandidateResume;
   final Completer<PeerConnectionCore> _ready = Completer<PeerConnectionCore>();
   final Completer<HandshakeResult> _authenticated =
       Completer<HandshakeResult>();
+  final Completer<List<int>> _candidateInitialFrame = Completer<List<int>>();
   StreamSubscription<BackendConnectionEvent>? _subscription;
   bool _started = false;
   bool _localReadySubmitted = false;
   bool _remoteReadyAuthenticated = false;
+  bool _normalReadySelected = false;
   bool _sasNotified = false;
   Timer? _sasTimeout;
 
   Future<PeerConnectionCore> get ready => _ready.future;
   Future<HandshakeResult> get authenticated => _authenticated.future;
+  Future<List<int>> get candidateInitialFrame => _candidateInitialFrame.future;
 
   PeerId get remotePeerId {
     final peerId = exchange.remoteHello?.peerId;
@@ -125,7 +136,26 @@ class HandshakeConnection {
         await _sendReadyIfAuthenticated();
         return;
       }
+      if (acceptCandidateResume &&
+          exchange.state == HandshakeExchangeState.authenticated &&
+          frame.type == FrameType.resumeRequest &&
+          frame.transportGeneration == 0) {
+        // The requester sends only this first candidate frame and then waits
+        // for RESUME_ACCEPT, so cancellation before the candidate driver is
+        // installed cannot drop a subsequent protocol frame.
+        await _subscription?.cancel();
+        if (!_authenticated.isCompleted)
+          _authenticated.complete(exchange.result!);
+        if (!_candidateInitialFrame.isCompleted) {
+          _candidateInitialFrame.complete(List<int>.from(bytes));
+        }
+        return;
+      }
+      if (acceptCandidateResume) _normalReadySelected = true;
       await _receiveReady(frame);
+      // A selectable responder sends READY only after it has proved that this
+      // is the normal generation-1 path, never before candidate selection.
+      await _sendReadyIfAuthenticated();
     } catch (error, stackTrace) {
       await _closeWithError(error, stackTrace);
     }
@@ -154,6 +184,7 @@ class HandshakeConnection {
       await _completeCandidateHandshake();
       return;
     }
+    if (acceptCandidateResume && !_normalReadySelected) return;
     final result = exchange.result!;
     final remote = remotePeerId;
     final direction = _direction(localPeerId, remote);
@@ -243,6 +274,9 @@ class HandshakeConnection {
     if (!_ready.isCompleted) _ready.completeError(error, stackTrace);
     if (candidateOnly && !_authenticated.isCompleted) {
       _authenticated.completeError(error, stackTrace);
+    }
+    if (acceptCandidateResume && !_candidateInitialFrame.isCompleted) {
+      _candidateInitialFrame.completeError(error, stackTrace);
     }
     await _subscription?.cancel();
     await backend.close();

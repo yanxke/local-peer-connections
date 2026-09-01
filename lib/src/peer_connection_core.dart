@@ -88,6 +88,8 @@ class PeerConnectionCore {
   final Set<TransportWrite> _pendingWrites = <TransportWrite>{};
   final StreamController<LpcFrame> _receivedFrames =
       StreamController<LpcFrame>.broadcast(sync: true);
+  final StreamController<Uint8List> _acknowledgedMessageIds =
+      StreamController<Uint8List>.broadcast(sync: true);
   late StreamSubscription<BackendConnectionEvent> _backendSubscription;
   int generation;
   int _nextSequence;
@@ -111,6 +113,13 @@ class PeerConnectionCore {
   /// Authenticated, replay-filtered frames in receive order. Higher layers
   /// own the frame-specific application/group dispatch.
   Stream<LpcFrame> get receivedFrames => _receivedFrames.stream;
+
+  /// Authenticated generic ACK correlations, emitted only after this core has
+  /// removed the matching retained operation.  Group-routing ownership uses
+  /// it to distinguish a final-hop ACK from a source-hop ACK without turning
+  /// either into application delivery on its own.
+  Stream<Uint8List> get acknowledgedMessageIds =>
+      _acknowledgedMessageIds.stream;
   Future<TransportWriteState> submitEncrypted(FrameType type, List<int> payload,
       {int flags = 0, List<int>? messageId}) async {
     if (state != PeerConnectionState.ready)
@@ -485,6 +494,7 @@ class PeerConnectionCore {
     if (clear.type == FrameType.ack) {
       final ack = parseAck(clear);
       if (ack != null && ackRetention.acknowledge(ack.messageId)) {
+        _acknowledgedMessageIds.add(Uint8List.fromList(ack.messageId));
         _ackRequiredFrames.remove(_messageKey(ack.messageId));
         _checkpointOperations.remove(_messageKey(ack.messageId));
         final data = _reliableDataOperations.remove(_messageKey(ack.messageId));
@@ -714,6 +724,32 @@ class PeerConnectionCore {
     return List.unmodifiable(operations);
   }
 
+  /// Re-emits every retained ACK-required checkpoint as its complete chunk
+  /// sequence after RESUME. Checkpoints have a distinct multi-frame encoder,
+  /// so they cannot be recovered by [retransmitAckRequiredFramesAfterResume].
+  Future<List<RetainedAckOperation>>
+      retransmitAckRequiredCheckpointsAfterResume({required int nowMs}) async {
+    if (state != PeerConnectionState.ready) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    final operations = <RetainedAckOperation>[];
+    for (final entry
+        in List<MapEntry<String, List<CoordinatorCheckpointChunk>>>.from(
+            _checkpointOperations.entries)) {
+      final messageId = _messageIdFromKey(entry.key);
+      final result =
+          await retransmitCheckpointAfterResume(messageId, nowMs: nowMs);
+      if (result == AckTimeoutResult.retransmitWholeOperation) {
+        operations.add(RetainedAckOperation(
+            messageId: messageId,
+            logicalContent: [
+              for (final chunk in entry.value) ...chunk.encode()
+            ]));
+      }
+    }
+    return List.unmodifiable(operations);
+  }
+
   /// Moves an active generation into the protocol reconnect path.  Backend
   /// close/error callbacks are intentionally harmless once reconnecting: an
   /// impossible or stale callback cannot manufacture another transition.
@@ -782,6 +818,7 @@ class PeerConnectionCore {
     _state.requireTransition(PeerConnectionState.disconnected);
     await _backendSubscription.cancel();
     await _receivedFrames.close();
+    await _acknowledgedMessageIds.close();
   }
 }
 
@@ -817,7 +854,16 @@ String _messageKey(List<int> messageId) {
   if (messageId.length != 8) {
     throw ArgumentError.value(messageId, 'messageId');
   }
+
   return messageId.join(',');
+}
+
+List<int> _messageIdFromKey(String key) {
+  final values = key.split(',').map(int.parse).toList(growable: false);
+  if (values.length != 8) {
+    throw const LpcException(LpcErrorCode.protocolMismatch);
+  }
+  return values;
 }
 
 bool _same(List<int> a, List<int> b) {
