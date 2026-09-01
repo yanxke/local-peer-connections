@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'dart:math';
 import '../types.dart';
 
 /// Section 24's negotiated timings. Dead timeout is derived, never supplied
@@ -72,4 +73,71 @@ class KeepaliveTracker {
   bool pingDue(int nowMs) => nowMs - _lastEncryptedSentMs >= timing.intervalMs;
   bool dead(int nowMs) =>
       nowMs - _lastAuthenticatedReceivedMs >= timing.deadTimeoutMs;
+}
+
+/// A timer-free driver for Section 24. Its owner calls [poll] from its
+/// serialized monotonic timer, submits a returned PING through the backend,
+/// and calls [pingSubmitted] only after that complete encrypted frame reaches
+/// `SENT_TO_TRANSPORT`. A pending PING is never duplicated while platform
+/// submission is outstanding.
+class KeepaliveController {
+  KeepaliveController(KeepaliveTiming timing,
+      {required int nowMs, List<int> Function()? nextPingId})
+      : _tracker = KeepaliveTracker(timing, nowMs: nowMs),
+        _nextPingId = nextPingId ?? _securePingId;
+
+  final KeepaliveTracker _tracker;
+  final List<int> Function() _nextPingId;
+  PingPayload? _pendingPing;
+
+  KeepaliveDecision poll({required int nowMs, required int monotonicUs}) {
+    if (_tracker.dead(nowMs)) return const KeepaliveDecision.reconnect();
+    if (_pendingPing != null || !_tracker.pingDue(nowMs)) {
+      return const KeepaliveDecision.none();
+    }
+    final id = _nextPingId();
+    if (id.length != 8) throw ArgumentError.value(id, 'nextPingId');
+    final ping = PingPayload(id, monotonicUs);
+    _pendingPing = ping;
+    return KeepaliveDecision.ping(ping);
+  }
+
+  /// Must only be called after the backend reports complete frame submission.
+  void pingSubmitted(int nowMs) {
+    if (_pendingPing == null) {
+      throw const LpcException(LpcErrorCode.invalidState, 'no pending PING');
+    }
+    _pendingPing = null;
+    _tracker.encryptedFrameSent(nowMs);
+  }
+
+  /// A failed PING is not retried on the same failed transport generation.
+  /// The owner will enter reconnecting through its terminal transport path.
+  void pingSubmissionFailed() => _pendingPing = null;
+
+  void authenticatedFrameReceived(int nowMs) =>
+      _tracker.authenticatedFrameReceived(nowMs);
+
+  static List<int> _securePingId() =>
+      List<int>.generate(8, (_) => Random.secure().nextInt(256));
+}
+
+sealed class KeepaliveDecision {
+  const KeepaliveDecision._();
+  const factory KeepaliveDecision.none() = KeepaliveNoAction;
+  const factory KeepaliveDecision.ping(PingPayload ping) = KeepalivePing;
+  const factory KeepaliveDecision.reconnect() = KeepaliveReconnect;
+}
+
+class KeepaliveNoAction extends KeepaliveDecision {
+  const KeepaliveNoAction() : super._();
+}
+
+class KeepalivePing extends KeepaliveDecision {
+  const KeepalivePing(this.ping) : super._();
+  final PingPayload ping;
+}
+
+class KeepaliveReconnect extends KeepaliveDecision {
+  const KeepaliveReconnect() : super._();
 }

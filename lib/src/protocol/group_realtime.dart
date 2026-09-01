@@ -14,8 +14,9 @@ class GroupRealtimeDatagram {
     if (channelId < 1 ||
         channelId > 65535 ||
         sequence == 0 ||
-        this.bytes.length > 1100)
+        this.bytes.length > 1100) {
       throw const LpcException(LpcErrorCode.messageTooLarge);
+    }
   }
   final GroupId groupId;
   final PeerId sourcePeerId, destinationPeerId;
@@ -34,14 +35,16 @@ class GroupRealtimeDatagram {
   }
 
   static GroupRealtimeDatagram decode(List<int> input) {
-    if (input.length < 68)
+    if (input.length < 68) {
       throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
     final raw = Uint8List.fromList(input);
     final h = ByteData.sublistView(raw);
     if (h.getUint16(50) != 0 ||
         h.getUint16(66) != 0 ||
-        input.length != 68 + h.getUint16(64))
+        input.length != 68 + h.getUint16(64)) {
       throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
     return GroupRealtimeDatagram(
         groupId: GroupId(raw.sublist(0, 16)),
         sourcePeerId: PeerId(raw.sublist(16, 32)),
@@ -57,7 +60,7 @@ class GroupRealtimeDatagram {
 class GroupRealtimeSequenceAllocator {
   final Map<String, int> _next = {};
   int allocate(PeerId destination, int channelId) {
-    final key = '${destination}:$channelId';
+    final key = '$destination:$channelId';
     final result = _next[key] ?? 1;
     if (result == 0xffffffff) {
       _next[key] = 0;
@@ -67,4 +70,64 @@ class GroupRealtimeSequenceAllocator {
     _next[key] = result + 1;
     return result;
   }
+}
+
+enum CoordinatorRealtimeEnqueueResult {
+  enqueued,
+  replacedPending,
+  droppedDestinationUnavailable,
+  droppedCapacity,
+}
+
+/// Section 37.1 coordinator-side pending realtime state. It is deliberately
+/// separate from the physical-hop scheduler: this table enforces the group
+/// routing identity and bounded latest-pending rule before the destination-hop
+/// scheduler accepts a frame.
+class CoordinatorRealtimePending {
+  CoordinatorRealtimePending({required this.maxPendingDatagrams})
+      : assert(maxPendingDatagrams > 0);
+
+  final int maxPendingDatagrams;
+  final Map<String, GroupRealtimeDatagram> _pending = {};
+
+  int get length => _pending.length;
+
+  CoordinatorRealtimeEnqueueResult enqueue(
+    GroupRealtimeDatagram datagram, {
+    required Set<PeerId> committedMembers,
+    required bool destinationReady,
+  }) {
+    if (!committedMembers.contains(datagram.destinationPeerId) ||
+        !destinationReady) {
+      return CoordinatorRealtimeEnqueueResult.droppedDestinationUnavailable;
+    }
+    final key = _key(
+        datagram.sourcePeerId, datagram.destinationPeerId, datagram.channelId);
+    if (_pending.containsKey(key)) {
+      _pending[key] = datagram;
+      return CoordinatorRealtimeEnqueueResult.replacedPending;
+    }
+    if (_pending.length >= maxPendingDatagrams) {
+      return CoordinatorRealtimeEnqueueResult.droppedCapacity;
+    }
+    _pending[key] = datagram;
+    return CoordinatorRealtimeEnqueueResult.enqueued;
+  }
+
+  /// Removes exactly one not-yet-submitted datagram for this routing key.
+  GroupRealtimeDatagram? take(
+          PeerId source, PeerId destination, int channelId) =>
+      _pending.remove(_key(source, destination, channelId));
+
+  /// Section 43.1.10: former coordinator realtime state is discarded.
+  void coordinatorAuthorityLost() => _pending.clear();
+
+  /// Section 43.1.12: a removed member receives no queued application traffic.
+  void destinationRemoved(PeerId destination) {
+    _pending.removeWhere(
+        (_, datagram) => datagram.destinationPeerId == destination);
+  }
+
+  String _key(PeerId source, PeerId destination, int channelId) =>
+      '$source:$destination:$channelId';
 }

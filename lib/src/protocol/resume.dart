@@ -3,6 +3,20 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import '../types.dart';
 
+/// Section 26.1 candidate traffic key. Candidate RESUME control frames always
+/// use this key with generation 0, independently of normal traffic keys.
+Future<Uint8List> candidateTrafficKey(
+    List<int> candidateSessionRootKey, int direction) async {
+  if (candidateSessionRootKey.length != 32 || direction < 0 || direction > 1) {
+    throw ArgumentError('invalid candidate traffic key input');
+  }
+  final key = await Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(
+      secretKey: SecretKey(candidateSessionRootKey),
+      nonce: const [],
+      info: [...ascii.encode('LPC1-candidate'), direction]);
+  return Uint8List.fromList(await key.extractBytes());
+}
+
 Future<Uint8List> resumeRequestProof(
         {required List<int> resumeSecret,
         required List<int> sessionId,
@@ -15,6 +29,25 @@ Future<Uint8List> resumeRequestProof(
       ...transcript
     ], secretKey: SecretKey(resumeSecret)))
         .bytes);
+
+/// Verifies Section 26.2's requester proof before the responder accepts a
+/// candidate RESUME. Invalid proofs are rejected under the candidate session.
+Future<void> verifyResumeRequestProof(
+    {required List<int> resumeSecret,
+    required List<int> sessionId,
+    required List<int> nonceA,
+    required List<int> transcript,
+    required List<int> proof}) async {
+  final expected = await resumeRequestProof(
+      resumeSecret: resumeSecret,
+      sessionId: sessionId,
+      nonceA: nonceA,
+      transcript: transcript);
+  if (!_same(expected, proof)) {
+    throw const LpcException(
+        LpcErrorCode.resumeRejected, 'invalid RESUME_REQUEST proof');
+  }
+}
 
 class ResumeRequest {
   ResumeRequest(
@@ -90,6 +123,29 @@ Future<Uint8List> resumeAcceptProof(
     ...g.buffer.asUint8List()
   ], secretKey: SecretKey(resumeSecret)))
       .bytes);
+}
+
+/// Verifies Section 26.3's responder proof before switching to the resumed
+/// logical session.
+Future<void> verifyResumeAcceptProof(
+    {required List<int> resumeSecret,
+    required List<int> sessionId,
+    required List<int> nonceA,
+    required List<int> nonceB,
+    required List<int> transcript,
+    required int generation,
+    required List<int> proof}) async {
+  final expected = await resumeAcceptProof(
+      resumeSecret: resumeSecret,
+      sessionId: sessionId,
+      nonceA: nonceA,
+      nonceB: nonceB,
+      transcript: transcript,
+      generation: generation);
+  if (!_same(expected, proof)) {
+    throw const LpcException(
+        LpcErrorCode.resumeRejected, 'invalid RESUME_ACCEPT proof');
+  }
 }
 
 class ResumeAccept {
@@ -168,4 +224,13 @@ Future<ResumedSecrets> deriveResumedSecrets(
       nonce: const [],
       info: ascii.encode('LPC1-resume-secret'));
   return ResumedSecrets(root, await next.extractBytes());
+}
+
+bool _same(List<int> a, List<int> b) {
+  if (a.length != b.length) return false;
+  var result = 0;
+  for (var i = 0; i < a.length; i++) {
+    result |= a[i] ^ b[i];
+  }
+  return result == 0;
 }

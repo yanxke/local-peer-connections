@@ -16,8 +16,7 @@ void main() {
         signalingSessionIds: [List.filled(16, 3)]);
     expect(table.lookup(messageId: id, destination: destination), isNotNull);
   });
-  test('tombstone is immediately released after all capable sessions terminate',
-      () {
+  test('UT-142 tombstone remains until all capable sessions terminate', () {
     final table = CancellationTombstoneTable();
     final id = GroupMessageId(List.filled(16, 1));
     final destination = PeerId(List.filled(16, 2));
@@ -26,8 +25,11 @@ void main() {
             groupMessageId: id,
             destinationPeerId: destination,
             deliveryMode: DeliveryMode.reliableOrdered),
-        signalingSessionIds: [List.filled(16, 3)]);
+        signalingSessionIds: [List.filled(16, 3), List.filled(16, 4)]);
     table.sessionTerminated(List.filled(16, 3));
+    expect(table.length, 1);
+    expect(table.lookup(messageId: id, destination: destination), isNotNull);
+    table.sessionTerminated(List.filled(16, 4));
     expect(table.length, 0);
   });
 }

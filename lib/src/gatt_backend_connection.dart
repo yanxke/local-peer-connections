@@ -12,9 +12,19 @@ import 'types.dart';
 /// submit further fragments.
 abstract interface class GattFragmentPlatform {
   int get platformSafeWriteSize;
-  Future<GattFragmentSubmission> submitGattFragment(Uint8List fragment);
+  Future<GattFragmentSubmission> submitGattFragment(
+    Uint8List fragment, {
+    GattFragmentTransmission transmission = GattFragmentTransmission.normal,
+  });
   Future<void> close();
 }
+
+/// The native binding maps these values to the corresponding GATT API call.
+/// `normal` retains the existing reliable/control submission path.
+enum GattFragmentTransmission { normal, writeWithoutResponse, notify }
+
+/// The local BLE role fixes the required Section 22.2 realtime direction.
+enum GattLinkRole { central, peripheral }
 
 enum GattFragmentSubmission {
   submitted,
@@ -25,10 +35,11 @@ enum GattFragmentSubmission {
 /// Portable Section 12/44 GATT backend. Native code forwards received GATT
 /// fragments to [receiveGattFragment], invokes [writable] on flow-control
 /// recovery, and invokes [terminalFailure] when the physical link dies.
-class GattBackendConnection implements BackendConnection {
+class GattBackendConnection implements RealtimeBackendConnection {
   GattBackendConnection({
     required this.connectionId,
     required GattFragmentPlatform platform,
+    this.localRole,
     this.maxQueuedBytes = 262144,
     int Function()? monotonicNowMs,
   })  : _platform = platform,
@@ -40,6 +51,7 @@ class GattBackendConnection implements BackendConnection {
   @override
   final String connectionId;
   final GattFragmentPlatform _platform;
+  final GattLinkRole? localRole;
   final GattFragmenter _fragmenter;
   final int maxQueuedBytes;
   final int Function() _nowMs;
@@ -62,6 +74,32 @@ class GattBackendConnection implements BackendConnection {
 
   @override
   TransportWrite write(Uint8List completeSerializedLpcFrame) {
+    return _write(completeSerializedLpcFrame,
+        transmission: GattFragmentTransmission.normal);
+  }
+
+  /// Maps realtime GATT traffic exactly by BLE direction: central writes RX
+  /// without response, while peripheral notifies TX. A binding must supply
+  /// its local role before realtime can be used.
+  @override
+  TransportWrite writeRealtime(Uint8List completeSerializedLpcFrame) {
+    final role = localRole;
+    if (role == null) {
+      throw const LpcException(LpcErrorCode.invalidState,
+          'GATT local role is required for realtime');
+    }
+    return _write(
+      completeSerializedLpcFrame,
+      transmission: role == GattLinkRole.central
+          ? GattFragmentTransmission.writeWithoutResponse
+          : GattFragmentTransmission.notify,
+    );
+  }
+
+  TransportWrite _write(
+    Uint8List completeSerializedLpcFrame, {
+    required GattFragmentTransmission transmission,
+  }) {
     if (_state != TransportConnectionState.open) {
       throw const LpcException(LpcErrorCode.transportClosed);
     }
@@ -72,7 +110,7 @@ class GattBackendConnection implements BackendConnection {
     if (_queuedBytes + byteCount > maxQueuedBytes) {
       throw const LpcException(LpcErrorCode.sendQueueFull);
     }
-    final pending = _PendingGattWrite(encoded, byteCount);
+    final pending = _PendingGattWrite(encoded, byteCount, transmission);
     _writes.add(pending);
     _queuedBytes += byteCount;
     unawaited(_drain());
@@ -131,8 +169,9 @@ class GattBackendConnection implements BackendConnection {
     try {
       while (_writes.isNotEmpty && _state == TransportConnectionState.open) {
         final pending = _writes.first;
-        final result = await _platform
-            .submitGattFragment(pending.fragments[pending.nextFragment]);
+        final result = await _platform.submitGattFragment(
+            pending.fragments[pending.nextFragment],
+            transmission: pending.transmission);
         if (result == GattFragmentSubmission.temporarilyUnavailable) {
           return;
         }
@@ -158,9 +197,10 @@ class GattBackendConnection implements BackendConnection {
 }
 
 class _PendingGattWrite {
-  _PendingGattWrite(this.fragments, this.byteCount);
+  _PendingGattWrite(this.fragments, this.byteCount, this.transmission);
   final List<Uint8List> fragments;
   final int byteCount;
+  final GattFragmentTransmission transmission;
   final TransportWrite write = TransportWrite();
   int nextFragment = 0;
 }

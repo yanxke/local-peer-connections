@@ -34,6 +34,21 @@ void main() {
         .startAdvertising(List.filled(16, 1), localName: 'LPC');
   });
 
+  test('UT-001 canonical discovery filters solely by the service UUID',
+      () async {
+    const channel = MethodChannel('platform-ble-discovery-test');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'startDiscovery');
+      final arguments = call.arguments as Map<Object?, Object?>;
+      expect(arguments.keys, <String>['serviceUuid']);
+      expect(arguments['serviceUuid'], List.filled(16, 1));
+      return null;
+    });
+    await PlatformBleBackend(methods: channel)
+        .startDiscovery(List.filled(16, 1));
+  });
+
   test('native backend errors map to stable LPC errors', () async {
     const channel = MethodChannel('platform-ble-error-test');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

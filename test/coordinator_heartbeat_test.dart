@@ -21,4 +21,22 @@ void main() {
     now = now.add(const Duration(milliseconds: 1));
     expect(liveness.unavailable, isTrue);
   });
+
+  test('heartbeat controller emits every second after backend submission', () {
+    var emitted = 0;
+    CoordinatorHeartbeat heartbeat() => CoordinatorHeartbeat(
+        groupId: GroupId(List.filled(16, 1)),
+        term: 2,
+        coordinatorPeerId: PeerId(List.filled(16, 3)),
+        membershipHash: List.filled(32, ++emitted));
+    final controller =
+        CoordinatorHeartbeatController(nowMs: 0, heartbeat: heartbeat);
+    expect(controller.poll(999), isNull);
+    final first = controller.poll(1000)!;
+    expect(first.membershipHash.first, 1);
+    expect(controller.poll(2000), isNull); // write is still pending
+    controller.submitted(1001);
+    expect(controller.poll(2000), isNull);
+    expect(controller.poll(2001)!.membershipHash.first, 2);
+  });
 }

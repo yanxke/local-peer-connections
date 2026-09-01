@@ -895,6 +895,12 @@ wire delivery: ACK_REQUIRED checkpoint operation
 replication queue per target: 1 in-flight + 1 replaceable pending
 ```
 
+The publish-rate limit is a rolling one-second acceptance window. If accepting
+`publishCoordinatorCheckpoint(bytes)` would make five accepted publishes in
+that window, the call MUST fail synchronously with `RESOURCE_EXHAUSTED`.
+The failed value MUST NOT replace `latestCoordinatorCheckpoint` and MUST NOT
+enter any target replication slot.
+
 The framework retains the most recently published checkpoint and replicates checkpoint state to READY members using the bounded latest-pending policy defined in Section 31.
 
 Publishing faster than transport throughput MUST NOT create an unbounded checkpoint backlog.
@@ -3187,11 +3193,13 @@ Offset Size Field
 ACCEPT echoes:
 
 ```text
-upgrade_id
-target_transport
-target_generation
-accept_data_length
-accept_data
+Offset Size Field
+0      16   upgrade_id
+16     1    target_transport
+17     3    reserved = 0
+20     4    target_generation
+24     2    accept_data_length
+26     N    transport-specific accept_data
 ```
 
 REJECT:
@@ -7051,8 +7059,6 @@ The vector/trace MUST prove:
 
 A second trace is REQUIRED where every RELIABLE_ORDERED destination-hop frame reached frame-level SENT_TO_TRANSPORT before generation loss. No retransmission is expected solely because of that later loss.
 
-
-
 ## 53.2 UDP Sidecar Vectors
 
 - UDP_OFFER reliable control frame;
@@ -7082,169 +7088,169 @@ expected final packet bytes
 expected parser result
 ```
 
-
 # 54. Mandatory Unit Tests
 
-- [ ] UT-001 iOS-compatible canonical discovery requires service UUID only.
-- [ ] UT-002 HELLO exact binary encode/decode.
-- [ ] UT-003 PeerId = truncated SHA256(identity key).
-- [ ] UT-004 AUTH Ed25519 known vector.
-- [ ] UT-005 MITM substituted identity key produces different PeerId and fails KNOWN_PEER.
-- [ ] UT-006 SAS known vector and six-digit formatting.
-- [ ] UT-007 SAS rejection prevents READY.
-- [ ] UT-008 PSK_32 known vector.
-- [ ] UT-009 Version negotiation succeeds only when the peer's supported range includes minor 1.
-- [ ] UT-010 Peer advertising max_minor=0 has no compatible minor and receives pre-key PROTOCOL_MISMATCH.
-- [ ] UT-011 PeerCapabilityBitmap encoding exact.
-- [ ] UT-012 LocalRuntimeCapabilityBitmap never serialized in HELLO.
-- [ ] UT-013 GATT uint32 fragment sequence handles >65535 fragments.
-- [ ] UT-014 GATT fragmentation exact reassembly.
-- [ ] UT-015 LPC frame >16384 payload rejected.
-- [ ] UT-016 1 MiB application message produces correct DATA chunk count.
-- [ ] UT-017 PING can be scheduled between DATA chunks.
-- [ ] UT-018 derived keepalive dead timeout always >= 3x interval.
-- [ ] UT-019 ACK timeout retransmits same MessageId with new wire sequences.
-- [ ] UT-020 duplicate retransmission delivered once and ACKed again.
-- [ ] UT-021 conflicting duplicate chunk closes MESSAGE_ID_COLLISION.
-- [ ] UT-022 initial SessionId deterministic and no alternate random definition.
-- [ ] UT-023 RESUME candidate generation 0 behavior.
-- [ ] UT-024 RESUME proof success.
-- [ ] UT-025 RESUME proof failure.
-- [ ] UT-026 RESUME preserves SessionId and MessageId prefix.
-- [ ] UT-027 RESUME resets wire sequence to 1 at incremented generation.
-- [ ] UT-028 unacked ACK-required message retransmits after resume.
-- [ ] UT-029 non-ACK sent message is not auto-retransmitted after resume.
-- [ ] UT-030 upgrade BIND exact proof.
-- [ ] UT-031 upgrade failure before SWITCH leaves old transport active.
-- [ ] UT-032 failure after SWITCH triggers RESUME fallback, never old-generation rollback.
-- [ ] UT-033 symmetric dual GATT connection chooses one deterministic rank winner.
-- [ ] UT-034 queue preserves application send order.
-- [ ] UT-035 queue bounds enforced.
-- [ ] UT-036 queued message expiry before transmission.
-- [ ] UT-037 runtime.close cascades child closure once.
-- [ ] UT-038 DiscoverySession.stop does not close PeerConnection.
-- [ ] UT-039 PeerConnection send after disconnect returns INVALID_STATE.
-- [ ] UT-040 illegal backend callback does not create illegal state transition.
-- [ ] UT-041 First MessageId allocation uses counter value 1.
-- [ ] UT-042 MessageId allocation permits UINT32_MAX exactly once, then requires a new SessionId.
-- [ ] UT-043 A 262144-byte coordinator checkpoint chunks into control frames whose plaintext is <=4032 bytes.
-- [ ] UT-044 Every chunk of one coordinator checkpoint shares one MessageId and uses a fresh reliable wire sequence number.
-- [ ] UT-045 Coordinator checkpoint ACK is emitted only after complete reassembly and commit.
-- [ ] UT-046 Duplicate completed coordinator checkpoint is not reapplied and emits ACK again.
-- [ ] UT-047 Checkpoint retransmission resends all chunks with the same MessageId and new reliable wire sequences.
-- [ ] UT-048 ACK_REQUIRED header-bit binary vector matches exactly.
-- [ ] UT-049 Duplicate ACK-required MEMBERSHIP_SNAPSHOT does not reapply membership state and emits ACK again.
-- [ ] UT-050 KnownPeerPolicy ALLOWLIST vector accepts a listed identity and rejects an unlisted identity.
-- [ ] UT-051 MEMBERSHIP_SNAPSHOT final ACK timeout sets GroupSyncState=UNSYNCHRONIZED and triggers reconnect/resync.
-- [ ] UT-052 GROUP_MERGE final ACK timeout preserves committed merge and forces target rebootstrap.
-- [ ] UT-053 COORDINATOR_CHECKPOINT final ACK timeout reports replication failure without changing membership.
+- [x] UT-001 iOS-compatible canonical discovery requires service UUID only.
+- [x] UT-002 HELLO exact binary encode/decode.
+- [x] UT-003 PeerId = truncated SHA256(identity key).
+- [x] UT-004 AUTH Ed25519 known vector.
+- [x] UT-005 MITM substituted identity key produces different PeerId and fails KNOWN_PEER.
+- [x] UT-006 SAS known vector and six-digit formatting.
+- [x] UT-007 SAS rejection prevents READY.
+- [x] UT-008 PSK_32 known vector.
+- [x] UT-009 Version negotiation succeeds only when the peer's supported range includes minor 1.
+- [x] UT-010 Peer advertising max_minor=0 has no compatible minor and receives pre-key PROTOCOL_MISMATCH.
+- [x] UT-011 PeerCapabilityBitmap encoding exact.
+- [x] UT-012 LocalRuntimeCapabilityBitmap never serialized in HELLO.
+- [x] UT-013 GATT uint32 fragment sequence handles >65535 fragments.
+- [x] UT-014 GATT fragmentation exact reassembly.
+- [x] UT-015 LPC frame >16384 payload rejected.
+- [x] UT-016 1 MiB application message produces correct DATA chunk count.
+- [x] UT-017 PING can be scheduled between DATA chunks.
+- [x] UT-018 derived keepalive dead timeout always >= 3x interval.
+- [x] UT-019 ACK timeout retransmits same MessageId with new wire sequences.
+- [x] UT-020 duplicate retransmission delivered once and ACKed again.
+- [x] UT-021 conflicting duplicate chunk closes MESSAGE_ID_COLLISION.
+- [x] UT-022 initial SessionId deterministic and no alternate random definition.
+- [x] UT-023 RESUME candidate generation 0 behavior.
+- [x] UT-024 RESUME proof success.
+- [x] UT-025 RESUME proof failure.
+- [x] UT-026 RESUME preserves SessionId and MessageId prefix.
+- [x] UT-027 RESUME resets wire sequence to 1 at incremented generation.
+- [x] UT-028 unacked ACK-required message retransmits after resume.
+- [x] UT-029 non-ACK sent message is not auto-retransmitted after resume.
+- [x] UT-030 upgrade BIND exact proof.
+- [x] UT-031 upgrade failure before SWITCH leaves old transport active.
+- [x] UT-032 failure after SWITCH triggers RESUME fallback, never old-generation rollback.
+- [x] UT-033 symmetric dual GATT connection chooses one deterministic rank winner.
+- [x] UT-034 queue preserves application send order.
+- [x] UT-035 queue bounds enforced.
+- [x] UT-036 queued message expiry before transmission.
+- [x] UT-037 runtime.close cascades child closure once.
+- [x] UT-038 DiscoverySession.stop does not close PeerConnection.
+- [x] UT-039 PeerConnection send after disconnect returns INVALID_STATE.
+- [x] UT-040 illegal backend callback does not create illegal state transition.
+- [x] UT-041 First MessageId allocation uses counter value 1.
+- [x] UT-042 MessageId allocation permits UINT32_MAX exactly once, then requires a new SessionId.
+- [x] UT-043 A 262144-byte coordinator checkpoint chunks into control frames whose plaintext is <=4032 bytes.
+- [x] UT-044 Every chunk of one coordinator checkpoint shares one MessageId and uses a fresh reliable wire sequence number.
+- [x] UT-045 Coordinator checkpoint ACK is emitted only after complete reassembly and commit.
+- [x] UT-046 Duplicate completed coordinator checkpoint is not reapplied and emits ACK again.
+- [x] UT-047 Checkpoint retransmission resends all chunks with the same MessageId and new reliable wire sequences.
+- [x] UT-048 ACK_REQUIRED header-bit binary vector matches exactly.
+- [x] UT-049 Duplicate ACK-required MEMBERSHIP_SNAPSHOT does not reapply membership state and emits ACK again.
+- [x] UT-050 KnownPeerPolicy ALLOWLIST vector accepts a listed identity and rejects an unlisted identity.
+- [x] UT-051 MEMBERSHIP_SNAPSHOT final ACK timeout sets GroupSyncState=UNSYNCHRONIZED and triggers reconnect/resync.
+- [x] UT-052 GROUP_MERGE final ACK timeout preserves committed merge and forces target rebootstrap.
+- [x] UT-053 COORDINATOR_CHECKPOINT final ACK timeout reports replication failure without changing membership.
 
 ---
-- [ ] UT-054 ACK timer for multi-chunk RELIABLE_ACKED DATA starts only after the final DATA chunk of the attempt reaches SENT_TO_TRANSPORT.
-- [ ] UT-055 ACK timer for chunked COORDINATOR_CHECKPOINT starts only after the final checkpoint chunk of the attempt reaches SENT_TO_TRANSPORT.
-- [ ] UT-056 A transmission attempt taking longer than 3000 ms does not trigger ACK timeout before its final frame/chunk reaches SENT_TO_TRANSPORT.
-- [ ] UT-057 SENT_TO_TRANSPORT means backend acceptance of the complete serialized LPC frame, not scheduler enqueue.
-- [ ] UT-058 Transport loss before final chunk SENT_TO_TRANSPORT starts no ACK timeout for that incomplete attempt.
-- [ ] UT-059 Post-RESUME retransmission starts a fresh ACK timer only after the final retransmitted frame/chunk reaches SENT_TO_TRANSPORT.
-- [ ] UT-060 Incomplete checkpoint reassembly is discarded immediately on transport loss.
-- [ ] UT-061 After RESUME, unacknowledged checkpoint retransmits from chunk 0 with same MessageId and fresh wire sequences.
-- [ ] UT-062 Section 6 MessageId semantics cover ACK-required control operations.
-- [ ] UT-063 GATT LPC frame does not reach SENT_TO_TRANSPORT when merely inserted into the backend fragmentation queue.
-- [ ] UT-064 GATT LPC frame reaches SENT_TO_TRANSPORT only after its final GATT fragment is submitted to the platform API.
-- [ ] UT-065 ACK timer for multi-chunk DATA begins only after the final physical GATT fragment of the final LPC DATA frame is submitted.
-- [ ] UT-066 TCP LPC frame reaches SENT_TO_TRANSPORT only after all serialized frame bytes are accepted by the socket/kernel send path.
-- [ ] UT-067 L2CAP LPC frame reaches SENT_TO_TRANSPORT only after all serialized frame bytes are accepted by the L2CAP stream write mechanism.
-- [ ] UT-068 Backend TransportWrite remains PENDING while transport-specific fragmentation is only internally queued.
-- [ ] UT-069 A TransportWrite failure before final platform submission does not start an ACK timer.
-- [ ] UT-070 After RESUME_READY, unacknowledged ACK-required control operations are retransmitted and duplicate protocol-state mutation is suppressed.
-- [ ] UT-071 Transient backend not-writable/backpressure keeps TransportWrite PENDING and does not enter RECONNECTING.
-- [ ] UT-072 Terminal GATT fragment submission error transitions TransportWrite to FAILED and PeerConnection into transport-loss/RECONNECTING.
-- [ ] UT-073 TransportWrite.FAILED never starts an ACK timer and same transport generation sends no further LPC frames.
-- [ ] UT-074 All PENDING TransportWrites on a terminally failed physical transport complete FAILED.
-- [ ] UT-075 Partially reassembled RELIABLE_ORDERED DATA is discarded when transport generation is lost.
-- [ ] UT-076 Partially reassembled RELIABLE_ACKED DATA is discarded when transport generation is lost.
-- [ ] UT-077 Partially transmitted RELIABLE_ORDERED message retransmits from chunk 0 after RESUME when at least one chunk never reached frame-level SENT_TO_TRANSPORT.
-- [ ] UT-078 Fully frame-submitted RELIABLE_ORDERED message is not retransmitted after RESUME.
-- [ ] UT-079 RELIABLE_ACKED message retransmits all chunks after RESUME regardless of how many chunks reached SENT_TO_TRANSPORT before loss.
-- [ ] UT-080 Multi-frame SendHandle reaches SENT_TO_TRANSPORT only after every DATA chunk reaches frame-level SENT_TO_TRANSPORT.
-- [ ] UT-081 Protocol-minor no-overlap emits exact pre-key plaintext ERROR(PROTOCOL_MISMATCH) with zero session/message/nonce fields and no AEAD tag.
-- [ ] UT-082 Pre-key ERROR(PROTOCOL_MISMATCH) uses protocol_minor equal to sender max_minor.
-- [ ] UT-083 Plaintext ERROR with a non-PROTOCOL_MISMATCH error code is rejected.
-- [ ] UT-084 Plaintext ERROR after AUTH/session-key establishment is rejected.
-- [ ] UT-085 After sending pre-key ERROR(PROTOCOL_MISMATCH), sender closes without sending AUTH.
-- [ ] UT-086 GroupId merge winner uses larger committed_member_count before lexicographic GroupId tie-break.
-- [ ] UT-087 Conforming HELLO advertises min_minor=1 and max_minor=1.
-- [ ] UT-088 Peer advertising only minor 0 is rejected with pre-key PROTOCOL_MISMATCH before AUTH.
-- [ ] UT-089 Implementation does not attempt to encode a minor-0 DATA frame after version negotiation failure.
-- [ ] UT-090 When checkpoint A is in flight and B then C are published, only A and C are transmitted; B is replaced before transmission.
-- [ ] UT-091 Checkpoint replication retains at most one in-flight and one pending checkpoint per target peer.
-- [ ] UT-092 Publishing a newer checkpoint does not cancel or truncate an ACK-required checkpoint already in flight.
-- [ ] UT-093 After in-flight checkpoint terminal completion, the most recent pending checkpoint becomes the next transmitted checkpoint.
-- [ ] UT-094 A checkpoint replaced while pending allocates neither MessageId nor checkpoint_sequence.
-- [ ] UT-095 checkpoint_sequence increments only when a checkpoint is promoted to an actual in-flight operation, so pending replacement creates no sequence gap.
-- [ ] UT-096 A newly READY peer receives only the latest retained coordinator checkpoint rather than historical checkpoint backlog.
-- [ ] UT-097 Given peers A and B have different checkpoint replication progress, one application checkpoint publication may become in-flight for A while remaining pending for B; A and B allocate MessageId and checkpoint_sequence independently only when that checkpoint becomes in-flight for the respective peer.
-- [ ] UT-098 Same coordinator and same term: later membership-snapshot MessageId counter is considered newer.
-- [ ] UT-099 Older same-term MEMBERSHIP_SNAPSHOT received after newer accepted snapshot is ACKed but does not mutate committed membership.
-- [ ] UT-100 Membership snapshot MessageIds from different coordinator PeerIds or different terms are never ordered against each other by counter.
-- [ ] UT-101 Membership snapshot MessageId ordering is scoped by SessionId and MUST NOT compare counters across logical sessions.
-- [ ] UT-102 A new SessionId with same coordinator and coordinator_term accepts its first valid membership snapshot as a fresh ordering baseline even when its counter is lower than the previous SessionId's counter.
-- [ ] UT-103 Different SessionIds remain distinct membership-ordering domains even if sender_message_prefix bytes are equal.
-- [ ] UT-104 Non-coordinator B sending to non-coordinator C routes B->coordinator->C and does not require a B-C PeerConnection.
-- [ ] UT-105 RELIABLE_ACKED GroupSession SendHandle does not complete on source->coordinator generic ACK and completes only after GROUP_DELIVERY_ACK for destination C.
-- [ ] UT-106 Relayed GROUP_RELIABLE preserves GroupMessageId end-to-end while each hop uses an independently allocated pairwise MessageId.
-- [ ] UT-107 Destination duplicate (sourcePeerId, GroupMessageId) with identical content is not redelivered and permits destination ACK regeneration.
-- [ ] UT-108 GROUP_REALTIME_DATAGRAM preserves original sourcePeerId through coordinator relay.
-- [ ] UT-109 broadcast excludes local peer and snapshots committed remote membership at acceptance time.
-- [ ] UT-110 BroadcastHandle COMPLETED means all constituent SendHandles are terminal, including partial failures.
-- [ ] UT-111 RealtimeBroadcastHandle COMPLETED permits mixed terminal constituent results.
-- [ ] UT-112 ReliableMessageReceived exposes sourcePeerId, GroupMessageId, deliveryMode, and bytes.
-- [ ] UT-113 RealtimeDatagramReceived exposes sourcePeerId, channelId, senderTick, datagramSequence, and bytes.
-- [ ] UT-114 members() is updated before MemberJoined/MemberLeft callback delivery.
-- [ ] UT-115 coordinator getters are updated before CoordinatorChanged callback delivery.
-- [ ] UT-116 GroupSession callbacks are serialized and never concurrent.
-- [ ] UT-117 Public GroupSession methods are safe under concurrent invocation and reentrant send() from an event callback does not deadlock.
-- [ ] UT-118 No total order is inferred across messages from different source PeerIds.
-- [ ] UT-119 GROUP_RELIABLE source-to-coordinator final hop ACK timeout terminates the group send with ACK_TIMEOUT rather than retaining forever.
-- [ ] UT-120 GROUP_RELIABLE coordinator-to-destination final ACK timeout produces GROUP_RELAY_STATUS(DESTINATION_ACK_TIMEOUT).
-- [ ] UT-121 Final ACK timeout of GROUP_DELIVERY_ACK forces source-link reconnect; if source never received it, retained GroupMessageId reroutes and destination dedup avoids redelivery.
-- [ ] UT-122 Committed destination whose coordinator PeerConnection is not READY yields DESTINATION_UNAVAILABLE immediately for a new reliable group send; realtime is dropped.
-- [ ] UT-123 GROUP_RELAY_STATUS status values map to exact public error codes.
-- [ ] UT-124 Coordinator with insufficient destination reliable-queue capacity fully receives and validates RELIABLE_ACKED GROUP_RELIABLE, generic-ACKs the source hop, retains no relay operation, and sends GROUP_RELAY_STATUS(RELAY_QUEUE_FULL).
-- [ ] UT-125 Coordinator does not source-hop ACK a partial GROUP_RELIABLE operation.
-- [ ] UT-126 Relay admission reserves one complete logical operation's byte/message budget atomically before source-hop ACK.
-- [ ] UT-127 Route admission failure never causes repeated retransmission of the same large source hop solely because destination queue is full.
-- [ ] UT-128 Incomplete GROUP_RELIABLE reassembly is discarded on transport-generation loss.
-- [ ] UT-129 Partially submitted RELIABLE_ORDERED coordinator-to-destination GROUP_RELIABLE retransmits the complete hop from chunk 0 after successful RESUME using the same pairwise MessageId and GroupMessageId.
-- [ ] UT-130 Partially submitted RELIABLE_ACKED GROUP_RELIABLE retransmits the complete hop from chunk 0 after RESUME with the same pairwise MessageId and GroupMessageId.
-- [ ] UT-131 Fully frame-submitted RELIABLE_ORDERED GROUP_RELIABLE is not retransmitted solely because transport fails afterward.
-- [ ] UT-132 A retained admitted RELIABLE_ORDERED relay continues to consume its original bounded destination-queue reservation while destination PeerConnection is RECONNECTING.
-- [ ] UT-133 If destination-hop RESUME fails after partial RELIABLE_ORDERED relay, coordinator discards retained relay state and reports DESTINATION_UNAVAILABLE.
-- [ ] UT-134 After a completed (sourcePeerId, GroupMessageId) entry is evicted from the 16,384-entry destination dedup window, a later replay of that older GroupMessageId is not required to be recognized as duplicate and may redeliver.
-- [ ] UT-135 Queued reliable send cancelled before transmission sends no application frame and terminates CANCELLED.
-- [ ] UT-136 RELIABLE_ACKED source operation cancelled after partial local transmission performs no future source-side retry or reroute.
-- [ ] UT-137 Routed RELIABLE_ACKED send cancelled after coordinator relay admission may still complete destination delivery while source handle remains CANCELLED.
-- [ ] UT-138 GROUP_DELIVERY_ACK arriving after local cancellation is authenticated and generic-ACKed through the cancellation tombstone but does not transition the cancelled handle.
-- [ ] UT-139 GROUP_RELAY_STATUS arriving after local cancellation is authenticated and generic-ACKed through the cancellation tombstone but does not transition the cancelled handle.
-- [ ] UT-140 CANCELLED does not imply destination non-delivery when destination committed before cancellation result reached the source.
-- [ ] UT-141 When destination membership removal commits, nonterminal admitted relay operations targeting that destination are terminated and queued application traffic is not sent afterward.
-- [ ] UT-142 Cancelled routed send creates a tombstone; when all PeerConnection SessionIds capable of valid late signaling terminate while GroupSession remains open, the tombstone is released and no longer consumes tombstone capacity.
-- [ ] UT-143 GroupSession close releases all cancellation tombstones even if a previously signaling-capable PeerConnection SessionId would otherwise remain live.
-- [ ] UT-144 Delayed GROUP_DELIVERY_ACK from a former coordinator on the same historically valid SessionId and matching a cancellation tombstone is generic-ACKed and discarded as stale-authority signaling without changing CANCELLED.
-- [ ] UT-145 Former coordinator signaling for a nonterminal send never completes or fails that send after coordinator migration.
-- [ ] UT-146 A former coordinator cannot use the stale-authority exception to originate new route signaling after loss of coordinator authority.
-- [ ] UT-147 The 16,384 completed GroupMessageId dedup entries form one shared destination-GroupSession cache across all source PeerIds rather than a per-source cache.
-- [ ] UT-148 When coordinator authority loss commits, every nonterminal admitted relay owned by the former coordinator stops future GROUP_RELIABLE submission, releases queue reservation, and retains no reroute ownership.
-- [ ] UT-149 Source-cancellation relay continuation is overridden by coordinator authority loss.
-- [ ] UT-150 Already-in-flight GROUP_DELIVERY_ACK from immediately previous coordinator on the historically valid SessionId is generic-ACKed and semantically discarded after migration without completing/failing a nonterminal send.
-- [ ] UT-151 Already-in-flight GROUP_RELAY_STATUS from immediately previous coordinator on the historically valid SessionId is generic-ACKed and semantically discarded after migration.
-- [ ] UT-152 Stale former-coordinator GROUP_RELIABLE arriving after new coordinator commit does not emit application delivery or cause PROTOCOL_MISMATCH when historical authority/SessionId checks pass.
-- [ ] UT-153 Incomplete stale former-coordinator GROUP_RELIABLE reassembly is discarded and never combined with rerouted chunks from the new coordinator.
-- [ ] UT-154 Stale former-coordinator GROUP_REALTIME_DATAGRAM is authenticated then discarded without RealtimeDatagramReceived.
-- [ ] UT-155 A former coordinator newly originating routing/signaling after authority loss does not qualify for stale-authority handling.
-- [ ] UT-156 HELLO `keepalive_interval_ms` is encoded at offset 106 and both
+
+- [x] UT-054 ACK timer for multi-chunk RELIABLE_ACKED DATA starts only after the final DATA chunk of the attempt reaches SENT_TO_TRANSPORT.
+- [x] UT-055 ACK timer for chunked COORDINATOR_CHECKPOINT starts only after the final checkpoint chunk of the attempt reaches SENT_TO_TRANSPORT.
+- [x] UT-056 A transmission attempt taking longer than 3000 ms does not trigger ACK timeout before its final frame/chunk reaches SENT_TO_TRANSPORT.
+- [x] UT-057 SENT_TO_TRANSPORT means backend acceptance of the complete serialized LPC frame, not scheduler enqueue.
+- [x] UT-058 Transport loss before final chunk SENT_TO_TRANSPORT starts no ACK timeout for that incomplete attempt.
+- [x] UT-059 Post-RESUME retransmission starts a fresh ACK timer only after the final retransmitted frame/chunk reaches SENT_TO_TRANSPORT.
+- [x] UT-060 Incomplete checkpoint reassembly is discarded immediately on transport loss.
+- [x] UT-061 After RESUME, unacknowledged checkpoint retransmits from chunk 0 with same MessageId and fresh wire sequences.
+- [x] UT-062 Section 6 MessageId semantics cover ACK-required control operations.
+- [x] UT-063 GATT LPC frame does not reach SENT_TO_TRANSPORT when merely inserted into the backend fragmentation queue.
+- [x] UT-064 GATT LPC frame reaches SENT_TO_TRANSPORT only after its final GATT fragment is submitted to the platform API.
+- [x] UT-065 ACK timer for multi-chunk DATA begins only after the final physical GATT fragment of the final LPC DATA frame is submitted.
+- [x] UT-066 TCP LPC frame reaches SENT_TO_TRANSPORT only after all serialized frame bytes are accepted by the socket/kernel send path.
+- [x] UT-067 L2CAP LPC frame reaches SENT_TO_TRANSPORT only after all serialized frame bytes are accepted by the L2CAP stream write mechanism.
+- [x] UT-068 Backend TransportWrite remains PENDING while transport-specific fragmentation is only internally queued.
+- [x] UT-069 A TransportWrite failure before final platform submission does not start an ACK timer.
+- [x] UT-070 After RESUME_READY, unacknowledged ACK-required control operations are retransmitted and duplicate protocol-state mutation is suppressed.
+- [x] UT-071 Transient backend not-writable/backpressure keeps TransportWrite PENDING and does not enter RECONNECTING.
+- [x] UT-072 Terminal GATT fragment submission error transitions TransportWrite to FAILED and PeerConnection into transport-loss/RECONNECTING.
+- [x] UT-073 TransportWrite.FAILED never starts an ACK timer and same transport generation sends no further LPC frames.
+- [x] UT-074 All PENDING TransportWrites on a terminally failed physical transport complete FAILED.
+- [x] UT-075 Partially reassembled RELIABLE_ORDERED DATA is discarded when transport generation is lost.
+- [x] UT-076 Partially reassembled RELIABLE_ACKED DATA is discarded when transport generation is lost.
+- [x] UT-077 Partially transmitted RELIABLE_ORDERED message retransmits from chunk 0 after RESUME when at least one chunk never reached frame-level SENT_TO_TRANSPORT.
+- [x] UT-078 Fully frame-submitted RELIABLE_ORDERED message is not retransmitted after RESUME.
+- [x] UT-079 RELIABLE_ACKED message retransmits all chunks after RESUME regardless of how many chunks reached SENT_TO_TRANSPORT before loss.
+- [x] UT-080 Multi-frame SendHandle reaches SENT_TO_TRANSPORT only after every DATA chunk reaches frame-level SENT_TO_TRANSPORT.
+- [x] UT-081 Protocol-minor no-overlap emits exact pre-key plaintext ERROR(PROTOCOL_MISMATCH) with zero session/message/nonce fields and no AEAD tag.
+- [x] UT-082 Pre-key ERROR(PROTOCOL_MISMATCH) uses protocol_minor equal to sender max_minor.
+- [x] UT-083 Plaintext ERROR with a non-PROTOCOL_MISMATCH error code is rejected.
+- [x] UT-084 Plaintext ERROR after AUTH/session-key establishment is rejected.
+- [x] UT-085 After sending pre-key ERROR(PROTOCOL_MISMATCH), sender closes without sending AUTH.
+- [x] UT-086 GroupId merge winner uses larger committed_member_count before lexicographic GroupId tie-break.
+- [x] UT-087 Conforming HELLO advertises min_minor=1 and max_minor=1.
+- [x] UT-088 Peer advertising only minor 0 is rejected with pre-key PROTOCOL_MISMATCH before AUTH.
+- [x] UT-089 Implementation does not attempt to encode a minor-0 DATA frame after version negotiation failure.
+- [x] UT-090 When checkpoint A is in flight and B then C are published, only A and C are transmitted; B is replaced before transmission.
+- [x] UT-091 Checkpoint replication retains at most one in-flight and one pending checkpoint per target peer.
+- [x] UT-092 Publishing a newer checkpoint does not cancel or truncate an ACK-required checkpoint already in flight.
+- [x] UT-093 After in-flight checkpoint terminal completion, the most recent pending checkpoint becomes the next transmitted checkpoint.
+- [x] UT-094 A checkpoint replaced while pending allocates neither MessageId nor checkpoint_sequence.
+- [x] UT-095 checkpoint_sequence increments only when a checkpoint is promoted to an actual in-flight operation, so pending replacement creates no sequence gap.
+- [x] UT-096 A newly READY peer receives only the latest retained coordinator checkpoint rather than historical checkpoint backlog.
+- [x] UT-097 Given peers A and B have different checkpoint replication progress, one application checkpoint publication may become in-flight for A while remaining pending for B; A and B allocate MessageId and checkpoint_sequence independently only when that checkpoint becomes in-flight for the respective peer.
+- [x] UT-098 Same coordinator and same term: later membership-snapshot MessageId counter is considered newer.
+- [x] UT-099 Older same-term MEMBERSHIP_SNAPSHOT received after newer accepted snapshot is ACKed but does not mutate committed membership.
+- [x] UT-100 Membership snapshot MessageIds from different coordinator PeerIds or different terms are never ordered against each other by counter.
+- [x] UT-101 Membership snapshot MessageId ordering is scoped by SessionId and MUST NOT compare counters across logical sessions.
+- [x] UT-102 A new SessionId with same coordinator and coordinator_term accepts its first valid membership snapshot as a fresh ordering baseline even when its counter is lower than the previous SessionId's counter.
+- [x] UT-103 Different SessionIds remain distinct membership-ordering domains even if sender_message_prefix bytes are equal.
+- [x] UT-104 Non-coordinator B sending to non-coordinator C routes B->coordinator->C and does not require a B-C PeerConnection.
+- [x] UT-105 RELIABLE_ACKED GroupSession SendHandle does not complete on source->coordinator generic ACK and completes only after GROUP_DELIVERY_ACK for destination C.
+- [x] UT-106 Relayed GROUP_RELIABLE preserves GroupMessageId end-to-end while each hop uses an independently allocated pairwise MessageId.
+- [x] UT-107 Destination duplicate (sourcePeerId, GroupMessageId) with identical content is not redelivered and permits destination ACK regeneration.
+- [x] UT-108 GROUP_REALTIME_DATAGRAM preserves original sourcePeerId through coordinator relay.
+- [x] UT-109 broadcast excludes local peer and snapshots committed remote membership at acceptance time.
+- [x] UT-110 BroadcastHandle COMPLETED means all constituent SendHandles are terminal, including partial failures.
+- [x] UT-111 RealtimeBroadcastHandle COMPLETED permits mixed terminal constituent results.
+- [x] UT-112 ReliableMessageReceived exposes sourcePeerId, GroupMessageId, deliveryMode, and bytes.
+- [x] UT-113 RealtimeDatagramReceived exposes sourcePeerId, channelId, senderTick, datagramSequence, and bytes.
+- [x] UT-114 members() is updated before MemberJoined/MemberLeft callback delivery.
+- [x] UT-115 coordinator getters are updated before CoordinatorChanged callback delivery.
+- [x] UT-116 GroupSession callbacks are serialized and never concurrent.
+- [x] UT-117 Public GroupSession methods are safe under concurrent invocation and reentrant send() from an event callback does not deadlock.
+- [x] UT-118 No total order is inferred across messages from different source PeerIds.
+- [x] UT-119 GROUP_RELIABLE source-to-coordinator final hop ACK timeout terminates the group send with ACK_TIMEOUT rather than retaining forever.
+- [x] UT-120 GROUP_RELIABLE coordinator-to-destination final ACK timeout produces GROUP_RELAY_STATUS(DESTINATION_ACK_TIMEOUT).
+- [x] UT-121 Final ACK timeout of GROUP_DELIVERY_ACK forces source-link reconnect; if source never received it, retained GroupMessageId reroutes and destination dedup avoids redelivery.
+- [x] UT-122 Committed destination whose coordinator PeerConnection is not READY yields DESTINATION_UNAVAILABLE immediately for a new reliable group send; realtime is dropped.
+- [x] UT-123 GROUP_RELAY_STATUS status values map to exact public error codes.
+- [x] UT-124 Coordinator with insufficient destination reliable-queue capacity fully receives and validates RELIABLE_ACKED GROUP_RELIABLE, generic-ACKs the source hop, retains no relay operation, and sends GROUP_RELAY_STATUS(RELAY_QUEUE_FULL).
+- [x] UT-125 Coordinator does not source-hop ACK a partial GROUP_RELIABLE operation.
+- [x] UT-126 Relay admission reserves one complete logical operation's byte/message budget atomically before source-hop ACK.
+- [x] UT-127 Route admission failure never causes repeated retransmission of the same large source hop solely because destination queue is full.
+- [x] UT-128 Incomplete GROUP_RELIABLE reassembly is discarded on transport-generation loss.
+- [x] UT-129 Partially submitted RELIABLE_ORDERED coordinator-to-destination GROUP_RELIABLE retransmits the complete hop from chunk 0 after successful RESUME using the same pairwise MessageId and GroupMessageId.
+- [x] UT-130 Partially submitted RELIABLE_ACKED GROUP_RELIABLE retransmits the complete hop from chunk 0 after RESUME with the same pairwise MessageId and GroupMessageId.
+- [x] UT-131 Fully frame-submitted RELIABLE_ORDERED GROUP_RELIABLE is not retransmitted solely because transport fails afterward.
+- [x] UT-132 A retained admitted RELIABLE_ORDERED relay continues to consume its original bounded destination-queue reservation while destination PeerConnection is RECONNECTING.
+- [x] UT-133 If destination-hop RESUME fails after partial RELIABLE_ORDERED relay, coordinator discards retained relay state and reports DESTINATION_UNAVAILABLE.
+- [x] UT-134 After a completed (sourcePeerId, GroupMessageId) entry is evicted from the 16,384-entry destination dedup window, a later replay of that older GroupMessageId is not required to be recognized as duplicate and may redeliver.
+- [x] UT-135 Queued reliable send cancelled before transmission sends no application frame and terminates CANCELLED.
+- [x] UT-136 RELIABLE_ACKED source operation cancelled after partial local transmission performs no future source-side retry or reroute.
+- [x] UT-137 Routed RELIABLE_ACKED send cancelled after coordinator relay admission may still complete destination delivery while source handle remains CANCELLED.
+- [x] UT-138 GROUP_DELIVERY_ACK arriving after local cancellation is authenticated and generic-ACKed through the cancellation tombstone but does not transition the cancelled handle.
+- [x] UT-139 GROUP_RELAY_STATUS arriving after local cancellation is authenticated and generic-ACKed through the cancellation tombstone but does not transition the cancelled handle.
+- [x] UT-140 CANCELLED does not imply destination non-delivery when destination committed before cancellation result reached the source.
+- [x] UT-141 When destination membership removal commits, nonterminal admitted relay operations targeting that destination are terminated and queued application traffic is not sent afterward.
+- [x] UT-142 Cancelled routed send creates a tombstone; when all PeerConnection SessionIds capable of valid late signaling terminate while GroupSession remains open, the tombstone is released and no longer consumes tombstone capacity.
+- [x] UT-143 GroupSession close releases all cancellation tombstones even if a previously signaling-capable PeerConnection SessionId would otherwise remain live.
+- [x] UT-144 Delayed GROUP_DELIVERY_ACK from a former coordinator on the same historically valid SessionId and matching a cancellation tombstone is generic-ACKed and discarded as stale-authority signaling without changing CANCELLED.
+- [x] UT-145 Former coordinator signaling for a nonterminal send never completes or fails that send after coordinator migration.
+- [x] UT-146 A former coordinator cannot use the stale-authority exception to originate new route signaling after loss of coordinator authority.
+- [x] UT-147 The 16,384 completed GroupMessageId dedup entries form one shared destination-GroupSession cache across all source PeerIds rather than a per-source cache.
+- [x] UT-148 When coordinator authority loss commits, every nonterminal admitted relay owned by the former coordinator stops future GROUP_RELIABLE submission, releases queue reservation, and retains no reroute ownership.
+- [x] UT-149 Source-cancellation relay continuation is overridden by coordinator authority loss.
+- [x] UT-150 Already-in-flight GROUP_DELIVERY_ACK from immediately previous coordinator on the historically valid SessionId is generic-ACKed and semantically discarded after migration without completing/failing a nonterminal send.
+- [x] UT-151 Already-in-flight GROUP_RELAY_STATUS from immediately previous coordinator on the historically valid SessionId is generic-ACKed and semantically discarded after migration.
+- [x] UT-152 Stale former-coordinator GROUP_RELIABLE arriving after new coordinator commit does not emit application delivery or cause PROTOCOL_MISMATCH when historical authority/SessionId checks pass.
+- [x] UT-153 Incomplete stale former-coordinator GROUP_RELIABLE reassembly is discarded and never combined with rerouted chunks from the new coordinator.
+- [x] UT-154 Stale former-coordinator GROUP_REALTIME_DATAGRAM is authenticated then discarded without RealtimeDatagramReceived.
+- [x] UT-155 A former coordinator newly originating routing/signaling after authority loss does not qualify for stale-authority handling.
+- [x] UT-156 HELLO `keepalive_interval_ms` is encoded at offset 106 and both
   peers derive identical READY keepalive interval/dead-timeout values.
-- [ ] UT-157 Backend-driven HELLO/AUTH sends encrypted generation-1 READY at
+- [x] UT-157 Backend-driven HELLO/AUTH sends encrypted generation-1 READY at
   sequence 1 in both directions; a PeerConnection becomes READY only after
   local transport submission and remote authenticated READY, and ordinary
   encrypted traffic begins at sequence 2.
@@ -7285,125 +7291,106 @@ Every mobile release candidate MUST run:
 - [ ] IT-030 Injected terminal GATT submission failure during partially transmitted RELIABLE_ORDERED DATA resumes by retransmitting the entire logical message from chunk 0.
 - [ ] IT-031 Simulated transient GATT backpressure does not disconnect/reconnect and transmission resumes when writable.
 
-
-
 ## Automatic Coordinator Tests
 
-- [ ] COORD-001 Three peers starting simultaneously converge on one coordinator without user host selection.
+- [x] COORD-001 Three peers starting simultaneously converge on one coordinator without user host selection.
 - [ ] COORD-002 Existing healthy coordinator remains coordinator when a higher-ranked peer joins.
-- [ ] COORD-003 Coordinator disappears and remaining peers elect exactly one replacement.
-- [ ] COORD-004 Coordinator migration retains the same GroupId.
-- [ ] COORD-005 Coordinator migration retains all PeerIds.
+- [x] COORD-003 Coordinator disappears and remaining peers elect exactly one replacement.
+- [x] COORD-004 Coordinator migration retains the same GroupId.
+- [x] COORD-005 Coordinator migration retains all PeerIds.
 - [ ] COORD-006 Coordinator migration rebuilds star automatically.
-- [ ] COORD-007 Two singleton groups merge and deterministically retain lexicographically smaller GroupId.
-- [ ] COORD-008 Same-term competing coordinator claims converge to higher CoordinatorRank.
-- [ ] COORD-009 Higher election term always supersedes lower term.
-- [ ] COORD-010 Latest committed membership snapshot survives coordinator loss.
-- [ ] COORD-011 Coordinator checkpoint is available to newly promoted coordinator.
+- [x] COORD-007 Two singleton groups merge and deterministically retain lexicographically smaller GroupId.
+- [x] COORD-008 Same-term competing coordinator claims converge to higher CoordinatorRank.
+- [x] COORD-009 Higher election term always supersedes lower term.
+- [x] COORD-010 Latest committed membership snapshot survives coordinator loss.
+- [x] COORD-011 Coordinator checkpoint is available to newly promoted coordinator.
 - [ ] COORD-012 No UI/user approval callback is required for migration.
 - [ ] COORD-013 Two partitioned halves independently elect coordinators, reconnect, and converge to one coordinator.
 - [ ] COORD-014 Divergent same-GroupId membership snapshots reconcile at `max(termA, termB)+1`.
-- [ ] COORD-015 A 6-member group and 5-member group refuse automatic merge when effective_max_peers=8.
-- [ ] COORD-016 Different maxPeers values negotiate `min(all member maxPeers)`.
-- [ ] COORD-017 Winning coordinator learns complete losing membership from GROUP_INFO before merge.
+- [x] COORD-015 A 6-member group and 5-member group refuse automatic merge when effective_max_peers=8.
+- [x] COORD-016 Different maxPeers values negotiate `min(all member maxPeers)`.
+- [x] COORD-017 Winning coordinator learns complete losing membership from GROUP_INFO before merge.
 - [ ] COORD-018 Losing GroupId alias redirects an authenticated reconnecting member for exactly 30 seconds.
 - [ ] COORD-019 Three compatible groups discovered simultaneously converge deterministically on one GroupId.
 - [ ] COORD-020 Stale GROUP_MERGE from an older/equal already-superseded term is ignored.
-- [ ] COORD-021 Same namespace but different TOKEN_SCOPED join tokens never auto-merge.
-- [ ] COORD-022 OPEN_PROXIMITY groups do auto-merge when all other compatibility checks pass.
-- [ ] COORD-023 Split-brain union exceeding capacity does not arbitrarily evict existing committed members.
-- [ ] COORD-024 GROUP_INFO carries every member's max_peers and remote peer computes the same effective_max_peers.
-- [ ] COORD-025 Groups with different GroupTrustMode values refuse automatic merge.
-- [ ] COORD-026 KNOWN_PEERS groups with knownPeersAutoMerge=false remain separate.
+- [x] COORD-021 Same namespace but different TOKEN_SCOPED join tokens never auto-merge.
+- [x] COORD-022 OPEN_PROXIMITY groups do auto-merge when all other compatibility checks pass.
+- [x] COORD-023 Split-brain union exceeding capacity does not arbitrarily evict existing committed members.
+- [x] COORD-024 GROUP_INFO carries every member's max_peers and remote peer computes the same effective_max_peers.
+- [x] COORD-025 Groups with different GroupTrustMode values refuse automatic merge.
+- [x] COORD-026 KNOWN_PEERS groups with knownPeersAutoMerge=false remain separate.
 - [ ] COORD-027 GROUP_MERGE_REJECT is emitted only by the would-be winning coordinator.
-- [ ] COORD-028 Normal member GROUP_LEAVE removes it and produces a same-term MEMBERSHIP_SNAPSHOT.
-- [ ] COORD-029 Abrupt non-coordinator disconnect retains membership through reconnect window then removes it on terminal timeout.
-- [ ] COORD-030 Coordinator voluntary leave triggers immediate election without waiting for heartbeat timeout.
-- [ ] COORD-031 Replacement coordinator first snapshot excludes voluntarily/abruptly departed old coordinator.
-- [ ] COORD-032 Coordinator KICKED leave removes only the target member and publishes a new snapshot.
+- [x] COORD-028 Normal member GROUP_LEAVE removes it and produces a same-term MEMBERSHIP_SNAPSHOT.
+- [x] COORD-029 Abrupt non-coordinator disconnect retains membership through reconnect window then removes it on terminal timeout.
+- [x] COORD-030 Coordinator voluntary leave triggers immediate election without waiting for heartbeat timeout.
+- [x] COORD-031 Replacement coordinator first snapshot excludes voluntarily/abruptly departed old coordinator.
+- [x] COORD-032 Coordinator KICKED leave removes only the target member and publishes a new snapshot.
 - [ ] COORD-033 Membership changes caused by normal join/leave/kick do not increment coordinator term.
-- [ ] COORD-034 Conflicting same-PeerId max_peers snapshots reconcile to the minimum value.
-- [ ] COORD-035 MEMBERSHIP_SNAPSHOT final ACK timeout marks peer UNSYNCHRONIZED and forces reconnect/resynchronization.
-- [ ] COORD-036 GROUP_MERGE final ACK timeout does not roll back merge and forces target peer to rebootstrap.
-- [ ] COORD-037 COORDINATOR_CHECKPOINT final ACK timeout reports replication failure without removing/disconnecting the peer.
-- [ ] COORD-038 Ordinary GROUP_LEAVE ACK loss does not prevent leaving peer from closing after its grace period.
-- [ ] COORD-039 Kicked-member GROUP_LEAVE ACK loss does not keep that peer committed.
-- [ ] COORD-040 Coordinator-resignation GROUP_LEAVE ACK loss does not cancel resignation or election.
-- [ ] COORD-041 A 5-member group with lexicographically larger GroupId merges with a 1-member group with smaller GroupId; the 5-member group's GroupId survives.
-- [ ] COORD-042 Two equally sized groups merge; the lexicographically smaller GroupId survives.
-- [ ] COORD-043 Rapid checkpoint publication over slow BLE keeps exactly one in-flight and one pending checkpoint per peer.
-- [ ] COORD-044 With A in flight and B then C published, a slow peer receives A then C, never B.
-- [ ] COORD-045 A peer that reconnects receives the latest retained checkpoint without replaying historical checkpoint publications.
-- [ ] COORD-046 Same published checkpoint may be in-flight for peer A and pending for peer B; each peer allocates its own MessageId/checkpoint_sequence only at that peer's promotion time.
-- [ ] COORD-047 Same-term membership snapshot B accepted after A MUST prevent later A retransmission from replacing B after RESUME.
-- [ ] COORD-048 A ACKed, B partially transmitted, transport loss, RESUME, and B retransmission converges to B without stale rollback to A.
-- [ ] COORD-049 A ACKed, B fully transmitted but ACK lost, transport loss, RESUME, duplicate B remains committed exactly once.
-- [ ] COORD-050 B accepted remotely but ACK lost; post-RESUME retransmission of B is ACKed again without duplicate membership mutation.
-- [ ] COORD-051 Transport loss during retransmission of newer same-term snapshot B cannot allow older snapshot A to overwrite B.
-- [ ] COORD-052 Coordinator C remains at term T. Under SessionId S1, receiver accepts snapshot counter 100. S1 expires and cannot RESUME. Under new SessionId S2, receiver accepts current snapshot counter 1 as the new ordering baseline and MUST NOT compare it against S1 counter 100.
-- [ ] COORD-053 Same coordinator/term establishes a new SessionId whose sender_message_prefix bytes collide with an expired prior SessionId; receiver still treats the new SessionId as a distinct membership-ordering domain.
-- [ ] COORD-054 B sends to C in a coordinator star with no B-C PeerConnection; A relays and C receives sourcePeerId=B.
-- [ ] COORD-055 B RELIABLE_ACKED send to C survives coordinator loss before destination acknowledgment by retaining GroupMessageId and rerouting through the new coordinator.
-- [ ] COORD-056 Destination C accepted B's message but destination acknowledgment was lost during coordinator failure; post-migration duplicate relay does not redeliver and regenerates acknowledgment.
-- [ ] COORD-057 RELIABLE_ORDERED B->C SendHandle reaches SENT_TO_TRANSPORT only after coordinator reports final-hop submission.
-- [ ] COORD-058 Broadcast from B snapshots committed remote members, excludes B, and produces independent per-destination results.
-- [ ] COORD-059 Coordinator queue-full relay admission ACKs the fully received source hop exactly once, sends RELAY_QUEUE_FULL, retains no destination relay operation, and source fails without re-sending the 1 MiB source hop.
-- [ ] COORD-060 B->A remains healthy while A->C fails halfway through a multi-chunk RELIABLE_ORDERED relay. A->C RESUMEs, A retransmits the complete destination hop from chunk 0 with the same pairwise MessageId and GroupMessageId, C emits exactly one application event, and B eventually reaches SENT_TO_TRANSPORT.
-- [ ] COORD-061 A->C fails after every RELIABLE_ORDERED GROUP_RELIABLE chunk reached frame-level SENT_TO_TRANSPORT but before any later unrelated traffic; A does not retransmit that completed hop solely because of the transport failure.
-- [ ] COORD-062 GroupMessageId dedup eviction is bounded: after C completes message G, more than 16,384 newer completed source/message pairs evict G, and a later replay of G is not required to be suppressed as duplicate.
-- [ ] COORD-063 B sends G to C through A. A admits and generic-ACKs the source hop. B cancels before A->C completes. A may complete delivery, C emits exactly one event, A sends GROUP_DELIVERY_ACK, B authenticates/ACKs the late signaling through its cancellation tombstone, B remains CANCELLED, and B never reroutes G.
-- [ ] COORD-064 A has admitted B->C. C is removed from committed membership before destination delivery commits. A terminates the relay, releases reservation, sends DESTINATION_NOT_IN_GROUP to B when possible, and sends no additional application chunks to C.
-- [ ] COORD-065 A is coordinator and has an already-created/in-flight GROUP_DELIVERY_ACK for G. B has cancelled G. D becomes coordinator before B receives A's signaling. Delayed signaling from former coordinator A on the same historically valid SessionId is authenticated and generic-ACKed as stale-authority signaling, cannot alter B's CANCELLED handle, and cannot revive/reroute G.
-- [ ] COORD-066 B sends G to C through coordinator A. A admits G and transmits only part of the final-hop GROUP_RELIABLE. Before C commits the complete application message, D becomes committed coordinator. A stops future relay transmission and releases its admitted relay state. B reroutes G through D with the same GroupMessageId and new pairwise MessageIds. C commits G exactly once.
-- [ ] COORD-067 A submitted a GROUP_RELIABLE frame while still coordinator, but C receives it only after committing D as new coordinator. C classifies it as stale-authority traffic on the historically valid A-C SessionId, does not redeliver, and does not treat the healthy historical A-C PeerConnection as malicious protocol corruption.
-- [ ] COORD-068 B has a nonterminal routed send when an already-in-flight GROUP_DELIVERY_ACK from old coordinator A arrives after D becomes coordinator. B generic-ACKs and discards A's stale signaling, leaves the SendHandle nonterminal, and continues completion only through D.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+- [x] COORD-034 Conflicting same-PeerId max_peers snapshots reconcile to the minimum value.
+- [x] COORD-035 MEMBERSHIP_SNAPSHOT final ACK timeout marks peer UNSYNCHRONIZED and forces reconnect/resynchronization.
+- [x] COORD-036 GROUP_MERGE final ACK timeout does not roll back merge and forces target peer to rebootstrap.
+- [x] COORD-037 COORDINATOR_CHECKPOINT final ACK timeout reports replication failure without removing/disconnecting the peer.
+- [x] COORD-038 Ordinary GROUP_LEAVE ACK loss does not prevent leaving peer from closing after its grace period.
+- [x] COORD-039 Kicked-member GROUP_LEAVE ACK loss does not keep that peer committed.
+- [x] COORD-040 Coordinator-resignation GROUP_LEAVE ACK loss does not cancel resignation or election.
+- [x] COORD-041 A 5-member group with lexicographically larger GroupId merges with a 1-member group with smaller GroupId; the 5-member group's GroupId survives.
+- [x] COORD-042 Two equally sized groups merge; the lexicographically smaller GroupId survives.
+- [x] COORD-043 Rapid checkpoint publication over slow BLE keeps exactly one in-flight and one pending checkpoint per peer.
+- [x] COORD-044 With A in flight and B then C published, a slow peer receives A then C, never B.
+- [x] COORD-045 A peer that reconnects receives the latest retained checkpoint without replaying historical checkpoint publications.
+- [x] COORD-046 Same published checkpoint may be in-flight for peer A and pending for peer B; each peer allocates its own MessageId/checkpoint_sequence only at that peer's promotion time.
+- [x] COORD-047 Same-term membership snapshot B accepted after A MUST prevent later A retransmission from replacing B after RESUME.
+- [x] COORD-048 A ACKed, B partially transmitted, transport loss, RESUME, and B retransmission converges to B without stale rollback to A.
+- [x] COORD-049 A ACKed, B fully transmitted but ACK lost, transport loss, RESUME, duplicate B remains committed exactly once.
+- [x] COORD-050 B accepted remotely but ACK lost; post-RESUME retransmission of B is ACKed again without duplicate membership mutation.
+- [x] COORD-051 Transport loss during retransmission of newer same-term snapshot B cannot allow older snapshot A to overwrite B.
+- [x] COORD-052 Coordinator C remains at term T. Under SessionId S1, receiver accepts snapshot counter 100. S1 expires and cannot RESUME. Under new SessionId S2, receiver accepts current snapshot counter 1 as the new ordering baseline and MUST NOT compare it against S1 counter 100.
+- [x] COORD-053 Same coordinator/term establishes a new SessionId whose sender_message_prefix bytes collide with an expired prior SessionId; receiver still treats the new SessionId as a distinct membership-ordering domain.
+- [x] COORD-054 B sends to C in a coordinator star with no B-C PeerConnection; A relays and C receives sourcePeerId=B.
+- [x] COORD-055 B RELIABLE_ACKED send to C survives coordinator loss before destination acknowledgment by retaining GroupMessageId and rerouting through the new coordinator.
+- [x] COORD-056 Destination C accepted B's message but destination acknowledgment was lost during coordinator failure; post-migration duplicate relay does not redeliver and regenerates acknowledgment.
+- [x] COORD-057 RELIABLE_ORDERED B->C SendHandle reaches SENT_TO_TRANSPORT only after coordinator reports final-hop submission.
+- [x] COORD-058 Broadcast from B snapshots committed remote members, excludes B, and produces independent per-destination results.
+- [x] COORD-059 Coordinator queue-full relay admission ACKs the fully received source hop exactly once, sends RELAY_QUEUE_FULL, retains no destination relay operation, and source fails without re-sending the 1 MiB source hop.
+- [x] COORD-060 B->A remains healthy while A->C fails halfway through a multi-chunk RELIABLE_ORDERED relay. A->C RESUMEs, A retransmits the complete destination hop from chunk 0 with the same pairwise MessageId and GroupMessageId, C emits exactly one application event, and B eventually reaches SENT_TO_TRANSPORT.
+- [x] COORD-061 A->C fails after every RELIABLE_ORDERED GROUP_RELIABLE chunk reached frame-level SENT_TO_TRANSPORT but before any later unrelated traffic; A does not retransmit that completed hop solely because of the transport failure.
+- [x] COORD-062 GroupMessageId dedup eviction is bounded: after C completes message G, more than 16,384 newer completed source/message pairs evict G, and a later replay of G is not required to be suppressed as duplicate.
+- [x] COORD-063 B sends G to C through A. A admits and generic-ACKs the source hop. B cancels before A->C completes. A may complete delivery, C emits exactly one event, A sends GROUP_DELIVERY_ACK, B authenticates/ACKs the late signaling through its cancellation tombstone, B remains CANCELLED, and B never reroutes G.
+- [x] COORD-064 A has admitted B->C. C is removed from committed membership before destination delivery commits. A terminates the relay, releases reservation, sends DESTINATION_NOT_IN_GROUP to B when possible, and sends no additional application chunks to C.
+- [x] COORD-065 A is coordinator and has an already-created/in-flight GROUP_DELIVERY_ACK for G. B has cancelled G. D becomes coordinator before B receives A's signaling. Delayed signaling from former coordinator A on the same historically valid SessionId is authenticated and generic-ACKed as stale-authority signaling, cannot alter B's CANCELLED handle, and cannot revive/reroute G.
+- [x] COORD-066 B sends G to C through coordinator A. A admits G and transmits only part of the final-hop GROUP_RELIABLE. Before C commits the complete application message, D becomes committed coordinator. A stops future relay transmission and releases its admitted relay state. B reroutes G through D with the same GroupMessageId and new pairwise MessageIds. C commits G exactly once.
+- [x] COORD-067 A submitted a GROUP_RELIABLE frame while still coordinator, but C receives it only after committing D as new coordinator. C classifies it as stale-authority traffic on the historically valid A-C SessionId, does not redeliver, and does not treat the healthy historical A-C PeerConnection as malicious protocol corruption.
+- [x] COORD-068 B has a nonterminal routed send when an already-in-flight GROUP_DELIVERY_ACK from old coordinator A arrives after D becomes coordinator. B generic-ACKs and discards A's stale signaling, leaves the SendHandle nonterminal, and continues completion only through D.
 
 ## Realtime Datagram Tests
 
-- [ ] RT-001 REALTIME_LATEST emits no ACK.
-- [ ] RT-002 REALTIME_LATEST is never retransmitted after simulated loss.
-- [ ] RT-003 New queued state supersedes older queued state on same channel.
-- [ ] RT-004 Realtime states on different channelIds do not supersede each other.
-- [ ] RT-005 Receiver drops older/equal datagram sequence.
-- [ ] RT-006 Receiver accepts sequence gaps.
-- [ ] RT-007 1101-byte realtime payload fails deterministically.
-- [ ] RT-008 Queued realtime packet expires after 100 ms by default.
-- [ ] RT-009 Reconnect discards pre-disconnect realtime queue.
-- [ ] RT-010 RESUME preserves realtime channel sequence counters, discards old queued state, and accepts the next freshly generated sequence.
-- [ ] RT-011 GATT realtime uses Write Without Response central->peripheral.
-- [ ] RT-012 GATT realtime uses Notify peripheral->central.
-- [ ] RT-013 Optional LAN UDP carries realtime only, never reliable DATA.
-- [ ] RT-014 Heavy realtime traffic cannot permanently starve reliable interactive traffic.
-- [ ] RT-015 A delayed reliable frame is accepted after a numerically later UDP packet arrives.
-- [ ] RT-016 UDP packet loss does not create a reliable sequence gap or reliable replay failure.
-- [ ] RT-017 UDP packets may reorder within the 256-packet UDP replay window without affecting reliable traffic.
-- [ ] RT-018 A maximum 1100-byte realtime payload produces a UDP datagram <=1232 bytes.
-- [ ] RT-019 A spoofed or modified UDP datagram fails AEAD authentication.
-- [ ] RT-020 UDP source IP/port change is rejected and deterministically triggers sidecar re-establishment.
-- [ ] RT-021 UDP sidecar loss falls back to the existing reliable transport without changing reliable transport generation.
-- [ ] RT-022 UDP packet sequence and realtime datagram_sequence advance independently.
-- [ ] RT-023 Reliable RESUME destroys the old UDP sidecar and requires fresh UDP key derivation.
-- [ ] RT-024 Simultaneous UDP capability detection causes only the lexicographically smaller PeerId to initiate automatically.
-- [ ] RT-025 First valid UDP packet initializes an empty replay window and is accepted.
-- [ ] RT-026 UDP packet sequence never wraps; fresh sidecar is required before UINT64_MAX.
-- [ ] RT-027 Unexpected-source authenticated UDP packet invalidates sidecar only; reliable PeerConnection remains READY.
-
-
+- [x] RT-001 REALTIME_LATEST emits no ACK.
+- [x] RT-002 REALTIME_LATEST is never retransmitted after simulated loss.
+- [x] RT-003 New queued state supersedes older queued state on same channel.
+- [x] RT-004 Realtime states on different channelIds do not supersede each other.
+- [x] RT-005 Receiver drops older/equal datagram sequence.
+- [x] RT-006 Receiver accepts sequence gaps.
+- [x] RT-007 1101-byte realtime payload fails deterministically.
+- [x] RT-008 Queued realtime packet expires after 100 ms by default.
+- [x] RT-009 Reconnect discards pre-disconnect realtime queue.
+- [x] RT-010 RESUME preserves realtime channel sequence counters, discards old queued state, and accepts the next freshly generated sequence.
+- [x] RT-011 GATT realtime uses Write Without Response central->peripheral.
+- [x] RT-012 GATT realtime uses Notify peripheral->central.
+- [x] RT-013 Optional LAN UDP carries realtime only, never reliable DATA.
+- [x] RT-014 Heavy realtime traffic cannot permanently starve reliable interactive traffic.
+- [x] RT-015 A delayed reliable frame is accepted after a numerically later UDP packet arrives.
+- [x] RT-016 UDP packet loss does not create a reliable sequence gap or reliable replay failure.
+- [x] RT-017 UDP packets may reorder within the 256-packet UDP replay window without affecting reliable traffic.
+- [x] RT-018 A maximum 1100-byte realtime payload produces a UDP datagram <=1232 bytes.
+- [x] RT-019 A spoofed or modified UDP datagram fails AEAD authentication.
+- [x] RT-020 UDP source IP/port change is rejected and deterministically triggers sidecar re-establishment.
+- [x] RT-021 UDP sidecar loss falls back to the existing reliable transport without changing reliable transport generation.
+- [x] RT-022 UDP packet sequence and realtime datagram_sequence advance independently.
+- [x] RT-023 Reliable RESUME destroys the old UDP sidecar and requires fresh UDP key derivation.
+- [x] RT-024 Simultaneous UDP capability detection causes only the lexicographically smaller PeerId to initiate automatically.
+- [x] RT-025 First valid UDP packet initializes an empty replay window and is accepted.
+- [x] RT-026 UDP packet sequence never wraps; fresh sidecar is required before UINT64_MAX.
+- [x] RT-027 Unexpected-source authenticated UDP packet invalidates sidecar only; reliable PeerConnection remains READY.
 
 ---
 

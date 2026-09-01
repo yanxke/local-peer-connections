@@ -1,11 +1,16 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'backend.dart';
+import 'group.dart';
 import 'protocol/crypto.dart';
 import 'protocol/frame.dart';
 import 'protocol/peer_state.dart';
 import 'protocol/control_payload.dart';
 import 'protocol/ack.dart';
+import 'protocol/application_payload.dart';
+import 'protocol/checkpoint.dart';
+import 'protocol/reliable_data_receiver.dart';
+import 'protocol/reliability.dart';
 import 'types.dart';
 
 /// Authenticated-generation transport core. Handshake orchestration owns its
@@ -18,6 +23,7 @@ class PeerConnectionCore {
       required this.localPeerId,
       required this.remotePeerId,
       AckRetentionSet? ackRetention,
+      this.messageIdAllocator,
       this.generation = 1,
       int initialNextSequence = 1,
       int initialHighestReceivedSequence = 0})
@@ -46,6 +52,15 @@ class PeerConnectionCore {
   final PeerStateMachine _state = PeerStateMachine();
   final ReceiveSequenceWindow _receiveSequences = ReceiveSequenceWindow();
   final AckRetentionSet ackRetention;
+
+  /// Session-direction allocator shared by DATA and ACK-required control
+  /// operations when the handshake owner provides the retained prefix.
+  final MessageIdAllocator? messageIdAllocator;
+  final ReliableDataReceiver _dataReceiver = ReliableDataReceiver();
+  final Map<String, _AckRequiredFrame> _ackRequiredFrames = {};
+  final Map<String, List<CoordinatorCheckpointChunk>> _checkpointOperations =
+      {};
+  final Map<String, _ReliableDataOperation> _reliableDataOperations = {};
   final Set<TransportWrite> _pendingWrites = <TransportWrite>{};
   late final StreamSubscription<BackendConnectionEvent> _backendSubscription;
   int generation;
@@ -70,7 +85,11 @@ class PeerConnectionCore {
         payload: payload);
     final protected =
         await const FrameProtector().encrypt(frame, await key.extractBytes());
-    final write = backend.write(protected.encode());
+    final encoded = protected.encode();
+    final write = type == FrameType.realtimeDatagram &&
+            backend is RealtimeBackendConnection
+        ? (backend as RealtimeBackendConnection).writeRealtime(encoded)
+        : backend.write(encoded);
     _pendingWrites.add(write);
     // A backend completion is the only authority for SENT_TO_TRANSPORT.  In
     // particular, a terminal failure is a generation-wide transport loss,
@@ -85,6 +104,304 @@ class PeerConnectionCore {
       _handleTransportLoss();
     }));
     return write.completion;
+  }
+
+  /// Sends a complete, single-frame ACK-required logical operation. The core
+  /// retains its immutable frame input so an ACK timeout can retransmit the
+  /// same MessageId and content with a new reliable wire sequence. Chunked
+  /// operations remain owned by their operation-specific encoders.
+  Future<TransportWriteState> submitAckRequiredFrame(
+      {required FrameType type,
+      required List<int> payload,
+      List<int>? messageId,
+      required int nowMs}) async {
+    if (state != PeerConnectionState.ready) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    final id = messageId ?? _allocateMessageId();
+    final key = _messageKey(id);
+    if (_ackRequiredFrames.containsKey(key) ||
+        _checkpointOperations.containsKey(key)) {
+      throw const LpcException(LpcErrorCode.messageIdCollision);
+    }
+    final retained =
+        ackRetention.retain(messageId: id, logicalContent: payload);
+    final frame = _AckRequiredFrame(type, payload, retained.messageId);
+    _ackRequiredFrames[key] = frame;
+    return _submitRetainedAckFrame(frame, nowMs: nowMs);
+  }
+
+  List<int> _allocateMessageId() {
+    final allocator = messageIdAllocator;
+    if (allocator == null) {
+      throw const LpcException(
+        LpcErrorCode.invalidState,
+        'MessageId allocator was not supplied by handshake ownership',
+      );
+    }
+    return allocator.allocate();
+  }
+
+  /// Sends one chunked COORDINATOR_CHECKPOINT logical operation. Every chunk
+  /// uses the caller's one MessageId while [submitEncrypted] allocates a fresh
+  /// reliable sequence for each frame. Its ACK deadline begins only after the
+  /// final chunk reaches the backend submission boundary.
+  Future<List<TransportWriteState>> submitAckRequiredCheckpoint({
+    required List<CoordinatorCheckpointChunk> chunks,
+    List<int>? messageId,
+    required int nowMs,
+  }) async {
+    if (state != PeerConnectionState.ready || chunks.isEmpty) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    final id = messageId ?? _allocateMessageId();
+    final key = _messageKey(id);
+    if (_ackRequiredFrames.containsKey(key) ||
+        _checkpointOperations.containsKey(key)) {
+      throw const LpcException(LpcErrorCode.messageIdCollision);
+    }
+    final first = chunks.first;
+    for (var index = 0; index < chunks.length; index++) {
+      final chunk = chunks[index];
+      if (chunk.term != first.term ||
+          chunk.sequence != first.sequence ||
+          chunk.totalLength != first.totalLength ||
+          chunk.chunkCount != chunks.length ||
+          chunk.chunkIndex != index) {
+        throw const LpcException(
+            LpcErrorCode.protocolMismatch, 'invalid checkpoint operation');
+      }
+    }
+    final content = <int>[for (final chunk in chunks) ...chunk.encode()];
+    ackRetention.retain(messageId: id, logicalContent: content);
+    _checkpointOperations[key] = List.unmodifiable(chunks);
+    return _submitCheckpointAttempt(id, chunks, nowMs: nowMs);
+  }
+
+  /// Submits one complete reliable DATA operation in chunk order.  The
+  /// immutable chunk plan is retained across transport loss so recovery can
+  /// restart at chunk zero (Sections 21.2 and 26.6).
+  Future<List<TransportWriteState>> submitReliableData({
+    required List<int> bytes,
+    required DeliveryMode deliveryMode,
+    required SendPriority priority,
+    required List<int> messageId,
+    required int nowMs,
+  }) =>
+      _submitReliableData(
+        bytes: bytes,
+        deliveryMode: deliveryMode,
+        priority: priority,
+        messageId: messageId,
+        nowMs: nowMs,
+      );
+
+  /// Starts a point-to-point DATA submission with its observable public
+  /// handle. The handle moves to `SENT_TO_TRANSPORT` only once every chunk has
+  /// reached the backend boundary (Section 36.4.2).
+  SendHandle submitReliableDataWithHandle({
+    required List<int> bytes,
+    required DeliveryMode deliveryMode,
+    required SendPriority priority,
+    required List<int> messageId,
+    required int nowMs,
+  }) {
+    final controller = SendHandleController.transmitting(
+      onCancel: () => _cancelReliableData(messageId),
+    );
+    unawaited(() async {
+      try {
+        await _submitReliableData(
+          bytes: bytes,
+          deliveryMode: deliveryMode,
+          priority: priority,
+          messageId: messageId,
+          nowMs: nowMs,
+          handleController: controller,
+        );
+      } on Object {
+        controller.complete(SendState.failed);
+      }
+    }());
+    return controller.handle;
+  }
+
+  void _cancelReliableData(List<int> messageId) {
+    final operation = _reliableDataOperations.remove(_messageKey(messageId));
+    if (operation == null) return;
+    operation.cancelled = true;
+    if (operation.deliveryMode == DeliveryMode.reliableAcked) {
+      ackRetention.cancel(messageId);
+    }
+  }
+
+  Future<List<TransportWriteState>> _submitReliableData({
+    required List<int> bytes,
+    required DeliveryMode deliveryMode,
+    required SendPriority priority,
+    required List<int> messageId,
+    required int nowMs,
+    SendHandleController? handleController,
+  }) async {
+    if (state != PeerConnectionState.ready ||
+        deliveryMode == DeliveryMode.realtimeLatest) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    final key = _messageKey(messageId);
+    if (_ackRequiredFrames.containsKey(key) ||
+        _checkpointOperations.containsKey(key) ||
+        _reliableDataOperations.containsKey(key)) {
+      throw const LpcException(LpcErrorCode.messageIdCollision);
+    }
+    final operation = _ReliableDataOperation(
+      messageId: messageId,
+      chunks: chunkData(bytes, mode: deliveryMode, priority: priority),
+      handleController: handleController,
+    );
+    if (deliveryMode == DeliveryMode.reliableAcked) {
+      ackRetention.retain(messageId: messageId, logicalContent: bytes);
+    }
+    _reliableDataOperations[key] = operation;
+    return _submitReliableDataAttempt(operation, nowMs: nowMs);
+  }
+
+  Future<List<TransportWriteState>> _submitReliableDataAttempt(
+    _ReliableDataOperation operation, {
+    required int nowMs,
+  }) async {
+    final results = <TransportWriteState>[];
+    for (final chunk in operation.chunks) {
+      if (operation.cancelled) return results;
+      final result = await submitEncrypted(
+        FrameType.data,
+        chunk.encode(),
+        flags: operation.deliveryMode == DeliveryMode.reliableAcked ? 1 : 0,
+        messageId: operation.messageId,
+      );
+      results.add(result);
+      if (operation.cancelled) return results;
+      if (result != TransportWriteState.submittedToPlatform) return results;
+    }
+    if (operation.cancelled) return results;
+    if (operation.deliveryMode == DeliveryMode.reliableAcked) {
+      ackRetention.finalFrameSubmitted(operation.messageId, nowMs: nowMs);
+      operation.handleController?.sentToTransport();
+    } else {
+      // A fully submitted RELIABLE_ORDERED operation is terminal at the
+      // transport boundary and must not be automatically replayed on RESUME.
+      _reliableDataOperations.remove(_messageKey(operation.messageId));
+      operation.handleController?.complete(SendState.sentToTransport);
+    }
+    return results;
+  }
+
+  /// Replays retained DATA plans after RESUME. Ordered plans exist only when
+  /// their prior attempt did not fully reach the transport boundary; ACKed
+  /// plans use the shared bounded ACK-retention retry accounting.
+  Future<List<List<TransportWriteState>>> retransmitReliableDataAfterResume(
+      {required int nowMs}) async {
+    if (state != PeerConnectionState.ready) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    final attempts = <List<TransportWriteState>>[];
+    for (final operation
+        in List<_ReliableDataOperation>.from(_reliableDataOperations.values)) {
+      if (operation.deliveryMode == DeliveryMode.reliableAcked) {
+        final result =
+            ackRetention.retransmitOneAfterResume(operation.messageId);
+        if (result == AckTimeoutResult.terminalAckTimeout) {
+          _reliableDataOperations.remove(_messageKey(operation.messageId));
+          operation.handleController?.complete(SendState.failed);
+          continue;
+        }
+        if (result != AckTimeoutResult.retransmitWholeOperation) continue;
+      }
+      attempts.add(await _submitReliableDataAttempt(operation, nowMs: nowMs));
+    }
+    return List.unmodifiable(attempts);
+  }
+
+  Future<AckTimeoutResult> retryAckRequiredCheckpoint(List<int> messageId,
+      {required int nowMs}) async {
+    final result = ackRetention.onTimer(messageId, nowMs: nowMs);
+    final key = _messageKey(messageId);
+    if (result == AckTimeoutResult.retransmitWholeOperation) {
+      final chunks = _checkpointOperations[key];
+      if (chunks == null) {
+        throw const LpcException(
+            LpcErrorCode.invalidState, 'missing checkpoint encoder');
+      }
+      await _submitCheckpointAttempt(messageId, chunks, nowMs: nowMs);
+    } else if (result == AckTimeoutResult.terminalAckTimeout) {
+      _checkpointOperations.remove(key);
+    }
+    return result;
+  }
+
+  /// Section 26 recovery of one retained checkpoint. All chunks restart at
+  /// chunk 0 under the new generation; their MessageId stays unchanged.
+  Future<AckTimeoutResult> retransmitCheckpointAfterResume(List<int> messageId,
+      {required int nowMs}) async {
+    if (state != PeerConnectionState.ready) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    final key = _messageKey(messageId);
+    final result = ackRetention.retransmitOneAfterResume(messageId);
+    if (result == AckTimeoutResult.retransmitWholeOperation) {
+      final chunks = _checkpointOperations[key];
+      if (chunks == null) {
+        throw const LpcException(
+            LpcErrorCode.invalidState, 'missing checkpoint encoder');
+      }
+      await _submitCheckpointAttempt(messageId, chunks, nowMs: nowMs);
+    } else if (result == AckTimeoutResult.terminalAckTimeout) {
+      _checkpointOperations.remove(key);
+    }
+    return result;
+  }
+
+  Future<List<TransportWriteState>> _submitCheckpointAttempt(
+      List<int> messageId, List<CoordinatorCheckpointChunk> chunks,
+      {required int nowMs}) async {
+    final results = <TransportWriteState>[];
+    for (final chunk in chunks) {
+      final result = await submitEncrypted(
+          FrameType.coordinatorCheckpoint, chunk.encode(),
+          flags: 1, messageId: messageId);
+      results.add(result);
+      if (result != TransportWriteState.submittedToPlatform) return results;
+    }
+    ackRetention.finalFrameSubmitted(messageId, nowMs: nowMs);
+    return results;
+  }
+
+  /// Applies the 3-second ACK deadline for a single-frame retained operation.
+  /// A retry is re-encrypted through [submitEncrypted], which necessarily
+  /// allocates a fresh generation-local wire sequence number.
+  Future<AckTimeoutResult> retryAckRequiredFrame(List<int> messageId,
+      {required int nowMs}) async {
+    final result = ackRetention.onTimer(messageId, nowMs: nowMs);
+    if (result == AckTimeoutResult.retransmitWholeOperation) {
+      final frame = _ackRequiredFrames[_messageKey(messageId)];
+      if (frame == null) {
+        throw const LpcException(
+            LpcErrorCode.invalidState, 'missing ACK-required frame encoder');
+      }
+      await _submitRetainedAckFrame(frame, nowMs: nowMs);
+    } else if (result == AckTimeoutResult.terminalAckTimeout) {
+      _ackRequiredFrames.remove(_messageKey(messageId));
+    }
+    return result;
+  }
+
+  Future<TransportWriteState> _submitRetainedAckFrame(_AckRequiredFrame frame,
+      {required int nowMs}) async {
+    final result = await submitEncrypted(frame.type, frame.payload,
+        flags: 1, messageId: frame.messageId);
+    if (result == TransportWriteState.submittedToPlatform) {
+      ackRetention.finalFrameSubmitted(frame.messageId, nowMs: nowMs);
+    }
+    return result;
   }
 
   Future<LpcFrame?> receiveEncrypted(List<int> encodedFrame) async {
@@ -104,7 +421,12 @@ class PeerConnectionCore {
         SequenceAcceptance.replay) return null;
     if (clear.type == FrameType.ack) {
       final ack = parseAck(clear);
-      if (ack != null) ackRetention.acknowledge(ack.messageId);
+      if (ack != null && ackRetention.acknowledge(ack.messageId)) {
+        _ackRequiredFrames.remove(_messageKey(ack.messageId));
+        _checkpointOperations.remove(_messageKey(ack.messageId));
+        final data = _reliableDataOperations.remove(_messageKey(ack.messageId));
+        data?.handleController?.complete(SendState.remoteAcknowledged);
+      }
     }
     return clear;
   }
@@ -112,6 +434,32 @@ class PeerConnectionCore {
   Future<TransportWriteState> submitAck(List<int> acknowledgedMessageId) =>
       submitEncrypted(
           FrameType.ack, AckPayload(acknowledgedMessageId).encode());
+
+  /// Sends one `REALTIME_LATEST` envelope on the active reliable transport.
+  /// It is deliberately neither ACK_REQUIRED nor retained for retry/RESUME.
+  Future<TransportWriteState> submitRealtime(RealtimeDatagram datagram) =>
+      submitEncrypted(FrameType.realtimeDatagram, datagram.encode());
+
+  /// Completes authenticated DATA reassembly and applies Section 23.3's
+  /// completed-ID deduplication. Callers deliver a non-null result to the
+  /// application only after this method returns. A MessageId collision closes
+  /// this PeerConnection before the error is surfaced.
+  Future<ReliableDataReceiveResult> receiveDataChunk(
+      List<int> messageId, DataChunk chunk) async {
+    if (state != PeerConnectionState.ready) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    try {
+      final result = _dataReceiver.add(messageId, chunk);
+      final ackId = result.acknowledgmentMessageId;
+      if (ackId != null) await submitAck(ackId);
+      return result;
+    } on LpcException catch (error) {
+      if (error.code == LpcErrorCode.messageIdCollision) await close();
+      rethrow;
+    }
+  }
+
   AckPayload? parseAck(LpcFrame frame) {
     if (frame.type != FrameType.ack) return null;
     if (frame.flags != 0 || frame.messageId.any((byte) => byte != 0))
@@ -147,6 +495,32 @@ class PeerConnectionCore {
     return ackRetention.retransmitAfterResume();
   }
 
+  /// Re-emits retained single-frame ACK-required operations after RESUME. The
+  /// operation-specific owner uses [retransmitAckOperationsAfterResume] for
+  /// chunked encodings; this companion handles frames accepted through
+  /// [submitAckRequiredFrame].
+  Future<List<RetainedAckOperation>> retransmitAckRequiredFramesAfterResume(
+      {required int nowMs}) async {
+    if (state != PeerConnectionState.ready) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    final operations = <RetainedAckOperation>[];
+    for (final frame
+        in List<_AckRequiredFrame>.from(_ackRequiredFrames.values)) {
+      final result = ackRetention.retransmitOneAfterResume(frame.messageId);
+      if (result == AckTimeoutResult.terminalAckTimeout) {
+        _ackRequiredFrames.remove(_messageKey(frame.messageId));
+      } else if (result == AckTimeoutResult.retransmitWholeOperation) {
+        await _submitRetainedAckFrame(frame, nowMs: nowMs);
+        operations.add(RetainedAckOperation(
+          messageId: frame.messageId,
+          logicalContent: frame.payload,
+        ));
+      }
+    }
+    return List.unmodifiable(operations);
+  }
+
   /// Moves an active generation into the protocol reconnect path.  Backend
   /// close/error callbacks are intentionally harmless once reconnecting: an
   /// impossible or stale callback cannot manufacture another transition.
@@ -154,6 +528,7 @@ class PeerConnectionCore {
     if (state == PeerConnectionState.ready) {
       _state.requireTransition(PeerConnectionState.reconnecting);
       ackRetention.transportLost();
+      _dataReceiver.onTransportGenerationLost();
       // Section 44.1.2 makes terminal transport failure generation-wide. The
       // backend may signal one failed frame first; every other frame accepted
       // for that same physical generation must become FAILED as well.
@@ -190,6 +565,41 @@ class PeerConnectionCore {
     _state.requireTransition(PeerConnectionState.disconnected);
     await _backendSubscription.cancel();
   }
+}
+
+class _AckRequiredFrame {
+  _AckRequiredFrame(this.type, List<int> payload, List<int> messageId)
+      : payload = Uint8List.fromList(payload),
+        messageId = Uint8List.fromList(messageId);
+  final FrameType type;
+  final Uint8List payload, messageId;
+}
+
+class _ReliableDataOperation {
+  _ReliableDataOperation({
+    required List<int> messageId,
+    required List<DataChunk> chunks,
+    this.handleController,
+  })  : messageId = Uint8List.fromList(messageId),
+        chunks = List.unmodifiable(chunks),
+        deliveryMode = chunks.first.deliveryMode {
+    if (this.messageId.length != 8 || chunks.isEmpty) {
+      throw ArgumentError('invalid reliable DATA operation');
+    }
+  }
+
+  final Uint8List messageId;
+  final List<DataChunk> chunks;
+  final DeliveryMode deliveryMode;
+  final SendHandleController? handleController;
+  bool cancelled = false;
+}
+
+String _messageKey(List<int> messageId) {
+  if (messageId.length != 8) {
+    throw ArgumentError.value(messageId, 'messageId');
+  }
+  return messageId.join(',');
 }
 
 bool _same(List<int> a, List<int> b) {

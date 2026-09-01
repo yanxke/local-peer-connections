@@ -51,3 +51,36 @@ class CoordinatorLiveness {
       _lastObserved == null ||
       _clock().difference(_lastObserved!) >= coordinatorHeartbeatTimeout;
 }
+
+/// Timer-free Section 10.7 broadcaster. Its owner calls [poll] from the
+/// serialized coordinator timer and calls [submitted] only when the heartbeat
+/// frame has reached the transport submission boundary.
+class CoordinatorHeartbeatController {
+  CoordinatorHeartbeatController(
+      {required int nowMs, required CoordinatorHeartbeat Function() heartbeat})
+      : _lastSubmittedAtMs = nowMs,
+        _heartbeat = heartbeat;
+
+  static const int intervalMs = 1000;
+  final CoordinatorHeartbeat Function() _heartbeat;
+  int _lastSubmittedAtMs;
+  CoordinatorHeartbeat? _pending;
+
+  CoordinatorHeartbeat? poll(int nowMs) {
+    if (_pending != null || nowMs - _lastSubmittedAtMs < intervalMs) {
+      return null;
+    }
+    return _pending = _heartbeat();
+  }
+
+  void submitted(int nowMs) {
+    if (_pending == null) {
+      throw const LpcException(
+          LpcErrorCode.invalidState, 'no pending coordinator heartbeat');
+    }
+    _pending = null;
+    _lastSubmittedAtMs = nowMs;
+  }
+
+  void submissionFailed() => _pending = null;
+}

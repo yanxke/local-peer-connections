@@ -128,6 +128,10 @@ class AckRetentionSet {
     return true;
   }
 
+  /// Local application cancellation removes future ACK retry/RESUME retention.
+  /// It has no implication for bytes already accepted by a transport.
+  bool cancel(List<int> messageId) => _entries.remove(_key(messageId)) != null;
+
   AckTimeoutResult onTimer(List<int> messageId, {required int nowMs}) {
     final entry = _required(messageId);
     if (entry.deadlineMs == null || nowMs < entry.deadlineMs!) {
@@ -165,6 +169,19 @@ class AckRetentionSet {
       }
     }
     return List.unmodifiable(ready);
+  }
+
+  /// Promotes one known retained operation to its post-RESUME whole-operation
+  /// attempt. Operation-specific encoders use this when only their own frame
+  /// plan can be regenerated (for example, checkpoint chunks).
+  AckTimeoutResult retransmitOneAfterResume(List<int> messageId) {
+    final key = _key(messageId);
+    final entry = _entries[key];
+    if (entry == null) return AckTimeoutResult.ignored;
+    entry.deadlineMs = null;
+    final result = entry.operation.retransmitAfterResume();
+    if (result == AckTimeoutResult.terminalAckTimeout) _entries.remove(key);
+    return result;
   }
 
   _RetainedEntry _required(List<int> messageId) {

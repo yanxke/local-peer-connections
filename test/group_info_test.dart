@@ -36,4 +36,39 @@ void main() {
     final encoded = await value.encode();
     expectLater(GroupInfoPayload.decode(encoded), throwsA(isA<LpcException>()));
   });
+
+  test('COORD-017/024 GROUP_INFO preserves complete member capacity records',
+      () async {
+    final remote = GroupInfoPayload(
+      info: GroupMergeInfo(
+        namespaceHash: List.filled(32, 1),
+        tokenHash: List.filled(32, 2),
+        discoveryMode: DiscoveryMode.tokenScoped,
+        autoMerge: true,
+        trustMode: GroupTrustMode.openTofu,
+        knownPeersAutoMerge: false,
+        groupId: GroupId(List.filled(16, 3)),
+        members: [GroupMember(_peer(3), 9), GroupMember(_peer(4), 8)],
+      ),
+      coordinatorTerm: 2,
+      coordinatorPeerId: _peer(3),
+    );
+    final decoded = await GroupInfoPayload.decode(await remote.encode());
+    expect(decoded.info.members.map((member) => member.maxPeers), [9, 8]);
+
+    final local = GroupMergeInfo(
+      namespaceHash: List.filled(32, 1),
+      tokenHash: List.filled(32, 2),
+      discoveryMode: DiscoveryMode.tokenScoped,
+      autoMerge: true,
+      trustMode: GroupTrustMode.openTofu,
+      knownPeersAutoMerge: false,
+      groupId: GroupId(List.filled(16, 2)),
+      members: [GroupMember(_peer(1), 12), GroupMember(_peer(2), 10)],
+    );
+    final merge = evaluateGroupMerge(local, decoded.info);
+    expect(merge.decision, GroupMergeDecision.merge);
+    expect(merge.unionCount, 4);
+    expect(merge.effectiveMaxPeers, 8);
+  });
 }

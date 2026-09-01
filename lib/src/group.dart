@@ -29,11 +29,15 @@ class MemberLeft extends GroupEvent {
 }
 
 class CoordinatorChanged extends GroupEvent {
-  const CoordinatorChanged(super.sequence, super.at, this.previous,
-      this.current, this.localIsCoordinator);
+  CoordinatorChanged(super.sequence, super.at, this.previous, this.current,
+      this.localIsCoordinator, [List<int>? latestCoordinatorCheckpoint])
+      : latestCoordinatorCheckpoint = latestCoordinatorCheckpoint == null
+            ? null
+            : Uint8List.fromList(latestCoordinatorCheckpoint);
   final PeerId? previous;
   final PeerId current;
   final bool localIsCoordinator;
+  final Uint8List? latestCoordinatorCheckpoint;
 }
 
 class ReliableMessageReceived extends GroupEvent {
@@ -55,16 +59,36 @@ class RealtimeDatagramReceived extends GroupEvent {
   final Uint8List bytes;
 }
 
+/// A nonterminal group-level protocol failure. It does not by itself change
+/// membership or close the GroupSession.
+class GroupError extends GroupEvent {
+  const GroupError(
+    super.sequence,
+    super.at,
+    this.errorCode, {
+    this.peerId,
+    this.groupMessageId,
+    this.diagnostic,
+  });
+
+  final LpcErrorCode errorCode;
+  final PeerId? peerId;
+  final GroupMessageId? groupMessageId;
+  final String? diagnostic;
+}
+
 class GroupClosed extends GroupEvent {
   const GroupClosed(super.sequence, super.at);
 }
 
 class SendHandle {
-  SendHandle._(this._state);
+  SendHandle._(this._state, {void Function()? onCancel}) : _onCancel = onCancel;
   SendState _state;
+  final void Function()? _onCancel;
   final _done = Completer<SendState>();
   SendState get state => _state;
   Future<SendState> get completed => _done.future;
+  bool get isTerminal => _done.isCompleted;
   void _complete(SendState state) {
     if (!_done.isCompleted) {
       _state = state;
@@ -72,19 +96,72 @@ class SendHandle {
     }
   }
 
-  void cancel() => _complete(SendState.cancelled);
+  void _transition(SendState state) {
+    if (!_done.isCompleted) _state = state;
+  }
+
+  void cancel() {
+    if (_done.isCompleted) return;
+    _onCancel?.call();
+    _complete(SendState.cancelled);
+  }
+}
+
+/// Internal protocol owners use this narrow controller to reflect committed
+/// transport and acknowledgment transitions without exposing mutable handle
+/// state to applications.
+class SendHandleController {
+  SendHandleController.queued({void Function()? onCancel})
+      : handle = SendHandle._(SendState.queued, onCancel: onCancel);
+
+  SendHandleController.transmitting({void Function()? onCancel})
+      : handle = SendHandle._(SendState.transmitting, onCancel: onCancel);
+
+  final SendHandle handle;
+  void transmitting() => handle._transition(SendState.transmitting);
+  void sentToTransport() => handle._transition(SendState.sentToTransport);
+  void complete(SendState state) => handle._complete(state);
 }
 
 class BroadcastHandle {
   BroadcastHandle(Map<PeerId, SendHandle> results)
       : results = Map.unmodifiable(results),
         targetPeerIds = List.unmodifiable(results.keys),
-        handles = List.unmodifiable(results.values);
+        handles = List.unmodifiable(results.values) {
+    _watchConstituents();
+  }
   final List<PeerId> targetPeerIds;
   final Map<PeerId, SendHandle> results;
   final List<SendHandle> handles;
-  Future<List<SendState>> get completed =>
-      Future.wait(handles.map((e) => e.completed));
+  final _done = Completer<BroadcastState>();
+  BroadcastState _state = BroadcastState.active;
+  BroadcastState get state => _state;
+  Future<BroadcastState> get completed => _done.future;
+
+  void _watchConstituents() {
+    if (handles.isEmpty || handles.every((handle) => handle.isTerminal)) {
+      _complete(BroadcastState.completed);
+      return;
+    }
+    Future.wait(handles.map((handle) => handle.completed))
+        .then((_) => _complete(BroadcastState.completed));
+  }
+
+  void _complete(BroadcastState state) {
+    if (_done.isCompleted) return;
+    _state = state;
+    _done.complete(state);
+  }
+
+  /// Requests local best-effort cancellation of every nonterminal constituent.
+  void cancel() {
+    if (_done.isCompleted || _state == BroadcastState.cancelled) return;
+    for (final handle in handles) {
+      handle.cancel();
+    }
+    _state = BroadcastState.cancelled;
+    if (!_done.isCompleted) _done.complete(_state);
+  }
 }
 
 class RealtimeSendHandle extends SendHandle {
@@ -95,12 +172,41 @@ class RealtimeBroadcastHandle {
   RealtimeBroadcastHandle(Map<PeerId, RealtimeSendHandle> results)
       : results = Map.unmodifiable(results),
         targetPeerIds = List.unmodifiable(results.keys),
-        handles = List.unmodifiable(results.values);
+        handles = List.unmodifiable(results.values) {
+    _watchConstituents();
+  }
   final List<PeerId> targetPeerIds;
   final Map<PeerId, RealtimeSendHandle> results;
   final List<RealtimeSendHandle> handles;
-  Future<List<SendState>> get completed =>
-      Future.wait(handles.map((e) => e.completed));
+  final _done = Completer<BroadcastState>();
+  BroadcastState _state = BroadcastState.active;
+  BroadcastState get state => _state;
+  Future<BroadcastState> get completed => _done.future;
+
+  void _watchConstituents() {
+    if (handles.isEmpty || handles.every((handle) => handle.isTerminal)) {
+      _complete(BroadcastState.completed);
+      return;
+    }
+    Future.wait(handles.map((handle) => handle.completed))
+        .then((_) => _complete(BroadcastState.completed));
+  }
+
+  void _complete(BroadcastState state) {
+    if (_done.isCompleted) return;
+    _state = state;
+    _done.complete(state);
+  }
+
+  /// Requests local best-effort cancellation of every nonterminal constituent.
+  void cancel() {
+    if (_done.isCompleted || _state == BroadcastState.cancelled) return;
+    for (final handle in handles) {
+      handle.cancel();
+    }
+    _state = BroadcastState.cancelled;
+    if (!_done.isCompleted) _done.complete(_state);
+  }
 }
 
 /// Serialized, in-memory GroupSession core. Platform discovery/backends feed this
@@ -123,7 +229,12 @@ class GroupSession {
   // The bound applies to the GroupSession as a whole, while the identity is
   // the normative (source, GroupMessageId) pair (Section 43.1.4).
   final CompletedGroupMessageDedup _delivered = CompletedGroupMessageDedup();
+  // Section 43.1.14 scopes group realtime latest-state suppression by the
+  // original source and channel, not merely by channel.
+  final Map<String, int> _realtimeLastSequence = {};
   final Queue<_Command> _commands = Queue<_Command>();
+  final Queue<int> _checkpointPublishTimes = Queue<int>();
+  Uint8List? _latestCoordinatorCheckpoint;
   GroupState _state = GroupState.starting;
   PeerId? _coordinator;
   int _eventSequence = 0;
@@ -138,6 +249,10 @@ class GroupSession {
     ..sort((a, b) => _comparePeerIds(a.peerId, b.peerId)));
   int get effectiveMaxPeers =>
       _members.values.map((m) => m.maxPeers).reduce(min);
+  Uint8List? latestCoordinatorCheckpoint() =>
+      _latestCoordinatorCheckpoint == null
+          ? null
+          : Uint8List.fromList(_latestCoordinatorCheckpoint!);
   void _transition(GroupState next) {
     const allowed = {
       GroupState.starting: {GroupState.discovering, GroupState.failed},
@@ -251,6 +366,57 @@ class GroupSession {
         _events.close();
       });
   void close() => leave();
+
+  /// Retains the newest coordinator application checkpoint. The transport
+  /// owner replicates this immutable value through its bounded per-target
+  /// checkpoint queues after this serialized admission succeeds.
+  void publishCoordinatorCheckpoint(List<int> bytes) {
+    if (bytes.length > 262144) {
+      throw const LpcException(LpcErrorCode.messageTooLarge);
+    }
+    final now = _now();
+    while (_checkpointPublishTimes.isNotEmpty &&
+        now - _checkpointPublishTimes.first >= 1000) {
+      _checkpointPublishTimes.removeFirst();
+    }
+    if (_checkpointPublishTimes.length >= 4) {
+      throw const LpcException(LpcErrorCode.resourceExhausted);
+    }
+    _checkpointPublishTimes.addLast(now);
+    _latestCoordinatorCheckpoint = Uint8List.fromList(bytes);
+  }
+
+  /// Backend/core hook after a newer complete authenticated checkpoint has
+  /// committed. The receiver's term/sequence validation happens before this
+  /// GroupSession ownership boundary.
+  void commitCoordinatorCheckpoint(List<int> bytes) {
+    if (bytes.length > 262144) {
+      throw const LpcException(LpcErrorCode.messageTooLarge);
+    }
+    _latestCoordinatorCheckpoint = Uint8List.fromList(bytes);
+  }
+
+  /// Backend/core hook for a committed nonterminal group error. The event is
+  /// serialized with all other GroupSession callbacks and does not mutate
+  /// group membership or public send state.
+  void reportError(
+    LpcErrorCode errorCode, {
+    PeerId? peerId,
+    GroupMessageId? groupMessageId,
+    String? diagnostic,
+  }) =>
+      _enqueue(() {
+        if (_state == GroupState.closed) return;
+        _emit((s, a) => GroupError(
+              s,
+              a,
+              errorCode,
+              peerId: peerId,
+              groupMessageId: groupMessageId,
+              diagnostic: diagnostic,
+            ));
+      });
+
   // Backend/core hooks: callers must invoke only after authenticated protocol commit.
   void commitMembership(Iterable<GroupMember> snapshot,
           {required PeerId coordinator}) =>
@@ -270,8 +436,8 @@ class GroupSession {
         final previous = _coordinator;
         _coordinator = coordinator;
         if (previous != coordinator)
-          _emit((s, a) =>
-              CoordinatorChanged(s, a, previous, coordinator, isCoordinator));
+          _emit((s, a) => CoordinatorChanged(s, a, previous, coordinator,
+              isCoordinator, _latestCoordinatorCheckpoint));
       });
   void receiveReliable(
           {required PeerId source,
@@ -280,7 +446,12 @@ class GroupSession {
           SendPriority priority = SendPriority.interactive,
           required List<int> bytes}) =>
       _enqueue(() {
-        if (_state != GroupState.ready || !_members.containsKey(source)) return;
+        if (source == _localPeerId) {
+          throw const LpcException(LpcErrorCode.protocolMismatch);
+        }
+        if (_state != GroupState.ready || !_members.containsKey(source)) {
+          return;
+        }
         if (mode == DeliveryMode.realtimeLatest) {
           throw const LpcException(LpcErrorCode.protocolMismatch);
         }
@@ -295,6 +466,45 @@ class GroupSession {
         }
         _emit((s, a) => ReliableMessageReceived(s, a, source, id, mode, bytes));
       });
+
+  /// Backend/core hook for a fully authenticated, coordinator-validated
+  /// destination realtime datagram. Earlier/equal sequence numbers are
+  /// silently suppressed before any application-visible event is emitted.
+  void receiveRealtime({
+    required PeerId source,
+    required int channelId,
+    required int senderTick,
+    required int datagramSequence,
+    required List<int> bytes,
+  }) =>
+      _enqueue(() {
+        if (source == _localPeerId) {
+          throw const LpcException(LpcErrorCode.protocolMismatch);
+        }
+        if (_state != GroupState.ready || !_members.containsKey(source)) {
+          return;
+        }
+        if (channelId < 1 ||
+            channelId > 65535 ||
+            datagramSequence < 1 ||
+            datagramSequence > 0xffffffff ||
+            bytes.length > 1100) {
+          throw const LpcException(LpcErrorCode.protocolMismatch);
+        }
+        final key = '$source:$channelId';
+        final previous = _realtimeLastSequence[key];
+        if (previous != null && !_newerRealtime(datagramSequence, previous)) {
+          return;
+        }
+        _realtimeLastSequence[key] = datagramSequence;
+        _emit((s, a) => RealtimeDatagramReceived(
+            s, a, source, channelId, senderTick, datagramSequence, bytes));
+      });
+
+  bool _newerRealtime(int candidate, int previous) {
+    final difference = (candidate - previous) & 0xffffffff;
+    return difference != 0 && difference < 0x80000000;
+  }
 }
 
 class _Command {

@@ -92,6 +92,19 @@ void main() {
     expect(cores.map((core) => core.state),
         everyElement(PeerConnectionState.ready));
     expect(exchangeA.result!.keepaliveTiming.intervalMs, 2000);
+    expect(exchangeB.result!.keepaliveTiming.intervalMs, 2000);
+    expect(exchangeA.result!.keepaliveTiming.deadTimeoutMs, 6000);
+    expect(exchangeB.result!.keepaliveTiming.deadTimeoutMs, 6000);
+    for (final backend in [backendA, backendB]) {
+      final readyFrames = backend.writes
+          .map(LpcFrame.decode)
+          .where((frame) => frame.type == FrameType.ready)
+          .toList();
+      expect(readyFrames, hasLength(1));
+      expect(readyFrames.single.encrypted, isTrue);
+      expect(readyFrames.single.transportGeneration, 1);
+      expect(readyFrames.single.sequenceNumber, 1);
+    }
     await cores[0].submitEncrypted(FrameType.ping, [9]);
     expect(LpcFrame.decode(backendA.writes.last).sequenceNumber, 2);
 

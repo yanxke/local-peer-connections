@@ -80,3 +80,118 @@ bool mayClaimCoordinator(
         (item) =>
             item.candidateTerm == candidateTerm &&
             localRank.compareTo(item.rank) >= 0);
+
+/// Timer-free Section 10.9 election driver. The owner transports its returned
+/// announcements, claims, and heartbeats only over authenticated links.
+class ElectionController {
+  ElectionController(
+      {required this.groupId,
+      required this.localRank,
+      required int lastCommittedTerm,
+      required List<int> membershipHash,
+      required int startedAtMs})
+      : candidateTerm = lastCommittedTerm + 1,
+        _startedAtMs = startedAtMs,
+        _membershipHash = Uint8List.fromList(membershipHash) {
+    if (_membershipHash.length != 32) {
+      throw ArgumentError.value(membershipHash, 'membershipHash');
+    }
+    _localAnnouncement = ElectionAnnouncement(
+        groupId: groupId,
+        candidateTerm: candidateTerm,
+        rank: localRank,
+        membershipHash: _membershipHash);
+    _observed[_key(candidateTerm, localRank.peerId)] = _localAnnouncement;
+  }
+
+  static const int announcementWindowMs = 1200;
+  static const int higherRankQuietMs = 500;
+  static const int heartbeatSpacingMs = 100;
+
+  final GroupId groupId;
+  final CoordinatorRank localRank;
+  final int candidateTerm, _startedAtMs;
+  final Uint8List _membershipHash;
+  late final ElectionAnnouncement _localAnnouncement;
+  final Map<String, ElectionAnnouncement> _observed = {};
+  int? _claimSentAtMs;
+  int? _higherObservedAtMs;
+  int _nextHeartbeatIndex = 0;
+  bool _coordinator = false;
+
+  ElectionAnnouncement get localAnnouncement => _localAnnouncement;
+  bool get isCoordinator => _coordinator;
+
+  /// Records an authenticated announcement or claim. It returns true exactly
+  /// when a lower-ranked claim requires the local peer to re-announce.
+  bool observe(ElectionAnnouncement message,
+      {required bool isClaim, required int nowMs}) {
+    if (message.groupId != groupId) {
+      throw const LpcException(LpcErrorCode.protocolMismatch, 'wrong GroupId');
+    }
+    _observed[_key(message.candidateTerm, message.rank.peerId)] = message;
+    final higher = message.candidateTerm > candidateTerm ||
+        (message.candidateTerm == candidateTerm &&
+            message.rank.compareTo(localRank) > 0);
+    if (higher) _higherObservedAtMs = nowMs;
+    return isClaim &&
+        message.candidateTerm == candidateTerm &&
+        localRank.compareTo(message.rank) > 0;
+  }
+
+  /// Advances the exact election deadlines and returns every action currently
+  /// due. At most one heartbeat is produced per call, preserving 100 ms gaps.
+  List<ElectionAction> poll(int nowMs) {
+    final actions = <ElectionAction>[];
+    if (_coordinator) {
+      if (_nextHeartbeatIndex < 3 &&
+          nowMs >=
+              _claimSentAtMs! +
+                  higherRankQuietMs +
+                  _nextHeartbeatIndex * heartbeatSpacingMs) {
+        actions.add(ElectionHeartbeat(_nextHeartbeatIndex));
+        _nextHeartbeatIndex++;
+      }
+      return actions;
+    }
+    if (_claimSentAtMs == null &&
+        nowMs >= _startedAtMs + announcementWindowMs &&
+        mayClaimCoordinator(
+            localRank: localRank,
+            candidateTerm: candidateTerm,
+            observed: _observed.values)) {
+      _claimSentAtMs = nowMs;
+      actions.add(ElectionClaim(_localAnnouncement));
+    }
+    if (_claimSentAtMs != null &&
+        _higherObservedAtMs == null &&
+        nowMs >= _claimSentAtMs! + higherRankQuietMs) {
+      _coordinator = true;
+      actions.add(const ElectionBecameCoordinator());
+      actions.add(ElectionHeartbeat(_nextHeartbeatIndex));
+      _nextHeartbeatIndex++;
+    }
+    return actions;
+  }
+
+  static String _key(int term, PeerId peerId) =>
+      '$term:${peerId.bytes.join(',')}';
+}
+
+sealed class ElectionAction {
+  const ElectionAction();
+}
+
+class ElectionClaim extends ElectionAction {
+  const ElectionClaim(this.message);
+  final ElectionAnnouncement message;
+}
+
+class ElectionHeartbeat extends ElectionAction {
+  const ElectionHeartbeat(this.index);
+  final int index;
+}
+
+class ElectionBecameCoordinator extends ElectionAction {
+  const ElectionBecameCoordinator();
+}

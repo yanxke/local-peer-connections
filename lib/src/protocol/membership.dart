@@ -114,6 +114,71 @@ class MembershipSnapshot {
   }
 }
 
+/// The disposition of an otherwise valid, authenticated membership snapshot
+/// under Section 10.8.1's same-term ordering rule. A stale snapshot remains a
+/// completed ACK-required operation; the transport owner ACKs it but does not
+/// apply its membership payload.
+enum MembershipSnapshotOrderDisposition { accepted, stale }
+
+/// Session-scoped ordering state for complete authenticated
+/// `MEMBERSHIP_SNAPSHOT` operations.
+///
+/// The caller supplies the authenticated coordinator identity and the
+/// pairwise MessageId from that coordinator's sender direction. This table
+/// deliberately does not compare counters across a SessionId, sender prefix,
+/// coordinator, or coordinator term.
+class MembershipSnapshotOrderTable {
+  final Map<String, int> _greatestCounters = {};
+
+  MembershipSnapshotOrderDisposition observe({
+    required PeerId coordinatorPeerId,
+    required int coordinatorTerm,
+    required List<int> sessionId,
+    required List<int> senderMessageId,
+  }) {
+    if (coordinatorTerm < 0 ||
+        sessionId.length != 16 ||
+        senderMessageId.length != 8) {
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    final prefix = senderMessageId.sublist(0, 4);
+    final counter =
+        ByteData.sublistView(Uint8List.fromList(senderMessageId)).getUint32(4);
+    final key = _domainKey(
+      coordinatorPeerId: coordinatorPeerId,
+      coordinatorTerm: coordinatorTerm,
+      sessionId: sessionId,
+      senderMessagePrefix: prefix,
+    );
+    final greatest = _greatestCounters[key];
+    if (greatest != null && counter <= greatest) {
+      return MembershipSnapshotOrderDisposition.stale;
+    }
+    _greatestCounters[key] = counter;
+    return MembershipSnapshotOrderDisposition.accepted;
+  }
+
+  /// Releases ordering state once that logical SessionId can no longer resume.
+  void sessionTerminated(List<int> sessionId) {
+    if (sessionId.length != 16) {
+      throw ArgumentError.value(sessionId, 'sessionId');
+    }
+    final suffix = ':${sessionId.join(',')}:';
+    _greatestCounters.removeWhere((key, _) => key.contains(suffix));
+  }
+
+  int get domainCount => _greatestCounters.length;
+}
+
+String _domainKey({
+  required PeerId coordinatorPeerId,
+  required int coordinatorTerm,
+  required List<int> sessionId,
+  required List<int> senderMessagePrefix,
+}) =>
+    '${coordinatorPeerId.bytes.join(',')}:$coordinatorTerm:'
+    '${sessionId.join(',')}:${senderMessagePrefix.join(',')}';
+
 int _compare(List<int> a, List<int> b) {
   for (var i = 0; i < a.length; i++) {
     final result = a[i].compareTo(b[i]);

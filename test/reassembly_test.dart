@@ -14,6 +14,17 @@ void main() {
     expect(receiver.add(List.filled(8, 1), chunks.first)!.bytes, bytes);
   });
 
+  test('UT-076 clears incomplete ACK-required DATA on transport loss', () {
+    final bytes = List<int>.filled(maxDataChunkBytes + 2, 7);
+    final chunks = chunkData(bytes,
+        mode: DeliveryMode.reliableAcked, priority: SendPriority.normal);
+    final receiver = DataReassembler();
+    expect(receiver.add(List.filled(8, 2), chunks.first), isNull);
+    receiver.onTransportGenerationLost();
+    expect(receiver.add(List.filled(8, 2), chunks.last), isNull);
+    expect(receiver.add(List.filled(8, 2), chunks.first)!.bytes, bytes);
+  });
+
   test('reassembly rejects conflicting duplicate chunks', () {
     final receiver = DataReassembler();
     final original = chunkData(List.filled(maxDataChunkBytes + 1, 1),
@@ -32,12 +43,17 @@ void main() {
         throwsA(isA<LpcException>()));
   });
 
-  test('realtime filter accepts newer uint32 values including wraparound', () {
+  test('RT-005/006 realtime filter accepts gaps and rejects older/equal data',
+      () {
     final filter = RealtimeSequenceFilter();
     RealtimeDatagram packet(int seq) =>
         RealtimeDatagram(channelId: 1, sequence: seq, senderTick: 0, bytes: []);
-    expect(filter.accept(packet(0xffffffff)), isTrue);
-    expect(filter.accept(packet(0)), isTrue);
-    expect(filter.accept(packet(0xffffffff)), isFalse);
+    expect(filter.accept(packet(1)), isTrue);
+    expect(filter.accept(packet(3)), isTrue);
+    expect(filter.accept(packet(2)), isFalse);
+    expect(filter.accept(packet(3)), isFalse);
+    final wrapping = RealtimeSequenceFilter();
+    expect(wrapping.accept(packet(0xffffffff)), isTrue);
+    expect(wrapping.accept(packet(0)), isTrue);
   });
 }

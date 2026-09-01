@@ -140,6 +140,12 @@ enum SendState {
   expired
 }
 
+/// Aggregate state of the independent constituent sends of a broadcast.
+///
+/// A completed broadcast may contain successful and failed constituent sends;
+/// it is intentionally not an all-destinations success result.
+enum BroadcastState { active, completed, cancelled }
+
 class RuntimeConfig {
   const RuntimeConfig(
       {this.keepaliveIntervalMs = 2000,

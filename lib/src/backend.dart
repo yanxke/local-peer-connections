@@ -39,6 +39,14 @@ abstract interface class BackendConnection {
   Stream<BackendConnectionEvent> get events;
 }
 
+/// Optional backend capability for a serialized realtime LPC frame. It lets a
+/// transport select its specified realtime platform path without changing the
+/// encrypted LPC frame or its completion semantics.
+abstract interface class RealtimeBackendConnection
+    implements BackendConnection {
+  TransportWrite writeRealtime(Uint8List completeSerializedLpcFrame);
+}
+
 sealed class BackendConnectionEvent {
   const BackendConnectionEvent();
 }

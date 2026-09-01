@@ -3,11 +3,18 @@ import 'dart:typed_data';
 import '../types.dart';
 
 class MessageIdAllocator {
-  MessageIdAllocator(List<int> prefix) : _prefix = Uint8List.fromList(prefix) {
-    if (_prefix.length != 4) throw ArgumentError.value(prefix, 'prefix');
+  MessageIdAllocator(List<int> prefix, {int initialCounter = 1})
+      : _prefix = Uint8List.fromList(prefix),
+        _next = initialCounter {
+    if (_prefix.length != 4) {
+      throw ArgumentError.value(prefix, 'prefix');
+    }
+    if (initialCounter < 1 || initialCounter > 0xffffffff) {
+      throw ArgumentError.value(initialCounter, 'initialCounter');
+    }
   }
   final Uint8List _prefix;
-  int _next = 1;
+  int _next;
   bool _exhausted = false;
   Uint8List allocate() {
     if (_exhausted)
@@ -29,16 +36,24 @@ class CompletedMessageDedup {
   final int capacity;
   final LinkedHashMap<String, Uint8List> _entries = LinkedHashMap();
   bool accept(List<int> id, List<int> content) {
+    if (isDuplicate(id, content)) return false;
+    final key = id.join(',');
+    _entries[key] = Uint8List.fromList(content);
+    if (_entries.length > capacity) _entries.remove(_entries.keys.first);
+    return true;
+  }
+
+  /// Checks a completed operation without mutating retention. This permits a
+  /// caller to commit protocol state before recording completion/ACKing it.
+  bool isDuplicate(List<int> id, List<int> content) {
     final key = id.join(',');
     final old = _entries[key];
     if (old != null) {
       if (!_same(old, content))
         throw const LpcException(LpcErrorCode.messageIdCollision);
-      return false;
+      return true;
     }
-    _entries[key] = Uint8List.fromList(content);
-    if (_entries.length > capacity) _entries.remove(_entries.keys.first);
-    return true;
+    return false;
   }
 
   bool _same(List<int> a, List<int> b) {

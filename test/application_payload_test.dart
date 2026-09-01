@@ -21,7 +21,7 @@ void main() {
     expect(RealtimeDatagram.decode(encoded).senderTick, 3);
   });
 
-  test('realtime rejects payloads larger than 1100 bytes', () {
+  test('RT-007 realtime rejects payloads larger than 1100 bytes', () {
     expect(
         () => RealtimeDatagram(
             channelId: 1,

@@ -20,14 +20,21 @@ class CancellationTombstoneTable {
   CancellationTombstoneTable({this.capacity = 1024}) : assert(capacity > 0);
   final int capacity;
   final Map<GroupMessageId, _TombstoneState> _entries = {};
+
+  /// Whether one more cancellation tombstone can be retained. Source routing
+  /// reserves this capacity when accepting a new operation, so cancellation
+  /// itself never needs to evict a still-valid tombstone.
+  bool get canReserve => _entries.length < capacity;
+
   void add(CancelledGroupSendTombstone tombstone,
       {required Iterable<List<int>> signalingSessionIds}) {
     final sessions = signalingSessionIds.map(_sessionKey).toSet();
     if (sessions.isEmpty) return;
     if (_entries.length >= capacity &&
-        !_entries.containsKey(tombstone.groupMessageId))
+        !_entries.containsKey(tombstone.groupMessageId)) {
       throw const LpcException(
           LpcErrorCode.resourceExhausted, 'cancellation tombstone capacity');
+    }
     _entries[tombstone.groupMessageId] = _TombstoneState(tombstone, sessions);
   }
 

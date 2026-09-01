@@ -6,6 +6,58 @@ import 'types.dart';
 
 enum RuntimeState { created, initializing, ready, failed, closing, closed }
 
+sealed class DiscoveryEvent {
+  const DiscoveryEvent();
+}
+
+class DiscoveryStopped extends DiscoveryEvent {
+  const DiscoveryStopped();
+}
+
+/// Local opaque endpoint metadata. It is deliberately not a protocol PeerId.
+class DiscoveredEndpoint {
+  const DiscoveredEndpoint(this.id, {required this.rssi, this.localName});
+  final String id;
+  final int rssi;
+  final String? localName;
+}
+
+/// Section 33.3 discovery lifecycle. Scanning is owned separately from any
+/// PeerConnection that may have been created from an endpoint.
+class DiscoverySession {
+  DiscoverySession({Future<void> Function()? stopPlatformScan})
+      : _stopPlatformScan = stopPlatformScan ?? _noOp;
+
+  final Future<void> Function() _stopPlatformScan;
+  final Map<String, DiscoveredEndpoint> _endpoints = {};
+  final StreamController<DiscoveryEvent> _events =
+      StreamController<DiscoveryEvent>.broadcast(sync: true);
+  bool _stopped = false;
+
+  bool get isStopped => _stopped;
+  Stream<DiscoveryEvent> get events => _events.stream;
+  List<DiscoveredEndpoint> currentEndpoints() =>
+      List.unmodifiable(_endpoints.values.toList());
+
+  /// Backend owners record active scan results here. Once stopped, no further
+  /// endpoint changes are retained or emitted.
+  void recordEndpoint(DiscoveredEndpoint endpoint) {
+    if (_stopped) return;
+    _endpoints[endpoint.id] = endpoint;
+  }
+
+  /// Stops scanning once and emits exactly one terminal discovery event. It
+  /// intentionally neither owns nor closes established PeerConnections.
+  Future<void> stop() async {
+    if (_stopped) return;
+    _stopped = true;
+    await _stopPlatformScan();
+    _events.add(const DiscoveryStopped());
+  }
+}
+
+Future<void> _noOp() async {}
+
 /// Top-level owner for LPC objects. Native BLE implementations are attached via
 /// the platform backend; this portable core intentionally owns no BLE types.
 class NearbyRuntime {

@@ -37,6 +37,43 @@ void main() {
         AckTimeoutResult.retransmitWholeOperation);
   });
 
+  test('UT-056 long transmission starts no ACK timeout before final submission',
+      () {
+    final retained = AckRetentionSet();
+    final id = List.filled(8, 1);
+    retained.retain(messageId: id, logicalContent: [2]);
+    // The operation has spent more than one timeout interval transmitting,
+    // but its final frame has not reached SENT_TO_TRANSPORT yet.
+    expect(retained.onTimer(id, nowMs: 5000), AckTimeoutResult.ignored);
+    retained.finalFrameSubmitted(id, nowMs: 5000);
+    expect(retained.onTimer(id, nowMs: 7999), AckTimeoutResult.ignored);
+    expect(retained.onTimer(id, nowMs: 8000),
+        AckTimeoutResult.retransmitWholeOperation);
+  });
+
+  test('UT-058 transport loss before final submission leaves no ACK timer', () {
+    final retained = AckRetentionSet();
+    final id = List.filled(8, 1);
+    retained.retain(messageId: id, logicalContent: [2]);
+    retained.transportLost();
+    expect(retained.onTimer(id, nowMs: 10000), AckTimeoutResult.ignored);
+    expect(retained.retransmitAfterResume(), hasLength(1));
+  });
+
+  test('UT-059 resumed retry starts a fresh timer only after submission', () {
+    final retained = AckRetentionSet();
+    final id = List.filled(8, 1);
+    retained.retain(messageId: id, logicalContent: [2]);
+    retained.finalFrameSubmitted(id, nowMs: 0);
+    retained.transportLost();
+    expect(retained.retransmitAfterResume(), hasLength(1));
+    expect(retained.onTimer(id, nowMs: 10000), AckTimeoutResult.ignored);
+    retained.finalFrameSubmitted(id, nowMs: 10000);
+    expect(retained.onTimer(id, nowMs: 12999), AckTimeoutResult.ignored);
+    expect(retained.onTimer(id, nowMs: 13000),
+        AckTimeoutResult.retransmitWholeOperation);
+  });
+
   test('RESUME retains and retries whole operations with their MessageId', () {
     final retained = AckRetentionSet();
     final op =
