@@ -54,6 +54,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
   private val gattClients = mutableMapOf<String, GattClient>()
   private val gattServerPeers = mutableMapOf<String, BluetoothDevice>()
   private var activeServiceUuid: ParcelUuid? = null
+  private val lastScanLogMs = mutableMapOf<String, Long>()
 
   override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
     applicationContext = binding.applicationContext
@@ -147,7 +148,12 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
       override fun onScanResult(callbackType: Int, result: ScanResult) {
         val advertised = result.scanRecord?.serviceUuids?.any { it == serviceUuid } == true
         if (!advertised) return
-        Log.d(logTag, "scan match address=${result.device.address} name=${result.scanRecord?.deviceName} rssi=${result.rssi}")
+        val now = System.currentTimeMillis()
+        val previous = lastScanLogMs[result.device.address] ?: 0L
+        if (now - previous >= 5000L) {
+          lastScanLogMs[result.device.address] = now
+          Log.d(logTag, "scan match address=${result.device.address} name=${result.scanRecord?.deviceName} rssi=${result.rssi}")
+        }
         emitSuccess(mapOf("type" to "endpointFound", "endpointId" to result.device.address,
           "localName" to result.scanRecord?.deviceName, "rssi" to result.rssi))
       }
@@ -193,7 +199,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
           responseNeeded: Boolean, offset: Int, value: ByteArray) {
         if (characteristic.uuid == characteristicUuid(serviceUuid, 1) && !preparedWrite && offset == 0) {
           emitSuccess(mapOf("type" to "gattFragment", "endpointId" to device.address,
-            "bytes" to value.toList()))
+            "bytes" to value.map { it.toInt() and 0xff }))
           if (responseNeeded) sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
         } else if (responseNeeded) {
           sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
@@ -305,7 +311,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
       override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
         if (characteristic.uuid == txUuid) {
           characteristic.value?.let { value -> emitSuccess(mapOf("type" to "gattFragment",
-              "endpointId" to endpointId, "bytes" to value.toList())) }
+              "endpointId" to endpointId, "bytes" to value.map { it.toInt() and 0xff })) }
         }
       }
     }) ?: throw BackendError("ENDPOINT_LOST", "GATT connection did not start")

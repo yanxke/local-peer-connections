@@ -32,10 +32,22 @@ class PlatformBleBackend {
   late final Stream<PlatformBleEvent> _sharedEvents =
       (_eventStream ??
               _events.receiveBroadcastStream().map((Object? value) {
-                debugPrint('[LocalPeerConnections] native event: $value');
+                final map = value is Map ? value : const <Object?, Object?>{};
+                final type = map['type'];
+                final endpoint = map['endpointId'];
+                final key = '$type:$endpoint';
+                final now = DateTime.now();
+                final previous = _lastEventLog[key];
+                if (previous == null ||
+                    now.difference(previous) >= const Duration(seconds: 5) ||
+                    type != 'endpointFound') {
+                  _lastEventLog[key] = now;
+                  debugPrint('[LocalPeerConnections] native event: $value');
+                }
                 return PlatformBleEvent.fromPlatform(value);
               }))
           .asBroadcastStream();
+  final Map<String, DateTime> _lastEventLog = <String, DateTime>{};
 
   /// A single shared stream is important: EventChannel has one native sink,
   /// while discovery, GATT bindings, and apps may all listen concurrently.
@@ -219,9 +231,12 @@ sealed class PlatformBleEvent {
         value['endpointId'] is String &&
         value['bytes'] is List) {
       final bytes = value['bytes'] as List;
-      if (bytes.every((byte) => byte is int && byte >= 0 && byte <= 255)) {
+      // Android ByteArray payloads may arrive as signed values; normalize
+      // them here as a defensive compatibility measure.
+      if (bytes.every((byte) => byte is int && byte >= -128 && byte <= 255)) {
         return PlatformGattFragment(
-            value['endpointId'] as String, bytes.cast<int>());
+            value['endpointId'] as String,
+            bytes.cast<int>().map((byte) => byte & 0xff).toList());
       }
     }
     if (type == 'gattDisconnected' && value['endpointId'] is String) {

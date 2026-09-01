@@ -68,7 +68,12 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
         try self.requirePoweredOn(self.central.state)
         let serviceUuid = try self.serviceUuid(arguments)
         self.activeServiceUuid = serviceUuid
-        self.central.scanForPeripherals(withServices: [serviceUuid], options: nil)
+        // Request duplicate advertisements so callers can maintain a live
+        // endpoint/TTL view and RSSI updates instead of expiring entries while
+        // the peripheral is still advertising.
+        self.central.scanForPeripherals(
+          withServices: [serviceUuid],
+          options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
         print("[LocalPeerConnections] discovery requested uuid=\(serviceUuid.uuidString)")
       }
     case "stopDiscovery":
