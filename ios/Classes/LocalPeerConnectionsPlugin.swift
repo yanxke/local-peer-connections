@@ -147,7 +147,7 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     let now = Date()
     if now.timeIntervalSince(lastDiscoveryLog[peripheral.identifier] ?? .distantPast) >= 5 {
       lastDiscoveryLog[peripheral.identifier] = now
-      print("[LocalPeerConnections] endpoint found id=\(peripheral.identifier.uuidString) name=\(advertisementData[CBAdvertisementDataLocalNameKey] ?? "") rssi=\(RSSI)")
+      print("[LocalPeerConnections][\(ISO8601DateFormatter().string(from: now))] endpoint found id=\(peripheral.identifier.uuidString) name=\(advertisementData[CBAdvertisementDataLocalNameKey] ?? "") rssi=\(RSSI)")
     }
     eventSink?(["type": "endpointFound", "endpointId": peripheral.identifier.uuidString,
                 "localName": advertisementData[CBAdvertisementDataLocalNameKey] as? String,
@@ -222,6 +222,15 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
           characteristic.uuid == client.tx.uuid, let value = characteristic.value else { return }
     eventSink?(["type": "gattFragment", "endpointId": peripheral.identifier.uuidString,
                 "bytes": [UInt8](value)])
+  }
+  public func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic,
+                         error: Error?) {
+    guard let client = gattClients[peripheral.identifier], characteristic.uuid == client.rx.uuid else { return }
+    if let error {
+      eventSink?(FlutterError(code: "PLATFORM_ERROR", message: error.localizedDescription, details: nil))
+    } else {
+      eventSink?(["type": "gattWritable", "endpointId": peripheral.identifier.uuidString])
+    }
   }
   public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
                              error: Error?) {

@@ -42,7 +42,7 @@ class PlatformBleBackend {
                     now.difference(previous) >= const Duration(seconds: 5) ||
                     type != 'endpointFound') {
                   _lastEventLog[key] = now;
-                  debugPrint('[LocalPeerConnections] native event: $value');
+                  debugPrint('[LocalPeerConnections][${now.toIso8601String()}] native event: $value');
                 }
                 return PlatformBleEvent.fromPlatform(value);
               }))

@@ -313,6 +313,17 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         emitSuccess(mapOf("type" to "gattConnected", "endpointId" to endpointId,
             "localRole" to "central", "platformSafeWriteSize" to 20))
       }
+      override fun onCharacteristicWrite(gatt: BluetoothGatt,
+          characteristic: BluetoothGattCharacteristic, status: Int) {
+        if (characteristic.uuid == rxUuid) {
+          gattClients[endpointId]?.writeInFlight = false
+          if (status == BluetoothGatt.GATT_SUCCESS) {
+            emitSuccess(mapOf("type" to "gattWritable", "endpointId" to endpointId))
+          } else {
+            emitError("PLATFORM_ERROR", "GATT characteristic write failed $status", status)
+          }
+        }
+      }
       override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
         if (characteristic.uuid == txUuid) {
           characteristic.value?.let { value -> emitSuccess(mapOf("type" to "gattFragment",
@@ -335,12 +346,17 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
       return if (gattServer!!.notifyCharacteristicChanged(device, tx, false)) "submitted" else "temporarilyUnavailable"
     }
     if (transmission == "notify") return "terminalFailure"
+    if (client.writeInFlight) return "temporarilyUnavailable"
     client.rx.value = fragment
     client.rx.writeType = if (transmission == "writeWithoutResponse")
       BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
     // `true` is the Android API submission boundary. A `false` result is a
     // transient local queue condition; it must not be treated as transport loss.
-    return if (client.gatt.writeCharacteristic(client.rx)) "submitted" else "temporarilyUnavailable"
+    client.writeInFlight = true
+    return if (client.gatt.writeCharacteristic(client.rx)) "submitted" else {
+      client.writeInFlight = false
+      "temporarilyUnavailable"
+    }
   }
 
   private fun closeGattConnection(endpointId: String) {
@@ -414,7 +430,8 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     val gatt: BluetoothGatt,
     val rx: BluetoothGattCharacteristic,
     val tx: BluetoothGattCharacteristic,
-    val control: BluetoothGattCharacteristic
+    val control: BluetoothGattCharacteristic,
+    var writeInFlight: Boolean = false
   )
 
   private fun loadOrCreateSeed(): ByteArray {
