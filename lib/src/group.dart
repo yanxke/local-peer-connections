@@ -24,7 +24,7 @@ abstract interface class GroupRouteTransport {
   void submitRealtime(
       GroupRealtimeDatagram datagram, RealtimeSendHandleController controller);
 
-  /// Cancels local routing ownership.  Protocol 1.1 has no remote revocation
+  /// Cancels local routing ownership.  Protocol 1.0 has no remote revocation
   /// frame; already submitted traffic may still arrive (Section 43.1.9).
   void cancelReliable(GroupMessageId groupMessageId);
 }

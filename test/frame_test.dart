@@ -10,7 +10,7 @@ void main() {
     final bytes = _bytes(62);
     bytes.setRange(0, 4, 'LPC1'.codeUnits);
     bytes[4] = 1;
-    bytes[5] = 1;
+    bytes[5] = 0;
     bytes[6] = FrameType.data.value;
     bytes[8] = 0;
     bytes[9] = 62;
@@ -48,7 +48,7 @@ void main() {
         payload: [7],
         tag: _bytes(16));
     final encoded = frame.encode();
-    expect(encoded.sublist(0, 10), [0x4c, 0x50, 0x43, 0x31, 1, 1, 4, 0, 0, 62]);
+    expect(encoded.sublist(0, 10), [0x4c, 0x50, 0x43, 0x31, 1, 0, 4, 0, 0, 62]);
     expect(encoded.sublist(14, 18), [1, 2, 3, 4]);
   });
 }

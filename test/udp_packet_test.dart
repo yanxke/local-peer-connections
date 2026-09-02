@@ -4,7 +4,7 @@ import 'package:local_peer_connections/local_peer_connections.dart';
 void main() {
   test('LPU1 packet encrypts with header AAD and round-trips', () async {
     final plain = UdpPacket(
-        protocolMinor: 1,
+        protocolMinor: 0,
         type: UdpPacketType.probe,
         reliableGeneration: 1,
         channelId: 2,
@@ -24,7 +24,7 @@ void main() {
         channelId: 1, sequence: 1, senderTick: 1, bytes: List.filled(1100, 7));
     final protected = await const UdpPacketProtector().encrypt(
         UdpPacket(
-            protocolMinor: 1,
+            protocolMinor: 0,
             type: UdpPacketType.realtime,
             reliableGeneration: 1,
             channelId: 1,
@@ -55,7 +55,7 @@ void main() {
   test('modified UDP packet fails AEAD authentication', () async {
     final protected = await const UdpPacketProtector().encrypt(
         UdpPacket(
-            protocolMinor: 1,
+            protocolMinor: 0,
             type: UdpPacketType.probe,
             reliableGeneration: 1,
             channelId: 1,
@@ -111,7 +111,7 @@ void main() {
 
   test('UDP packet header preserves the UINT64_MAX sequence value', () {
     final packet = UdpPacket(
-        protocolMinor: 1,
+        protocolMinor: 0,
         type: UdpPacketType.probe,
         reliableGeneration: 1,
         channelId: 1,

@@ -90,7 +90,7 @@ Future<HandshakeResult> verifyHandshake(
       localMax: local.maxMinor,
       remoteMin: remote.minMinor,
       remoteMax: remote.maxMinor);
-  if (minor != 1 || local.trustMode != remote.trustMode)
+  if (minor != 0 || local.trustMode != remote.trustMode)
     throw const LpcException(
         LpcErrorCode.authenticationFailed, 'incompatible handshake');
   final transcript = await handshakeTranscript(

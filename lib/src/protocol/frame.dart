@@ -4,7 +4,7 @@ import '../types.dart';
 const int lpcHeaderLength = 62;
 const int maxEncryptedPayloadLength = 16384;
 const int protocolMajor = 1;
-const int protocolMinor = 1;
+const int protocolMinor = 0;
 
 enum FrameType {
   hello(0x01),
@@ -59,7 +59,7 @@ class LpcFrame {
   LpcFrame(
       {required this.type,
       required this.flags,
-      this.protocolMinor = 1,
+      this.protocolMinor = 0,
       required this.transportGeneration,
       required this.sequenceNumber,
       required List<int> messageId,

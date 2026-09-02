@@ -11,7 +11,7 @@ portable Dart foundation for configuration validation, LPC frame encoding,
 GATT fragment envelopes, identity-derived PeerIds, serialized GroupSession
 state/event handling, authenticated handshake and RESUME primitives, native
 BLE GATT service/client fragment I/O, direct GATT reconnect/RESUME recovery,
-and unit tests. It is **not yet a Full V1.1 Mobile Conformance
+and unit tests. It is **not yet a Full V1.0 Mobile Conformance
 implementation**: automatic group formation/election/migration, the remaining
 group-control recovery paths, optional transport upgrades, and the mandatory
 full conformance suite are still required before that claim can be made.
@@ -105,7 +105,7 @@ Implemented:
 - [x] Binary vector for HELLO keepalive negotiation and unit tests for implemented binary/layout and lifecycle rules
 - [x] Native BLE GATT client I/O, Dart fragment binding, and permission-request UX
 
-Not implemented yet (and therefore not claimable as V1.1 conformance):
+Not implemented yet (and therefore not claimable as V1.0 conformance):
 
 - [ ] Complete reconnect and RESUME lifecycle (direct GATT reconnect uses the Section 25 schedule, fresh KNOWN_PEER candidate handshakes, candidate RESUME in either direction, connection-rank duplicate-link selection, core rebind, and recovery of direct DATA, single-frame controls, and multi-frame checkpoints; live membership/merge/leave and route-signaling control recovery remains)
 - [ ] Automatic discovery-driven formation, timed election, merge application, and coordinator migration
@@ -117,7 +117,7 @@ Wire baseline:
 
 ```text
 protocol major 1
-protocol minor 1
+protocol minor 0
 ```
 
 The canonical protocol definition is:
@@ -294,7 +294,7 @@ For protocol changes:
 1. update `local_peer_connections_spec.md` first;
 2. add or update the required tests and binary vectors;
 3. search for stale contradictory wording;
-4. preserve protocol-1.1 compatibility unless the change intentionally requires a new protocol version.
+4. preserve protocol-1.0 compatibility unless the change intentionally requires a new protocol version.
 
 For implementation-only changes, do not alter externally observable protocol behavior.
 

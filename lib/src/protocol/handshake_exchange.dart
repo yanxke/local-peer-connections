@@ -85,7 +85,7 @@ class HandshakeExchange {
           localMax: localHello.maxMinor,
           remoteMin: remote.minMinor,
           remoteMax: remote.maxMinor);
-      if (negotiated != 1) {
+      if (negotiated != 0) {
         _state = HandshakeExchangeState.closed;
         return preKeyProtocolMismatchError(senderMaxMinor: localHello.maxMinor);
       }

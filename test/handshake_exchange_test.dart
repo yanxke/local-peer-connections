@@ -9,8 +9,8 @@ Future<HandshakeExchange> _exchange(
     required int ephemeralSeed,
     HandshakeTrustMode trustMode = HandshakeTrustMode.tofu,
     KnownPeerPolicy? knownPeerPolicy,
-    int minMinor = 1,
-    int maxMinor = 1}) async {
+    int minMinor = 0,
+    int maxMinor = 0}) async {
   final identity =
       await Ed25519().newKeyPairFromSeed(List.filled(32, identitySeed));
   final ephemeral =
@@ -69,25 +69,25 @@ void main() {
     expect(() => a.createAuth(), throwsA(isA<LpcException>()));
   });
 
-  test('UT-089 no minor-0 DATA path exists after negotiation failure',
+  test('UT-089 no minor-1 DATA path exists after negotiation failure',
       () async {
     final a = await _exchange(
       identitySeed: 1,
       ephemeralSeed: 3,
-      minMinor: 1,
-      maxMinor: 1,
+      minMinor: 0,
+      maxMinor: 0,
     );
     final legacy = await _exchange(
       identitySeed: 2,
       ephemeralSeed: 4,
-      minMinor: 0,
-      maxMinor: 0,
+      minMinor: 1,
+      maxMinor: 1,
     );
 
     a.createHello();
     final response = await a.receivePlaintext(legacy.createHello());
     expect(response!.type, FrameType.error);
-    expect(response.protocolMinor, 1);
+    expect(response.protocolMinor, 0);
     expect(a.state, HandshakeExchangeState.closed);
     expect(() => a.createAuth(), throwsA(isA<LpcException>()));
   });
@@ -172,7 +172,7 @@ void main() {
     await b.receivePlaintext(authA);
     expect(a.state, HandshakeExchangeState.authenticated);
 
-    expect(a.receivePlaintext(preKeyProtocolMismatchError(senderMaxMinor: 1)),
+    expect(a.receivePlaintext(preKeyProtocolMismatchError(senderMaxMinor: 0)),
         throwsA(isA<LpcException>()));
   });
 }

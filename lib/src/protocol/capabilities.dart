@@ -1,6 +1,6 @@
 import '../types.dart';
 
-/// Section 49.1 capability bits permitted in a protocol-minor-1 HELLO.
+/// Section 49.1 capability bits permitted in a protocol-minor-0 HELLO.
 enum PeerCapability {
   gattBaseline(0),
   l2capCoc(1),
@@ -17,7 +17,7 @@ enum PeerCapability {
 }
 
 /// Wire-visible HELLO bitmap. Bits 9 through 31 are rejected rather than
-/// silently masked, preserving the minor-1 reserved-bit rule.
+/// silently masked, preserving the minor-0 reserved-bit rule.
 class PeerCapabilityBitmap {
   PeerCapabilityBitmap(Iterable<PeerCapability> capabilities)
       : value = capabilities.fold(

@@ -3,10 +3,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:local_peer_connections/local_peer_connections.dart';
 
 void main() {
-  test('UT-009 negotiates only the frozen minor 1 range', () {
-    expect(negotiateMinor(localMin: 1, localMax: 1, remoteMin: 1, remoteMax: 1),
-        1);
-    expect(negotiateMinor(localMin: 1, localMax: 1, remoteMin: 0, remoteMax: 0),
+  test('UT-009 negotiates only the frozen minor 0 range', () {
+    expect(negotiateMinor(localMin: 0, localMax: 0, remoteMin: 0, remoteMax: 0),
+        0);
+    expect(negotiateMinor(localMin: 0, localMax: 0, remoteMin: 1, remoteMax: 1),
         isNull);
   });
   test('UT-087 HELLO round trip verifies PeerId and fixed layout', () async {
@@ -37,7 +37,7 @@ void main() {
       '630dcd2966c4336691125448bbb25b4f000102030405060708090a0b0c0d0e0f'
       '101112131415161718191a1b1c1d1e1f02020202020202020202020202020202'
       '0202020202020202020202020202020203030303030303030303030303030303'
-      '000000010101030304000bb800100000',
+      '000000010000030304000bb800100000',
     );
     expect((await HelloPayload.decode(encoded)).encode(), encoded);
   });
@@ -69,7 +69,7 @@ void main() {
         '630dcd2966c4336691125448bbb25b4f000102030405060708090a0b0c0d0e0f'
         '101112131415161718191a1b1c1d1e1f02020202020202020202020202020202'
         '0202020202020202020202020202020203030303030303030303030303030303'
-        '000000010101030304000bb800100000');
+        '000000010000030304000bb800100000');
   });
 }
 
