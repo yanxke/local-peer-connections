@@ -874,7 +874,11 @@ class NearbyRuntime {
       unawaited(_startGattResume(event, reconnect));
       return;
     }
-    var attempt = _attempts.remove(event.endpointId);
+    // Keep an outbound attempt registered through HELLO/AUTH/READY.  An
+    // explicit user Connect may arrive after native GATT reports connected
+    // but before authentication completes; it must be able to adopt this
+    // exact attempt instead of creating a competing physical connection.
+    var attempt = _attempts[event.endpointId];
     HostSession? host;
     if (attempt == null) {
       for (final candidate in _advertisingHosts) {
@@ -996,6 +1000,7 @@ class NearbyRuntime {
       } else {
         _directRetainedPeers.add(peer.peerId);
       }
+      _attempts.remove(event.endpointId);
       attempt._connected(peer);
     } on Object catch (error) {
       attempt._failed(_asLpcError(error));
