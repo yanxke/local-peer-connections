@@ -245,8 +245,12 @@ class RealtimeBroadcastHandle {
 /// Serialized, in-memory GroupSession core. Platform discovery/backends feed this
 /// object with committed membership and authenticated routed envelopes.
 class GroupSession {
-  GroupSession.internal(this._config, this._localPeerId, GroupId groupId)
-      : _groupId = groupId {
+  GroupSession.internal(this._config, this._localPeerId, GroupId groupId,
+      {void Function(GroupSession)? onClosed,
+      void Function(GroupSession, Set<PeerId>)? onMembershipCommitted})
+      : _groupId = groupId,
+        _onClosed = onClosed,
+        _onMembershipCommitted = onMembershipCommitted {
     _members[_localPeerId] = GroupMember(_localPeerId, _config.maxPeers);
     _transition(GroupState.discovering);
     _transition(GroupState.forming);
@@ -256,6 +260,8 @@ class GroupSession {
   }
   final GroupConfig _config;
   final PeerId _localPeerId;
+  final void Function(GroupSession)? _onClosed;
+  final void Function(GroupSession, Set<PeerId>)? _onMembershipCommitted;
   GroupId _groupId;
   final Map<PeerId, GroupMember> _members = {};
   final StreamController<GroupEvent> _events =
@@ -467,6 +473,7 @@ class GroupSession {
         _transition(GroupState.leaving);
         _transition(GroupState.closed);
         _emit((s, a) => GroupClosed(s, a));
+        _onClosed?.call(this);
         _events.close();
       });
   void close() => leave();
@@ -547,6 +554,7 @@ class GroupSession {
         if (previous != coordinator)
           _emit((s, a) => CoordinatorChanged(s, a, previous, coordinator,
               isCoordinator, _latestCoordinatorCheckpoint));
+        _onMembershipCommitted?.call(this, Set.unmodifiable(next.keys));
       });
 
   /// Commits the state transition required before an election starts. The
@@ -604,6 +612,7 @@ class GroupSession {
           _emit((s, a) => CoordinatorChanged(s, a, previous, coordinator,
               isCoordinator, _latestCoordinatorCheckpoint));
         }
+        _onMembershipCommitted?.call(this, Set.unmodifiable(next.keys));
       });
   void receiveReliable(
           {required PeerId source,

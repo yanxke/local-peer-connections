@@ -40,6 +40,31 @@ import 'types.dart';
 
 enum RuntimeState { created, initializing, ready, failed, closing, closed }
 
+sealed class RuntimeEvent {
+  const RuntimeEvent(this.monotonicTimestampMs);
+  final int monotonicTimestampMs;
+}
+
+class KnownPeerProbeStarted extends RuntimeEvent {
+  const KnownPeerProbeStarted(
+      super.monotonicTimestampMs, this.discoveryEndpointId);
+  final String discoveryEndpointId;
+}
+
+class UnknownPeerIdentified extends RuntimeEvent {
+  const UnknownPeerIdentified(super.monotonicTimestampMs, this.peerId,
+      {this.discoveryEndpointId});
+  final PeerId peerId;
+  final String? discoveryEndpointId;
+}
+
+class KnownPeerConnected extends RuntimeEvent {
+  const KnownPeerConnected(super.monotonicTimestampMs, this.connection,
+      {this.discoveryEndpointId});
+  final PeerConnection connection;
+  final String? discoveryEndpointId;
+}
+
 sealed class DiscoveryEvent {
   const DiscoveryEvent();
 }
@@ -377,14 +402,17 @@ class HostSession {
     required this.config,
     required Future<void> Function() startAdvertising,
     required Future<void> Function() stopAdvertising,
+    required Future<void> Function(HostSession, PeerConnection) releasePeer,
     required void Function(HostSession host) onClosed,
   })  : _startAdvertising = startAdvertising,
         _stopAdvertising = stopAdvertising,
+        _releasePeer = releasePeer,
         _onClosed = onClosed;
 
   final HostConfig config;
   final Future<void> Function() _startAdvertising;
   final Future<void> Function() _stopAdvertising;
+  final Future<void> Function(HostSession, PeerConnection) _releasePeer;
   final void Function(HostSession host) _onClosed;
   final StreamController<HostSessionEvent> _events =
       StreamController<HostSessionEvent>.broadcast(sync: true);
@@ -465,6 +493,15 @@ class HostSession {
     });
   }
 
+  /// Releases this HostSession's relationship to [peerId].  The Runtime keeps
+  /// a shared connection alive when another logical owner still needs it.
+  Future<void> disconnect(PeerId peerId, {String? reason}) async {
+    if (_closed) throw const LpcException(LpcErrorCode.invalidState);
+    final peer = _peers.remove(peerId);
+    if (peer == null) return;
+    await _releasePeer(this, peer);
+  }
+
   Future<void> startAdvertising() async {
     if (_closed) throw const LpcException(LpcErrorCode.invalidState);
     if (_advertising) return;
@@ -487,6 +524,10 @@ class HostSession {
     _pendingVerifications.clear();
     try {
       await stopAdvertising();
+      for (final peer in _peers.values.toList()) {
+        await _releasePeer(this, peer);
+      }
+      _peers.clear();
     } finally {
       _onClosed(this);
       _events.add(const HostSessionClosed());
@@ -666,17 +707,32 @@ class NearbyRuntime {
   final Map<PeerConnection, _GattLink> _gattLinks = {};
   final Map<PeerConnection, List<int>> _connectionRanks = {};
   final Set<PeerConnection> _peers = <PeerConnection>{};
+  final Set<PeerId> _directRetainedPeers = <PeerId>{};
+  final Set<PeerId> _knownRetainedPeers = <PeerId>{};
+  final Set<String> _automaticProbeEndpoints = <String>{};
+  final Set<String> _pendingKnownPeerProbes = <String>{};
+  final Map<PeerId, bool> _knownPeerCache = <PeerId, bool>{};
+  final StreamController<RuntimeEvent> _events =
+      StreamController<RuntimeEvent>.broadcast(sync: true);
+  late String? _discoveryDisplayName = config.discoveryDisplayName;
+  late List<int> _applicationMetadata =
+      List<int>.unmodifiable(config.applicationMetadata);
   RuntimeState _state;
   final List<GroupSession> _groups = [];
   final Map<GroupSession, _RuntimeGroupRouteTransport> _groupRouting = {};
+  final Map<GroupSession, Set<PeerConnection>> _groupPeers = {};
   _AutoGroupHandshakeProfile? _autoGroupProfile;
   final List<HostSession> _hosts = [];
   final Map<String, DiscoverySession> _discoveries = {};
   final Set<String> _startingDiscovery = {};
-  HostSession? _advertisingHost;
-  bool _startingHostAdvertising = false;
+  final Set<HostSession> _advertisingHosts = <HostSession>{};
+  final Set<GroupSession> _advertisingGroups = <GroupSession>{};
+  final Set<GroupSession> _scanningGroups = <GroupSession>{};
+  bool _advertisingActive = false;
+  bool _discoveryActive = false;
   LocalRuntimeCapabilityBitmap? _capabilities;
   RuntimeState get state => _state;
+  Stream<RuntimeEvent> get events => _events.stream;
   static Future<NearbyRuntime> create(
       {RuntimeConfig config = const RuntimeConfig(),
       PeerId? localPeerId,
@@ -701,7 +757,11 @@ class NearbyRuntime {
     return NearbyRuntime._(config, peer, platformBleBackend, identity);
   }
 
-  ConnectionAttempt connect(String discoveryEndpointId) {
+  ConnectionAttempt connect(String discoveryEndpointId) =>
+      _connect(discoveryEndpointId, automaticProbe: false);
+
+  ConnectionAttempt _connect(String discoveryEndpointId,
+      {required bool automaticProbe}) {
     if (_state != RuntimeState.ready)
       throw const LpcException(LpcErrorCode.invalidState);
     if (!config.enableGatt) {
@@ -724,15 +784,34 @@ class NearbyRuntime {
           LpcErrorCode.invalidState, 'connection attempt already active');
     }
     _attempts[discoveryEndpointId] = attempt;
+    if (automaticProbe) _automaticProbeEndpoints.add(discoveryEndpointId);
+    if (automaticProbe) {
+      attempt.events.listen((event) {
+        if (event is ConnectionAttemptConnected ||
+            event is ConnectionAttemptFailed ||
+            event is ConnectionAttemptCancelled) {
+          if (_automaticProbeEndpoints.remove(discoveryEndpointId)) {
+            _startNextKnownPeerProbe();
+          }
+        }
+      });
+    }
     unawaited(
         backend.connectGatt(discoveryEndpointId).catchError((Object error) {
       attempt._failed(_asLpcError(error));
       _attempts.remove(discoveryEndpointId);
+      if (_automaticProbeEndpoints.remove(discoveryEndpointId)) {
+        _startNextKnownPeerProbe();
+      }
     }));
     return attempt;
   }
 
   void _onPlatformEvent(PlatformBleEvent event) {
+    if (event is PlatformEndpointFound) {
+      _scheduleKnownPeerProbe(event.endpointId);
+      return;
+    }
     if (event is! PlatformGattConnected) return;
     final reconnect = _gattReconnects[event.endpointId];
     if (reconnect != null && reconnect.attempting) {
@@ -742,17 +821,18 @@ class NearbyRuntime {
     var attempt = _attempts.remove(event.endpointId);
     HostSession? host;
     if (attempt == null) {
-      host = _advertisingHost;
+      for (final candidate in _advertisingHosts) {
+        if (candidate.config.autoAccept) {
+          host = candidate;
+          break;
+        }
+      }
       final groupProfile = _autoGroupProfile;
       if (host == null && groupProfile == null) return;
       if (host != null && !host.config.autoAccept) return;
       final backend = _platformBleBackend!;
       attempt = ConnectionAttempt._(event.endpointId,
           () => backend.closeGattConnection(event.endpointId));
-      attempt.events.listen((outcome) {
-        if (outcome is ConnectionAttemptConnected)
-          host?._peerConnected(outcome.connection);
-      });
       if (host == null) {
         unawaited(
             _startGattHandshake(event, attempt, groupProfile: groupProfile));
@@ -811,6 +891,8 @@ class NearbyRuntime {
                     PeerCapability.resume
                   ]).value,
                   keepaliveIntervalMs: config.keepaliveIntervalMs,
+                  applicationMetadata:
+                      host?.config.applicationMetadata ?? _applicationMetadata,
                   trustMode: trustMode),
               localIdentityKeyPair: identity.keyPair,
               localEphemeralKeyPair: ephemeral,
@@ -835,23 +917,153 @@ class NearbyRuntime {
           return;
         }
         final core = outcome as PeerConnectionCore;
-        attempt._connected(await _ownPeer(core,
+        final peer = await _ownPeer(core,
             securityLevel:
                 handshake.exchange.result!.createReady().securityLevel,
             gattEndpointId: event.endpointId,
-            connectionRank: await _rankFor(handshake)));
+            connectionRank: await _rankFor(handshake));
+        host?._peerConnected(peer);
+        attempt._connected(peer);
         return;
       }
       final core = await handshake.ready;
-      attempt._connected(await _ownPeer(core,
+      final peer = await _ownPeer(core,
           securityLevel: handshake.exchange.result!.createReady().securityLevel,
           gattEndpointId: event.endpointId,
-          connectionRank: await _rankFor(handshake)));
+          connectionRank: await _rankFor(handshake));
+      if (_automaticProbeEndpoints.contains(event.endpointId)) {
+        await _classifyKnownPeer(peer, event.endpointId);
+      } else {
+        _directRetainedPeers.add(peer.peerId);
+      }
+      attempt._connected(peer);
     } on Object catch (error) {
       attempt._failed(_asLpcError(error));
       await _gattBindings.remove(event.endpointId)?.close();
       await backend.closeGattConnection(event.endpointId);
+      if (_automaticProbeEndpoints.remove(event.endpointId)) {
+        _startNextKnownPeerProbe();
+      }
     }
+  }
+
+  void _scheduleKnownPeerProbe(String endpointId) {
+    if (!config.autoConnectKnownPeers ||
+        _automaticProbeEndpoints.contains(endpointId) ||
+        _attempts.containsKey(endpointId) ||
+        _pendingKnownPeerProbes.contains(endpointId)) return;
+    if (_automaticProbeEndpoints.length >=
+        config.maxConcurrentKnownPeerProbes) {
+      if (_pendingKnownPeerProbes.length < config.maxPendingKnownPeerProbes) {
+        _pendingKnownPeerProbes.add(endpointId);
+      }
+      return;
+    }
+    _startKnownPeerProbe(endpointId);
+  }
+
+  void _startKnownPeerProbe(String endpointId) {
+    _automaticProbeEndpoints.add(endpointId);
+    _events.add(KnownPeerProbeStarted(_monotonicMs, endpointId));
+    try {
+      _connect(endpointId, automaticProbe: true);
+    } on Object {
+      _automaticProbeEndpoints.remove(endpointId);
+      _startNextKnownPeerProbe();
+    }
+  }
+
+  void _startNextKnownPeerProbe() {
+    while (
+        _automaticProbeEndpoints.length < config.maxConcurrentKnownPeerProbes &&
+            _pendingKnownPeerProbes.isNotEmpty) {
+      final endpointId = _pendingKnownPeerProbes.first;
+      _pendingKnownPeerProbes.remove(endpointId);
+      _startKnownPeerProbe(endpointId);
+    }
+  }
+
+  Future<void> _classifyKnownPeer(
+      PeerConnection peer, String endpointId) async {
+    bool known = _knownPeerCache[peer.peerId] ?? false;
+    if (!_knownPeerCache.containsKey(peer.peerId)) {
+      try {
+        known = await config.knownPeerResolver!
+            .isKnownPeer(peer.peerId)
+            .timeout(Duration(milliseconds: config.knownPeerLookupTimeoutMs));
+      } on Object {
+        known = false;
+      }
+      if (config.maxKnownPeerCacheEntries > 0) {
+        if (_knownPeerCache.length >= config.maxKnownPeerCacheEntries) {
+          _knownPeerCache.remove(_knownPeerCache.keys.first);
+        }
+        _knownPeerCache[peer.peerId] = known;
+      }
+    }
+    if (known) {
+      _knownRetainedPeers.add(peer.peerId);
+      _events.add(KnownPeerConnected(_monotonicMs, peer,
+          discoveryEndpointId: endpointId));
+    } else {
+      _events.add(UnknownPeerIdentified(_monotonicMs, peer.peerId,
+          discoveryEndpointId: endpointId));
+      // No Runtime-managed owner remains for a negative probe result.
+      await peer.disconnect();
+    }
+    _automaticProbeEndpoints.remove(endpointId);
+    _startNextKnownPeerProbe();
+  }
+
+  int get _monotonicMs => DateTime.now().microsecondsSinceEpoch ~/ 1000;
+
+  /// Releases Runtime direct and automatic-known-peer retention only. Shared
+  /// session owners are deliberately not affected.
+  Future<void> releasePeerRetention(PeerId peerId) async {
+    if (_state != RuntimeState.ready) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    _directRetainedPeers.remove(peerId);
+    _knownRetainedPeers.remove(peerId);
+    _knownPeerCache.remove(peerId);
+    final peer = _peers.where((value) => value.peerId == peerId).firstOrNull;
+    if (peer != null && !_hasOtherOwner(peer)) await peer.disconnect();
+  }
+
+  bool _hasOtherOwner(PeerConnection peer) =>
+      _directRetainedPeers.contains(peer.peerId) ||
+      _knownRetainedPeers.contains(peer.peerId) ||
+      _hosts.any((host) => host.peers().contains(peer)) ||
+      _groups.any((group) => _groupPeers[group]?.contains(peer) ?? false);
+
+  Future<void> _releaseHostPeer(HostSession owner, PeerConnection peer) async {
+    if (!_hasOtherOwnerExcept(peer, owner)) await peer.disconnect();
+  }
+
+  bool _hasOtherOwnerExcept(PeerConnection peer, HostSession excluded) =>
+      _directRetainedPeers.contains(peer.peerId) ||
+      _knownRetainedPeers.contains(peer.peerId) ||
+      _hosts.any((host) => host != excluded && host.peers().contains(peer)) ||
+      _groups.any((group) => _groupPeers[group]?.contains(peer) ?? false);
+
+  Future<void> updateLocalPresentation(LocalPresentation presentation) async {
+    if (_state != RuntimeState.ready) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    // LocalPresentation validates both values before this method is entered.
+    // Refresh the backend first: a failed refresh must not expose only one
+    // half of the requested presentation as the Runtime's future default.
+    if (_advertisingActive) {
+      final backend = _platformBleBackend;
+      if (backend != null) {
+        await backend.stopAdvertising();
+        await backend.startAdvertising(config.serviceUuid,
+            localName: presentation.discoveryDisplayName);
+      }
+    }
+    _discoveryDisplayName = presentation.discoveryDisplayName;
+    _applicationMetadata =
+        List<int>.unmodifiable(presentation.applicationMetadata);
   }
 
   /// Completes the responder side of a fresh inbound candidate connection.
@@ -1095,10 +1307,11 @@ class NearbyRuntime {
       StreamSubscription<PlatformBleEvent>? subscription;
       late final DiscoverySession session;
       session = DiscoverySession(
-        stopPlatformScan: backend.stopDiscovery,
+        stopPlatformScan: () => _removeExplicitDiscoveryDemand(),
         onStopped: () async {
           await subscription?.cancel();
           _discoveries.remove(key);
+          await _removeExplicitDiscoveryDemand();
         },
       );
       subscription = backend.events.listen((event) {
@@ -1114,7 +1327,10 @@ class NearbyRuntime {
       // Attach the event listener before starting the native scan. Some BLE
       // stacks report a cached advertisement synchronously from startScan;
       // subscribing first prevents losing that first endpoint.
-      await backend.startDiscovery(config.serviceUuid);
+      if (!_discoveryActive) {
+        await backend.startDiscovery(config.serviceUuid);
+        _discoveryActive = true;
+      }
       _discoveries[key] = session;
       return session;
     } catch (_) {
@@ -1135,9 +1351,18 @@ class NearbyRuntime {
       throw const LpcException(LpcErrorCode.invalidState,
           'active GroupSessions require one AUTO_GROUP handshake profile');
     }
+    for (final host in _advertisingHosts) {
+      if (host.config.autoAccept && !_hostMatchesGroupProfile(host, profile)) {
+        throw const LpcException(LpcErrorCode.invalidState,
+            'HostSession and AUTO_GROUP inbound profiles are incompatible');
+      }
+    }
     final random = Random.secure();
-    final group = GroupSession.internal(config, localPeerId,
-        GroupId(List<int>.generate(16, (_) => random.nextInt(256))));
+    late final GroupSession group;
+    group = GroupSession.internal(config, localPeerId,
+        GroupId(List<int>.generate(16, (_) => random.nextInt(256))),
+        onClosed: _groupClosed,
+        onMembershipCommitted: _groupMembershipCommitted);
     final routing = _RuntimeGroupRouteTransport(
         group: group,
         peers: () => Set.unmodifiable(_peers),
@@ -1145,8 +1370,13 @@ class NearbyRuntime {
         maxReservedMessagesPerDestination:
             this.config.maxQueuedMessagesPerPeer);
     _groupRouting[group] = routing;
+    _groupPeers[group] = <PeerConnection>{};
     _groups.add(group);
     _autoGroupProfile = profile;
+    // AUTO_GROUP presence is Runtime-owned shared resource demand.  The
+    // portable, backend-free core deliberately remains usable for protocol
+    // tests; a platform binding starts the shared resources below.
+    unawaited(_addGroupPresence(group));
     // Keep an unconnected group usable by deterministic unit-test transports,
     // but bind the production route owner as soon as Runtime has a live peer.
     // A group with no authenticated peers cannot submit a live route anyway.
@@ -1157,6 +1387,106 @@ class NearbyRuntime {
       }
     }
     return group;
+  }
+
+  void _groupMembershipCommitted(GroupSession group, Set<PeerId> memberIds) {
+    final previous = _groupPeers[group] ?? <PeerConnection>{};
+    final next =
+        _peers.where((peer) => memberIds.contains(peer.peerId)).toSet();
+    _groupPeers[group] = next;
+    for (final peer in previous.difference(next)) {
+      if (!_hasOtherOwner(peer)) unawaited(peer.disconnect());
+    }
+  }
+
+  bool _hostMatchesGroupProfile(
+      HostSession host, _AutoGroupHandshakeProfile groupProfile) {
+    return _hostMatchesGroupProfileForConfig(host.config, groupProfile);
+  }
+
+  bool _hostMatchesGroupProfileForConfig(
+      HostConfig host, _AutoGroupHandshakeProfile groupProfile) {
+    final trustMode = host.trustMode ?? config.trustMode;
+    if (trustMode != groupProfile.trustMode) return false;
+    if (trustMode == HandshakeTrustMode.psk32) {
+      return _sameBytes(config.psk32, groupProfile.psk32);
+    }
+    if (trustMode == HandshakeTrustMode.knownPeer) {
+      final hostPeers = config.expectedPeerId == null
+          ? config.allowedPeerIds.toSet()
+          : {config.expectedPeerId!};
+      return hostPeers.length == groupProfile.allowedPeerIds.length &&
+          hostPeers.containsAll(groupProfile.allowedPeerIds);
+    }
+    return true;
+  }
+
+  Future<void> _addGroupPresence(GroupSession group) async {
+    final backend = _platformBleBackend;
+    if (backend == null || _state != RuntimeState.ready) return;
+    _advertisingGroups.add(group);
+    _scanningGroups.add(group);
+    var listenerStarted = false;
+    try {
+      if (!_advertisingActive) {
+        await backend.listenGatt(config.serviceUuid);
+        listenerStarted = true;
+        await backend.startAdvertising(config.serviceUuid,
+            localName: _discoveryDisplayName);
+        _advertisingActive = true;
+      }
+      if (!_discoveryActive) {
+        await backend.startDiscovery(config.serviceUuid);
+        _discoveryActive = true;
+      }
+    } on Object {
+      _advertisingGroups.remove(group);
+      _scanningGroups.remove(group);
+      if (listenerStarted &&
+          _advertisingHosts.isEmpty &&
+          _advertisingGroups.isEmpty) {
+        await backend.stopGatt();
+      }
+      // GroupSession remains a valid local protocol object. Platform failures
+      // are not silently converted into an alternate transport or topology.
+    }
+  }
+
+  Future<void> _removeExplicitDiscoveryDemand() async {
+    if (_discoveries.isEmpty && _discoveryActive && _scanningGroups.isEmpty) {
+      final backend = _platformBleBackend;
+      _discoveryActive = false;
+      if (backend != null) await backend.stopDiscovery();
+    }
+  }
+
+  void _groupClosed(GroupSession group) {
+    _groups.remove(group);
+    _groupRouting.remove(group)?.dispose();
+    final peers = _groupPeers.remove(group) ?? const <PeerConnection>{};
+    _advertisingGroups.remove(group);
+    _scanningGroups.remove(group);
+    if (_groups.isEmpty) _autoGroupProfile = null;
+    unawaited(() async {
+      if (_advertisingGroups.isEmpty &&
+          _advertisingHosts.isEmpty &&
+          _advertisingActive) {
+        final backend = _platformBleBackend;
+        _advertisingActive = false;
+        if (backend != null) {
+          await backend.stopAdvertising();
+          await backend.stopGatt();
+        }
+      }
+      if (_scanningGroups.isEmpty && _discoveries.isEmpty && _discoveryActive) {
+        final backend = _platformBleBackend;
+        _discoveryActive = false;
+        if (backend != null) await backend.stopDiscovery();
+      }
+      for (final peer in peers) {
+        if (!_hasOtherOwner(peer)) await peer.disconnect();
+      }
+    }());
   }
 
   /// Creates the advanced Section 33.2 explicit-role host. At most one host
@@ -1176,37 +1506,51 @@ class NearbyRuntime {
     }
     _validateTrustCredentialsFor(
         this.config, config.trustMode ?? this.config.trustMode);
+    final groupProfile = _autoGroupProfile;
+    if (config.autoAccept &&
+        groupProfile != null &&
+        !_hostMatchesGroupProfileForConfig(config, groupProfile)) {
+      throw const LpcException(LpcErrorCode.invalidState,
+          'HostSession and AUTO_GROUP inbound profiles are incompatible');
+    }
     final runtimeConfig = this.config;
     late final HostSession host;
     host = HostSession.internal(
       config: config,
       startAdvertising: () async {
-        if ((_advertisingHost != null && _advertisingHost != host) ||
-            _startingHostAdvertising) {
-          throw const LpcException(LpcErrorCode.invalidState,
-              'another host session is already advertising');
-        }
-        _startingHostAdvertising = true;
-        try {
-          await backend.listenGatt(runtimeConfig.serviceUuid);
-          await backend.startAdvertising(runtimeConfig.serviceUuid);
-          _advertisingHost = host;
-        } finally {
-          _startingHostAdvertising = false;
+        if (_advertisingHosts.add(host) && !_advertisingActive) {
+          var listenerStarted = false;
+          try {
+            await backend.listenGatt(runtimeConfig.serviceUuid);
+            listenerStarted = true;
+            await backend.startAdvertising(runtimeConfig.serviceUuid,
+                localName: _discoveryDisplayName);
+            _advertisingActive = true;
+          } on Object {
+            _advertisingHosts.remove(host);
+            if (listenerStarted &&
+                _advertisingHosts.isEmpty &&
+                _advertisingGroups.isEmpty) {
+              await backend.stopGatt();
+            }
+            rethrow;
+          }
         }
       },
       stopAdvertising: () async {
-        if (_advertisingHost != host) return;
-        _advertisingHost = null;
-        try {
+        _advertisingHosts.remove(host);
+        if (_advertisingHosts.isEmpty &&
+            _advertisingGroups.isEmpty &&
+            _advertisingActive) {
+          _advertisingActive = false;
           await backend.stopAdvertising();
-        } finally {
           await backend.stopGatt();
         }
       },
+      releasePeer: _releaseHostPeer,
       onClosed: (closed) {
         _hosts.remove(closed);
-        if (_advertisingHost == closed) _advertisingHost = null;
+        _advertisingHosts.remove(closed);
       },
     );
     _hosts.add(host);
@@ -1229,10 +1573,10 @@ class NearbyRuntime {
     }
     _peers.clear();
     for (final group in List<GroupSession>.from(_groups)) {
-      _groupRouting.remove(group)?.dispose();
       group.close();
     }
     _groups.clear();
+    _groupPeers.clear();
     _autoGroupProfile = null;
     for (final host in List<HostSession>.from(_hosts)) {
       await host.close();
@@ -1242,12 +1586,15 @@ class NearbyRuntime {
       await discovery.stop();
     }
     _discoveries.clear();
+    _advertisingGroups.clear();
+    _scanningGroups.clear();
     for (final binding in _gattBindings.values) {
       await binding.close();
     }
     _gattBindings.clear();
     await _platformSubscription?.cancel();
     _state = RuntimeState.closed;
+    await _events.close();
   }
 
   Future<List<int>> _rankFor(HandshakeConnection handshake) async {
@@ -1274,15 +1621,20 @@ class NearbyRuntime {
         .toList(growable: false);
     if (duplicate.isNotEmpty && connectionRank != null) {
       final existing = duplicate.first;
-      final existingRank = _connectionRanks[existing];
-      if (existingRank != null &&
-          retainedConnectionRankIndex(existingRank, connectionRank) == 0) {
+      // A matching PeerId alone is not a compatible logical owner. This
+      // portable binding does not multiplex distinct security sessions, so it
+      // rejects that request rather than relabeling or downgrading either one.
+      if (existing.securityLevel != securityLevel) {
         await core.close();
-        throw const LpcException(LpcErrorCode.duplicateConnection);
+        throw const LpcException(LpcErrorCode.invalidState,
+            'existing peer has an incompatible security profile');
       }
-      // Explicit disconnect prevents the losing physical link from starting
-      // a second automatic reconnect while the retained link is healthy.
-      await existing.disconnect();
+      // The existing authenticated logical session is the reusable object.
+      // Do not let a second physical candidate evict its HostSession, group,
+      // direct, or known-peer owners.  Closing the candidate collapses the
+      // redundant link while preserving those logical owners.
+      await core.close();
+      return existing;
     }
     late final PeerConnection peer;
     peer = PeerConnection._(core, securityLevel: securityLevel,
@@ -1303,6 +1655,11 @@ class NearbyRuntime {
         entry.key.attachRouteTransport(entry.value);
       }
       entry.value.observePeer(peer);
+      // Routing can observe a peer before it becomes a committed group
+      // member, but only committed membership creates group ownership.
+      if (entry.key.members.any((member) => member.peerId == peer.peerId)) {
+        _groupPeers[entry.key]?.add(peer);
+      }
     }
     if (connectionRank != null) {
       _connectionRanks[peer] = List<int>.unmodifiable(connectionRank);

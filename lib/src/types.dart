@@ -155,6 +155,8 @@ enum BroadcastState { active, completed, cancelled }
 class RuntimeConfig {
   const RuntimeConfig(
       {List<int> serviceUuid = _defaultServiceUuid,
+      this.discoveryDisplayName,
+      this.applicationMetadata = const [],
       this.trustMode = HandshakeTrustMode.sas,
       this.expectedPeerId,
       this.allowedPeerIds = const [],
@@ -163,6 +165,12 @@ class RuntimeConfig {
       this.enableL2cap = true,
       this.enableLan = true,
       this.autoReconnect = true,
+      this.autoConnectKnownPeers = false,
+      this.knownPeerResolver,
+      this.maxConcurrentKnownPeerProbes = 4,
+      this.maxPendingKnownPeerProbes = 64,
+      this.knownPeerLookupTimeoutMs = 2000,
+      this.maxKnownPeerCacheEntries = 256,
       this.keepaliveIntervalMs = 2000,
       this.reconnectTimeoutMs = 15000,
       this.maxQueuedBytesPerPeer = 262144,
@@ -171,11 +179,19 @@ class RuntimeConfig {
       : serviceUuid = serviceUuid,
         psk32 = psk32;
   final List<int> serviceUuid;
+  final String? discoveryDisplayName;
+  final List<int> applicationMetadata;
   final HandshakeTrustMode trustMode;
   final PeerId? expectedPeerId;
   final List<PeerId> allowedPeerIds;
   final List<int>? psk32;
   final bool enableGatt, enableL2cap, enableLan, autoReconnect;
+  final bool autoConnectKnownPeers;
+  final KnownPeerResolver? knownPeerResolver;
+  final int maxConcurrentKnownPeerProbes,
+      maxPendingKnownPeerProbes,
+      knownPeerLookupTimeoutMs,
+      maxKnownPeerCacheEntries;
   final int keepaliveIntervalMs,
       reconnectTimeoutMs,
       maxQueuedBytesPerPeer,
@@ -189,6 +205,19 @@ class RuntimeConfig {
         reconnectTimeoutMs > 60000) {
       throw const LpcException(
           LpcErrorCode.invalidState, 'invalid runtime timing configuration');
+    }
+    _validatePresentation(discoveryDisplayName, applicationMetadata);
+    if (autoConnectKnownPeers && knownPeerResolver == null ||
+        maxConcurrentKnownPeerProbes < 1 ||
+        maxConcurrentKnownPeerProbes > 16 ||
+        maxPendingKnownPeerProbes < 0 ||
+        maxPendingKnownPeerProbes > 1024 ||
+        knownPeerLookupTimeoutMs < 100 ||
+        knownPeerLookupTimeoutMs > 10000 ||
+        maxKnownPeerCacheEntries < 0 ||
+        maxKnownPeerCacheEntries > 65536) {
+      throw const LpcException(
+          LpcErrorCode.invalidState, 'invalid known-peer configuration');
     }
     if (trustMode == HandshakeTrustMode.psk32 && psk32?.length != 32) {
       throw const LpcException(
@@ -211,16 +240,47 @@ class RuntimeConfig {
   }
 }
 
+/// Application-owned exact relationship lookup used by automatic nearby-peer
+/// retention. It is deliberately unrelated to the wire KNOWN_PEER policy.
+abstract interface class KnownPeerResolver {
+  Future<bool> isKnownPeer(PeerId peerId);
+}
+
+class LocalPresentation {
+  LocalPresentation(
+      {this.discoveryDisplayName, List<int> applicationMetadata = const []})
+      : applicationMetadata = Uint8List.fromList(applicationMetadata) {
+    _validatePresentation(discoveryDisplayName, this.applicationMetadata);
+  }
+  final String? discoveryDisplayName;
+  final Uint8List applicationMetadata;
+}
+
+void _validatePresentation(String? name, List<int> metadata) {
+  if (metadata.length > 31 ||
+      (name != null &&
+          (name.trim().isEmpty ||
+              name.runes.any((rune) => rune < 0x20 || rune == 0x7f)))) {
+    throw const LpcException(
+        LpcErrorCode.invalidState, 'invalid local presentation');
+  }
+}
+
 /// Section 33.2 configuration for the advanced explicit-role host API.
 class HostConfig {
   HostConfig({
     this.maxPeers = 7,
     this.topology = HostTopology.star,
-    List<int> applicationMetadata = const [],
+    List<int>? applicationMetadata,
     this.autoAccept = false,
     this.trustMode,
-  }) : applicationMetadata = Uint8List.fromList(applicationMetadata) {
-    if (maxPeers < 1 || maxPeers > 31 || this.applicationMetadata.length > 31) {
+  }) : applicationMetadata = applicationMetadata == null
+            ? null
+            : Uint8List.fromList(applicationMetadata) {
+    if (maxPeers < 1 ||
+        maxPeers > 31 ||
+        this.applicationMetadata != null &&
+            this.applicationMetadata!.length > 31) {
       throw const LpcException(
           LpcErrorCode.invalidState, 'invalid host configuration');
     }
@@ -228,7 +288,9 @@ class HostConfig {
 
   final int maxPeers;
   final HostTopology topology;
-  final Uint8List applicationMetadata;
+
+  /// Null means inherit the Runtime's current presentation metadata.
+  final Uint8List? applicationMetadata;
   final bool autoAccept;
 
   /// Optional Section 33.2 override for the runtime's low-level pairwise
