@@ -96,8 +96,12 @@ class HostSessionClosed extends HostSessionEvent {
 }
 
 class HostPeerConnected extends HostSessionEvent {
-  const HostPeerConnected(this.connection);
+  const HostPeerConnected(this.connection, {this.discoveryEndpointId});
   final PeerConnection connection;
+
+  /// Ephemeral platform endpoint that produced this inbound connection.
+  /// It is presentation-only and must not be persisted as peer identity.
+  final String? discoveryEndpointId;
 }
 
 /// SAS comparison required for an inbound explicit-host connection.
@@ -448,7 +452,8 @@ class HostSession {
   List<PeerConnection> peers() => List.unmodifiable(_peers.values.toList()
     ..sort((a, b) => _comparePeerIdBytes(a.peerId, b.peerId)));
 
-  void _peerConnected(PeerConnection connection) {
+  void _peerConnected(PeerConnection connection,
+      {String? discoveryEndpointId}) {
     if (_closed) {
       unawaited(connection.disconnect());
       return;
@@ -460,7 +465,8 @@ class HostSession {
         _peers.remove(connection.peerId);
       }
     });
-    _events.add(HostPeerConnected(connection));
+    _events.add(HostPeerConnected(connection,
+        discoveryEndpointId: discoveryEndpointId));
   }
 
   void _peerVerificationRequired(
@@ -656,6 +662,18 @@ class _GattReconnect {
   }
 }
 
+/// RESUME starts with a new HELLO/AUTH candidate handshake.  It must preserve
+/// the original connection's trust mode; selecting KNOWN_PEER merely because
+/// a stable PeerId is now available causes a responder still using TOFU to
+/// reject HELLO before RESUME can begin.
+HandshakeTrustMode _resumeTrustMode(SecurityLevel securityLevel) =>
+    switch (securityLevel) {
+      SecurityLevel.encryptedTofu => HandshakeTrustMode.tofu,
+      SecurityLevel.authenticatedKnownPeer => HandshakeTrustMode.knownPeer,
+      SecurityLevel.authenticatedSas => HandshakeTrustMode.sas,
+      SecurityLevel.authenticatedPsk => HandshakeTrustMode.psk32,
+    };
+
 /// Physical-link facts can change after RESUME.  Only a local GATT central
 /// owns a platform endpoint that may be passed back to `connectGatt`.
 class _GattLink {
@@ -782,8 +800,21 @@ class NearbyRuntime {
     return NearbyRuntime._(config, peer, platformBleBackend, identity);
   }
 
-  ConnectionAttempt connect(String discoveryEndpointId) =>
-      _connect(discoveryEndpointId, automaticProbe: false);
+  /// Starts a user-requested direct connection. If LPC is already performing
+  /// its bounded automatic known-peer probe for the same ephemeral endpoint,
+  /// the user request adopts that physical attempt instead of racing it. The
+  /// completed connection is then retained as direct, not released as an
+  /// unknown-probe result.
+  ConnectionAttempt connect(String discoveryEndpointId) {
+    final existing = _attempts[discoveryEndpointId];
+    if (existing != null) {
+      if (_automaticProbeEndpoints.remove(discoveryEndpointId)) {
+        _startNextKnownPeerProbe();
+      }
+      return existing;
+    }
+    return _connect(discoveryEndpointId, automaticProbe: false);
+  }
 
   ConnectionAttempt _connect(String discoveryEndpointId,
       {required bool automaticProbe}) {
@@ -949,7 +980,7 @@ class NearbyRuntime {
             connectionRank: await _rankFor(handshake),
             remoteApplicationMetadata:
                 handshake.exchange.result!.remoteHello.applicationMetadata);
-        host?._peerConnected(peer);
+        host?._peerConnected(peer, discoveryEndpointId: event.endpointId);
         attempt._connected(peer);
         return;
       }
@@ -1260,6 +1291,7 @@ class NearbyRuntime {
           connection: connection);
       final ephemeral = await X25519().newKeyPair();
       final ephemeralPublic = await ephemeral.extractPublicKey();
+      final trustMode = _resumeTrustMode(peer.securityLevel);
       final handshake = HandshakeConnection(
           backend: connection,
           localPeerId: localPeerId,
@@ -1277,10 +1309,16 @@ class NearbyRuntime {
                     PeerCapability.resume
                   ]).value,
                   keepaliveIntervalMs: config.keepaliveIntervalMs,
-                  trustMode: HandshakeTrustMode.knownPeer),
+                  trustMode: trustMode),
               localIdentityKeyPair: identity.keyPair,
               localEphemeralKeyPair: ephemeral,
-              knownPeerPolicy: ExpectExactPeer(peer.peerId)));
+              knownPeerPolicy: trustMode == HandshakeTrustMode.knownPeer
+                  ? ExpectExactPeer(peer.peerId)
+                  : null,
+              tofuStore:
+                  trustMode == HandshakeTrustMode.tofu ? _tofuStore : null,
+              psk32:
+                  trustMode == HandshakeTrustMode.psk32 ? config.psk32 : null));
       await handshake.start();
       final candidate = await handshake.authenticated;
       final resume = CandidateResumeConnection(
