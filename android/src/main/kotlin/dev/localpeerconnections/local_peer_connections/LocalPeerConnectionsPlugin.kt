@@ -113,10 +113,13 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
 
   private fun startAdvertising(serviceUuid: ParcelUuid, localName: String?) {
     Log.d(logTag, "startAdvertising uuid=$serviceUuid")
+    // Android exposes only an adapter-global device name. LPC must never
+    // mutate that application/device-wide setting, so this requested
+    // pre-authentication presentation hint is intentionally omitted here.
+    // Section 33.1 permits platform omission without changing discovery,
+    // authentication, known-peer resolution, or connection behavior.
     if (localName != null) {
-      // Android's BLE APIs expose only the adapter-global device name, which a
-      // library must not mutate. Do not silently advertise a different name.
-      throw BackendError("UNSUPPORTED_CAPABILITY", "custom BLE local name is unavailable on Android")
+      Log.d(logTag, "Android cannot set per-advertisement local name; omitting hint")
     }
     val advertiser = adapterOrThrow().bluetoothLeAdvertiser ?: throw BackendError("ADVERTISING_UNAVAILABLE")
     stopAdvertising()

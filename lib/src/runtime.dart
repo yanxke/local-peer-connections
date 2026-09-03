@@ -51,10 +51,24 @@ class KnownPeerProbeStarted extends RuntimeEvent {
   final String discoveryEndpointId;
 }
 
+/// Terminal outcome of a bounded automatic nearby-known-peer probe.
+class KnownPeerProbeFailed extends RuntimeEvent {
+  const KnownPeerProbeFailed(
+      super.monotonicTimestampMs, this.discoveryEndpointId, this.error);
+  final String discoveryEndpointId;
+  final LpcException error;
+}
+
 class UnknownPeerIdentified extends RuntimeEvent {
-  const UnknownPeerIdentified(super.monotonicTimestampMs, this.peerId,
+  const UnknownPeerIdentified(super.monotonicTimestampMs, this.connection,
       {this.discoveryEndpointId});
-  final PeerId peerId;
+
+  /// The authenticated connection used for this bounded automatic probe.
+  /// It is emitted before the Runtime releases its negative known-peer probe
+  /// ownership, so applications can inspect authenticated HELLO metadata.
+  /// Receiving this event does not grant application relationship authority.
+  final PeerConnection connection;
+  PeerId get peerId => connection.peerId;
   final String? discoveryEndpointId;
 }
 
@@ -214,9 +228,12 @@ class PeerDisconnected extends PeerConnectionEvent {
 class PeerConnection {
   PeerConnection._(this._core,
       {required this.securityLevel,
+      List<int> remoteApplicationMetadata = const [],
       void Function(PeerConnection)? onDisconnected,
       void Function(PeerConnection)? onReconnecting})
-      : _onDisconnected = onDisconnected,
+      : remoteApplicationMetadata =
+            List.unmodifiable(remoteApplicationMetadata),
+        _onDisconnected = onDisconnected,
         _onReconnecting = onReconnecting {
     _frames = _core.receivedFrames.listen(_onFrame);
     _connectionTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
@@ -238,6 +255,9 @@ class PeerConnection {
   }
   final PeerConnectionCore _core;
   final SecurityLevel securityLevel;
+
+  /// Authenticated application metadata received in the peer's HELLO.
+  final List<int> remoteApplicationMetadata;
   final void Function(PeerConnection)? _onDisconnected;
   final void Function(PeerConnection)? _onReconnecting;
   late final StreamSubscription<LpcFrame> _frames;
@@ -711,6 +731,11 @@ class NearbyRuntime {
   final Set<PeerId> _knownRetainedPeers = <PeerId>{};
   final Set<String> _automaticProbeEndpoints = <String>{};
   final Set<String> _pendingKnownPeerProbes = <String>{};
+  // Discovery callbacks are intentionally noisy.  Once a currently observed
+  // endpoint has completed its bounded identity classification, a duplicate
+  // scan result must not create another temporary connection.  This cache is
+  // endpoint-scoped and in-memory only; it is never a PeerId mapping.
+  final Map<String, bool> _completedKnownPeerProbeEndpoints = <String, bool>{};
   final Map<PeerId, bool> _knownPeerCache = <PeerId, bool>{};
   final StreamController<RuntimeEvent> _events =
       StreamController<RuntimeEvent>.broadcast(sync: true);
@@ -921,7 +946,9 @@ class NearbyRuntime {
             securityLevel:
                 handshake.exchange.result!.createReady().securityLevel,
             gattEndpointId: event.endpointId,
-            connectionRank: await _rankFor(handshake));
+            connectionRank: await _rankFor(handshake),
+            remoteApplicationMetadata:
+                handshake.exchange.result!.remoteHello.applicationMetadata);
         host?._peerConnected(peer);
         attempt._connected(peer);
         return;
@@ -930,7 +957,9 @@ class NearbyRuntime {
       final peer = await _ownPeer(core,
           securityLevel: handshake.exchange.result!.createReady().securityLevel,
           gattEndpointId: event.endpointId,
-          connectionRank: await _rankFor(handshake));
+          connectionRank: await _rankFor(handshake),
+          remoteApplicationMetadata:
+              handshake.exchange.result!.remoteHello.applicationMetadata);
       if (_automaticProbeEndpoints.contains(event.endpointId)) {
         await _classifyKnownPeer(peer, event.endpointId);
       } else {
@@ -949,6 +978,7 @@ class NearbyRuntime {
 
   void _scheduleKnownPeerProbe(String endpointId) {
     if (!config.autoConnectKnownPeers ||
+        _completedKnownPeerProbeEndpoints.containsKey(endpointId) ||
         _automaticProbeEndpoints.contains(endpointId) ||
         _attempts.containsKey(endpointId) ||
         _pendingKnownPeerProbes.contains(endpointId)) return;
@@ -966,8 +996,16 @@ class NearbyRuntime {
     _automaticProbeEndpoints.add(endpointId);
     _events.add(KnownPeerProbeStarted(_monotonicMs, endpointId));
     try {
-      _connect(endpointId, automaticProbe: true);
-    } on Object {
+      final attempt = _connect(endpointId, automaticProbe: true);
+      attempt.events.listen((event) {
+        if (event is ConnectionAttemptFailed) {
+          _events
+              .add(KnownPeerProbeFailed(_monotonicMs, endpointId, event.error));
+        }
+      });
+    } on Object catch (error) {
+      _events.add(
+          KnownPeerProbeFailed(_monotonicMs, endpointId, _asLpcError(error)));
       _automaticProbeEndpoints.remove(endpointId);
       _startNextKnownPeerProbe();
     }
@@ -1006,10 +1044,18 @@ class NearbyRuntime {
       _events.add(KnownPeerConnected(_monotonicMs, peer,
           discoveryEndpointId: endpointId));
     } else {
-      _events.add(UnknownPeerIdentified(_monotonicMs, peer.peerId,
+      _events.add(UnknownPeerIdentified(_monotonicMs, peer,
           discoveryEndpointId: endpointId));
       // No Runtime-managed owner remains for a negative probe result.
       await peer.disconnect();
+    }
+    if (config.maxKnownPeerCacheEntries > 0) {
+      if (_completedKnownPeerProbeEndpoints.length >=
+          config.maxKnownPeerCacheEntries) {
+        _completedKnownPeerProbeEndpoints
+            .remove(_completedKnownPeerProbeEndpoints.keys.first);
+      }
+      _completedKnownPeerProbeEndpoints[endpointId] = true;
     }
     _automaticProbeEndpoints.remove(endpointId);
     _startNextKnownPeerProbe();
@@ -1613,7 +1659,8 @@ class NearbyRuntime {
   Future<PeerConnection> _ownPeer(PeerConnectionCore core,
       {required SecurityLevel securityLevel,
       String? gattEndpointId,
-      List<int>? connectionRank}) async {
+      List<int>? connectionRank,
+      List<int> remoteApplicationMetadata = const []}) async {
     final duplicate = _peers
         .where((peer) =>
             peer.peerId == core.remotePeerId &&
@@ -1637,7 +1684,9 @@ class NearbyRuntime {
       return existing;
     }
     late final PeerConnection peer;
-    peer = PeerConnection._(core, securityLevel: securityLevel,
+    peer = PeerConnection._(core,
+        securityLevel: securityLevel,
+        remoteApplicationMetadata: remoteApplicationMetadata,
         onDisconnected: (_) {
       _peers.remove(peer);
       _connectionRanks.remove(peer);
