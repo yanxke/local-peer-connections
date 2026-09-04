@@ -240,6 +240,20 @@ class GroupInfoPayload {
   }
 }
 
+/// Verifies the runtime-only binding between an authenticated GROUP_MERGE
+/// sender and its preceding authenticated GROUP_INFO. GROUP_MERGE itself has
+/// no coordinator field, so accepting it without this check would let any
+/// member of the winning group claim coordinator merge authority.
+bool isIncomingGroupMergeAuthorized({
+  required GroupMergePayload payload,
+  required GroupId localGroupId,
+  required GroupInfoPayload retainedRemoteInfo,
+  required PeerId authenticatedSender,
+}) =>
+    localGroupId == payload.losingGroupId &&
+    retainedRemoteInfo.info.groupId == payload.winningGroupId &&
+    retainedRemoteInfo.coordinatorPeerId == authenticatedSender;
+
 class GroupMergeEvaluation {
   const GroupMergeEvaluation(this.decision,
       {this.winner, this.effectiveMaxPeers = 0, this.unionCount = 0});

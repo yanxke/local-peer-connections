@@ -352,6 +352,7 @@ class PeerConnection {
         frame.type == FrameType.groupDeliveryAck ||
         frame.type == FrameType.groupRelayStatus ||
         frame.type == FrameType.groupInfo ||
+        frame.type == FrameType.groupMerge ||
         frame.type == FrameType.membershipSnapshot) {
       _groupFrames.add(frame);
       return;
@@ -1799,6 +1800,10 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
   final MembershipSnapshotOrderTable _membershipOrdering =
       MembershipSnapshotOrderTable();
   final Map<PeerConnection, GroupInfoPayload> _remoteGroupInfo = {};
+  late GroupMergeReceiver _mergeReceiver = GroupMergeReceiver(
+      committedGroupId: group.groupId,
+      committedTerm: group.coordinatorTerm,
+      committedMembers: group.members);
   final Map<String, _LiveGroupHop> _ackHops = {};
   final Map<GroupMessageId, SendHandleController> _sourceHandles = {};
   GroupMemberRouter? _memberRouter;
@@ -2015,11 +2020,22 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
           await _receiveRealtime(peer, frame);
         case FrameType.groupInfo:
           await _receiveGroupInfo(peer, frame);
+        case FrameType.groupMerge:
+          await _receiveGroupMerge(peer, frame);
         case FrameType.membershipSnapshot:
           await _receiveMembershipSnapshot(peer, frame);
         default:
           return;
       }
+    } on LpcException catch (error) {
+      // A control send may lose the READY race to normal reconnect handling.
+      // The new generation re-advertises GROUP_INFO; it is not a malformed
+      // authenticated group frame and must not trigger a second disconnect.
+      if (error.code == LpcErrorCode.transportClosed ||
+          error.code == LpcErrorCode.invalidState) {
+        return;
+      }
+      await peer.disconnect();
     } on Object {
       // Group routing violations are authenticated peer protocol violations;
       // do not leave the same connection accepting later group traffic.
@@ -2027,30 +2043,41 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
     }
   }
 
-  Future<void> _sendGroupInfo(PeerConnection peer) async {
-    if (_disposed || peer.state != PeerConnectionState.ready) return;
-    final config = group.config;
-    final namespaceHash = await _scopedHash(
-        'LPC1-application-namespace', config.applicationNamespace);
-    final tokenHash = config.discoveryMode == DiscoveryMode.openProximity
-        ? List<int>.filled(32, 0)
-        : await _scopedHash('LPC1-group-join-token', config.groupJoinToken!);
-    final payload = GroupInfoPayload(
-        info: GroupMergeInfo(
-            namespaceHash: namespaceHash,
-            discoveryMode: config.discoveryMode,
-            autoMerge: config.autoMerge,
-            trustMode: config.groupTrustMode,
-            knownPeersAutoMerge: config.knownPeersAutoMerge,
-            tokenHash: tokenHash,
-            groupId: group.groupId,
-            members: group.members),
-        coordinatorTerm: group.coordinatorTerm,
-        coordinatorPeerId: group.coordinatorPeerId);
-    final result = await peer._core
-        .submitEncrypted(FrameType.groupInfo, await payload.encode());
-    if (result != TransportWriteState.submittedToPlatform) {
-      throw const LpcException(LpcErrorCode.transportClosed);
+  Future<bool> _sendGroupInfo(PeerConnection peer) async {
+    if (_disposed || peer.state != PeerConnectionState.ready) return false;
+    try {
+      final config = group.config;
+      final namespaceHash = await _scopedHash(
+          'LPC1-application-namespace', config.applicationNamespace);
+      final tokenHash = config.discoveryMode == DiscoveryMode.openProximity
+          ? List<int>.filled(32, 0)
+          : await _scopedHash('LPC1-group-join-token', config.groupJoinToken!);
+      // Hashing is asynchronous; the peer may have begun reconnecting while
+      // this control record was being prepared. GROUP_INFO is unacknowledged
+      // current-state advertisement, so the next READY generation simply
+      // sends it again instead of treating that race as a protocol failure.
+      if (_disposed || peer.state != PeerConnectionState.ready) return false;
+      final payload = GroupInfoPayload(
+          info: GroupMergeInfo(
+              namespaceHash: namespaceHash,
+              discoveryMode: config.discoveryMode,
+              autoMerge: config.autoMerge,
+              trustMode: config.groupTrustMode,
+              knownPeersAutoMerge: config.knownPeersAutoMerge,
+              tokenHash: tokenHash,
+              groupId: group.groupId,
+              members: group.members),
+          coordinatorTerm: group.coordinatorTerm,
+          coordinatorPeerId: group.coordinatorPeerId);
+      final result = await peer._core
+          .submitEncrypted(FrameType.groupInfo, await payload.encode());
+      return result == TransportWriteState.submittedToPlatform;
+    } on LpcException catch (error) {
+      if (error.code != LpcErrorCode.transportClosed &&
+          error.code != LpcErrorCode.invalidState) {
+        rethrow;
+      }
+      return false;
     }
   }
 
@@ -2063,8 +2090,119 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
     }
     final info = await GroupInfoPayload.decode(frame.payload);
     _remoteGroupInfo[peer] = info;
-    // GROUP_INFO is not membership admission. Its complete authenticated
-    // records are retained for the subsequent explicit join/merge decision.
+    final local = await _localGroupInfo();
+    final evaluation = evaluateGroupMerge(local, info.info);
+    if (evaluation.decision != GroupMergeDecision.merge ||
+        evaluation.winner?.groupId != local.groupId ||
+        !group.isCoordinator) {
+      return;
+    }
+    final members = _mergeMembers(local.members, info.info.members);
+    // A delayed GROUP_INFO from the losing pre-merge view must not manufacture
+    // a fresh term after this coordinator has already committed that union.
+    if (_sameMembers(local.members, members)) return;
+
+    // Only the current coordinator of the deterministic winner originates a
+    // merge. This makes the coordinator implicit in the authenticated sender
+    // identity of GROUP_MERGE and prevents the two one-member sessions from
+    // independently choosing incompatible authorities.
+    // A joining peer may have created its GroupSession after this link's
+    // initial GROUP_INFO was sent. Refresh the winning view first, on this
+    // same ordered pairwise link, so it can bind the immediately following
+    // coordinator-less GROUP_MERGE to authenticated GROUP_INFO.
+    if (!await _sendGroupInfo(peer)) return;
+    if (_disposed || peer.state != PeerConnectionState.ready) return;
+    final payload = GroupMergePayload(
+        winningGroupId: local.groupId,
+        losingGroupId: info.info.groupId,
+        newCoordinatorTerm:
+            max(group.coordinatorTerm, info.coordinatorTerm) + 1,
+        effectiveMaxPeers: evaluation.effectiveMaxPeers,
+        members: members);
+    _applyGroupMerge(payload, coordinator: group.localPeerId);
+    final result = await peer._core.submitAckRequiredFrame(
+        type: FrameType.groupMerge,
+        payload: await payload.encode(),
+        nowMs: peer._core.monotonicNowMs);
+    if (result != TransportWriteState.submittedToPlatform) {
+      throw const LpcException(LpcErrorCode.transportClosed);
+    }
+  }
+
+  Future<GroupMergeInfo> _localGroupInfo() async {
+    final config = group.config;
+    return GroupMergeInfo(
+        namespaceHash: await _scopedHash(
+            'LPC1-application-namespace', config.applicationNamespace),
+        discoveryMode: config.discoveryMode,
+        autoMerge: config.autoMerge,
+        trustMode: config.groupTrustMode,
+        knownPeersAutoMerge: config.knownPeersAutoMerge,
+        tokenHash: config.discoveryMode == DiscoveryMode.openProximity
+            ? List<int>.filled(32, 0)
+            : await _scopedHash(
+                'LPC1-group-join-token', config.groupJoinToken!),
+        groupId: group.groupId,
+        members: group.members);
+  }
+
+  List<GroupMember> _mergeMembers(
+      Iterable<GroupMember> first, Iterable<GroupMember> second) {
+    final merged = <PeerId, GroupMember>{};
+    for (final member in [...first, ...second]) {
+      final prior = merged[member.peerId];
+      merged[member.peerId] = prior == null
+          ? member
+          : GroupMember(member.peerId, min(prior.maxPeers, member.maxPeers));
+    }
+    return merged.values.toList()
+      ..sort((a, b) => _comparePeerIdBytes(a.peerId, b.peerId));
+  }
+
+  bool _sameMembers(Iterable<GroupMember> first, Iterable<GroupMember> second) {
+    final left = first.toList()
+      ..sort((a, b) => _comparePeerIdBytes(a.peerId, b.peerId));
+    final right = second.toList()
+      ..sort((a, b) => _comparePeerIdBytes(a.peerId, b.peerId));
+    return left.length == right.length &&
+        Iterable.generate(left.length).every((index) =>
+            left[index].peerId == right[index].peerId &&
+            left[index].maxPeers == right[index].maxPeers);
+  }
+
+  void _applyGroupMerge(GroupMergePayload payload,
+      {required PeerId coordinator}) {
+    if (_mergeReceiver.receive(payload) !=
+        GroupMergeReceiveDisposition.applied) {
+      return;
+    }
+    group.commitMergedMembership(
+        groupId: payload.winningGroupId,
+        members: payload.members,
+        coordinator: coordinator,
+        coordinatorTerm: payload.newCoordinatorTerm);
+  }
+
+  Future<void> _receiveGroupMerge(PeerConnection peer, LpcFrame frame) async {
+    if (frame.flags != 1) {
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    final payload = await GroupMergePayload.decode(frame.payload);
+    final remote = _remoteGroupInfo[peer];
+    // The source must be the coordinator that advertised the winning group,
+    // and the local group must be the payload's declared loser. Both checks
+    // bind this otherwise coordinator-less payload to authenticated GROUP_INFO.
+    if (remote == null ||
+        !isIncomingGroupMergeAuthorized(
+            payload: payload,
+            localGroupId: group.groupId,
+            retainedRemoteInfo: remote,
+            authenticatedSender: peer.peerId)) {
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    _applyGroupMerge(payload, coordinator: peer.peerId);
+    await peer._core.submitAck(frame.messageId);
+    await _sendGroupInfo(peer);
   }
 
   Future<void> _receiveMembershipSnapshot(
@@ -2085,6 +2223,10 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
     if (disposition == MembershipSnapshotOrderDisposition.accepted) {
       group.commitMembership(snapshot.members,
           coordinator: peer.peerId, coordinatorTerm: snapshot.coordinatorTerm);
+      _mergeReceiver = GroupMergeReceiver(
+          committedGroupId: group.groupId,
+          committedTerm: group.coordinatorTerm,
+          committedMembers: group.members);
     }
     await peer._core.submitAck(frame.messageId);
   }
@@ -2349,6 +2491,10 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
   }
 
   Future<void> _onPeerReconnected(PeerConnection peer) async {
+    // GROUP_INFO is current-state, not a retained operation. Send it again
+    // after every READY generation so a previous handoff race cannot leave
+    // a peer with only a pre-merge view.
+    await _sendGroupInfo(peer);
     await _retransmitHopsFor(peer);
     if (group.isCoordinator) {
       // ACK-required final hops were replayed above through their retained

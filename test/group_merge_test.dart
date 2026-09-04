@@ -179,4 +179,71 @@ void main() {
     expect(selectConvergedMergeWinner(groups).groupId,
         GroupId(List.filled(16, 1)));
   });
+
+  test('COORD-069 singleton GROUP_MERGE converges both committed views', () {
+    final winner = _info(1, [GroupMember(_peer(1), 8)]);
+    final loser = _info(2, [GroupMember(_peer(2), 8)]);
+    final evaluation = evaluateGroupMerge(winner, loser);
+    expect(evaluation.decision, GroupMergeDecision.merge);
+
+    final payload = GroupMergePayload(
+        winningGroupId: winner.groupId,
+        losingGroupId: loser.groupId,
+        newCoordinatorTerm: 1,
+        effectiveMaxPeers: evaluation.effectiveMaxPeers,
+        members: [GroupMember(_peer(1), 8), GroupMember(_peer(2), 8)]);
+    final winningReceiver = GroupMergeReceiver(
+        committedGroupId: winner.groupId,
+        committedTerm: 0,
+        committedMembers: winner.members);
+    final losingReceiver = GroupMergeReceiver(
+        committedGroupId: loser.groupId,
+        committedTerm: 0,
+        committedMembers: loser.members);
+
+    expect(
+        winningReceiver.receive(payload), GroupMergeReceiveDisposition.applied);
+    expect(
+        losingReceiver.receive(payload), GroupMergeReceiveDisposition.applied);
+    expect(winningReceiver.groupId, winner.groupId);
+    expect(losingReceiver.groupId, winner.groupId);
+    expect(winningReceiver.term, 1);
+    expect(losingReceiver.term, 1);
+    expect(winningReceiver.members, payload.members);
+    expect(losingReceiver.members, payload.members);
+  });
+
+  test('COORD-070 GROUP_MERGE requires advertised winning coordinator', () {
+    final winner = _info(1, [GroupMember(_peer(1), 8)]);
+    final payload = GroupMergePayload(
+        winningGroupId: winner.groupId,
+        losingGroupId: GroupId(List.filled(16, 2)),
+        newCoordinatorTerm: 1,
+        effectiveMaxPeers: 8,
+        members: [GroupMember(_peer(1), 8), GroupMember(_peer(2), 8)]);
+    final announced = GroupInfoPayload(
+        info: winner, coordinatorTerm: 0, coordinatorPeerId: _peer(1));
+
+    expect(
+        isIncomingGroupMergeAuthorized(
+            payload: payload,
+            localGroupId: payload.losingGroupId,
+            retainedRemoteInfo: announced,
+            authenticatedSender: _peer(1)),
+        isTrue);
+    expect(
+        isIncomingGroupMergeAuthorized(
+            payload: payload,
+            localGroupId: payload.losingGroupId,
+            retainedRemoteInfo: announced,
+            authenticatedSender: _peer(3)),
+        isFalse);
+    expect(
+        isIncomingGroupMergeAuthorized(
+            payload: payload,
+            localGroupId: winner.groupId,
+            retainedRemoteInfo: announced,
+            authenticatedSender: _peer(1)),
+        isFalse);
+  });
 }

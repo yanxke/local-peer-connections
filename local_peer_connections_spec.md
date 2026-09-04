@@ -3503,6 +3503,13 @@ AUTO_COORDINATOR capability is mutually set
 
 After the underlying PeerConnection reaches READY, each `GroupSession` bootstrap connection MUST immediately exchange `GROUP_INFO`.
 
+`GROUP_INFO` is an unacknowledged current-state control record. If a link
+enters RECONNECTING while a runtime is preparing or submitting it, the runtime
+MUST silently abandon that obsolete-generation send and transmit fresh current
+`GROUP_INFO` after the peer returns to READY. This normal transport race MUST
+NOT surface as an uncaught application exception or be treated as a group
+protocol violation.
+
 ## 31.1 Application Namespace and Group Join Scope
 
 Two different concepts are REQUIRED.
@@ -3635,8 +3642,14 @@ committed member list =
         max_peers = local GroupConfig.maxPeers
     )
 coordinator_term = 0
-coordinator_peer_id = all zero until election commits
+coordinator_peer_id = local PeerId
 ```
+
+The singleton's local PeerId is provisional coordinator authority for automatic
+merge only. It permits the deterministic winning singleton to originate its
+first `GROUP_MERGE`; it does not give the application authority to select a
+coordinator. Once a merge commits, the normal committed coordinator and term
+rules apply.
 
 
 ## 31.3 Merge Compatibility and Deterministic Evaluation Order
@@ -3783,6 +3796,45 @@ merged_member_count <= effective_max_peers
 ```
 
 The winning coordinator sends GROUP_MERGE with frame-header `ACK_REQUIRED=1` independently to all reachable members. Each recipient receives a distinct sender-allocated MessageId for that peer connection.
+
+### 31.6.1 Runtime Merge Dispatch and Admission
+
+`GROUP_INFO` and `GROUP_MERGE` are GroupSession control frames. A READY
+PeerConnection implementation MUST dispatch both to its GroupSession runtime
+owner; it MUST NOT discard them as unhandled peer application traffic.
+
+On each valid authenticated `GROUP_INFO`, the runtime MUST retain the complete
+record for that PeerConnection and evaluate Section 31.3 against its current
+committed local group state. If the local group is the deterministic winner and
+the local peer is its current coordinator, it MUST construct and commit the
+Section 31.6 merge. Before sending the ACK-required `GROUP_MERGE` to that
+peer, it MUST send current winning-group `GROUP_INFO` on the same ordered
+pairwise link. This refresh is required even if a prior generation sent
+`GROUP_INFO`, because the peer may have created its GroupSession only after
+that earlier record was received or discarded. The peer MUST receive that
+winning-group record before the corresponding `GROUP_MERGE`.
+
+Before applying an incoming `GROUP_MERGE`, the runtime MUST verify all of the
+following:
+
+1. the local current GroupId equals `losing_group_id`;
+2. the retained authenticated `GROUP_INFO` for the sending PeerConnection has
+   `group_id == winning_group_id`;
+3. that retained record names the authenticated sender PeerId as its current
+   `coordinator_peer_id`; and
+4. the payload itself passes the Section 31.6 canonical-membership and term
+   checks.
+
+On acceptance, the runtime MUST atomically commit the winning GroupId,
+membership, coordinator PeerId, and new coordinator term before routing any
+membership-dependent group application traffic. It MUST send the generic ACK
+for the received `GROUP_MERGE` MessageId and publish fresh `GROUP_INFO` for
+the committed state.
+
+A delayed pre-merge `GROUP_INFO` from the losing group MUST NOT cause a new
+merge term when the winning coordinator has already committed the identical
+member union. It may be retained only for normal authenticated stale/duplicate
+handling.
 
 Members receiving a valid merge:
 
@@ -7904,6 +7956,8 @@ Every mobile release candidate MUST run:
 - [x] COORD-066 B sends G to C through coordinator A. A admits G and transmits only part of the final-hop GROUP_RELIABLE. Before C commits the complete application message, D becomes committed coordinator. A stops future relay transmission and releases its admitted relay state. B reroutes G through D with the same GroupMessageId and new pairwise MessageIds. C commits G exactly once.
 - [x] COORD-067 A submitted a GROUP_RELIABLE frame while still coordinator, but C receives it only after committing D as new coordinator. C classifies it as stale-authority traffic on the historically valid A-C SessionId, does not redeliver, and does not treat the healthy historical A-C PeerConnection as malicious protocol corruption.
 - [x] COORD-068 B has a nonterminal routed send when an already-in-flight GROUP_DELIVERY_ACK from old coordinator A arrives after D becomes coordinator. B generic-ACKs and discards A's stale signaling, leaves the SendHandle nonterminal, and continues completion only through D.
+- [x] COORD-069 Two independently created singleton groups converge through one authenticated GROUP_MERGE to the same GroupId, member union, and coordinator term.
+- [x] COORD-070 A received GROUP_MERGE is accepted only when its authenticated sender is the coordinator advertised by retained winning-group GROUP_INFO and the local GroupId is the declared loser.
 
 ## Realtime Datagram Tests
 
