@@ -232,6 +232,60 @@ void main() {
             .where((frame) => frame.type == FrameType.ready),
         hasLength(1));
   });
+
+  test('diagnostic logger reports handshake phases without frame payloads',
+      () async {
+    final backendA = _Backend('logged-a');
+    final backendB = _Backend('logged-b');
+    backendA.remote = backendB;
+    backendB.remote = backendA;
+    final exchangeA = await _exchange(41, 43);
+    final exchangeB = await _exchange(42, 44);
+    final logs = <String>[];
+    final a = HandshakeConnection(
+      backend: backendA,
+      exchange: exchangeA,
+      localPeerId: exchangeA.localHello.peerId,
+      logger: logs.add,
+    );
+    final b = HandshakeConnection(
+      backend: backendB,
+      exchange: exchangeB,
+      localPeerId: exchangeB.localHello.peerId,
+    );
+
+    await Future.wait([a.start(), b.start()]);
+    await Future.wait([a.ready, b.ready]).timeout(const Duration(seconds: 2));
+
+    expect(logs, contains(contains('send frame=hello')));
+    expect(logs, contains(contains('READY submitted')));
+    expect(logs, contains(contains('handshake complete')));
+    expect(logs.join('\n'), isNot(contains('[41')));
+  });
+
+  test('a throwing handshake diagnostic logger cannot stop authentication',
+      () async {
+    final backendA = _Backend('throwing-logger-a');
+    final backendB = _Backend('throwing-logger-b');
+    backendA.remote = backendB;
+    backendB.remote = backendA;
+    final exchangeA = await _exchange(51, 53);
+    final exchangeB = await _exchange(52, 54);
+    final a = HandshakeConnection(
+      backend: backendA,
+      exchange: exchangeA,
+      localPeerId: exchangeA.localHello.peerId,
+      logger: (_) => throw StateError('diagnostics unavailable'),
+    );
+    final b = HandshakeConnection(
+      backend: backendB,
+      exchange: exchangeB,
+      localPeerId: exchangeB.localHello.peerId,
+    );
+
+    await Future.wait([a.start(), b.start()]);
+    await Future.wait([a.ready, b.ready]).timeout(const Duration(seconds: 2));
+  });
 }
 
 Future<Uint8List> _encryptedFrame(HandshakeResult result, PeerId sender,

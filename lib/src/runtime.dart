@@ -83,6 +83,22 @@ sealed class DiscoveryEvent {
   const DiscoveryEvent();
 }
 
+class EndpointFound extends DiscoveryEvent {
+  const EndpointFound(this.endpoint);
+  final DiscoveredEndpoint endpoint;
+}
+
+class EndpointUpdated extends DiscoveryEvent {
+  const EndpointUpdated(this.previous, this.endpoint);
+  final DiscoveredEndpoint previous;
+  final DiscoveredEndpoint endpoint;
+}
+
+class EndpointLost extends DiscoveryEvent {
+  const EndpointLost(this.endpoint);
+  final DiscoveredEndpoint endpoint;
+}
+
 class DiscoveryStopped extends DiscoveryEvent {
   const DiscoveryStopped();
 }
@@ -580,15 +596,29 @@ class DiscoveredEndpoint {
 class DiscoverySession {
   DiscoverySession(
       {Future<void> Function()? stopPlatformScan,
-      Future<void> Function()? onStopped})
+      Future<void> Function()? onStopped,
+      DateTime Function()? now,
+      this.endpointLostAfter = const Duration(seconds: 5)})
       : _stopPlatformScan = stopPlatformScan ?? _noOp,
-        _onStopped = onStopped ?? _noOp;
+        _onStopped = onStopped ?? _noOp,
+        _now = now ?? DateTime.now {
+    if (endpointLostAfter <= Duration.zero) {
+      throw ArgumentError.value(endpointLostAfter, 'endpointLostAfter');
+    }
+    _expiryTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _expireStaleEndpoints();
+    });
+  }
 
   final Future<void> Function() _stopPlatformScan;
   final Future<void> Function() _onStopped;
+  final DateTime Function() _now;
+  final Duration endpointLostAfter;
   final Map<String, DiscoveredEndpoint> _endpoints = {};
+  final Map<String, DateTime> _lastObservedAt = {};
   final StreamController<DiscoveryEvent> _events =
       StreamController<DiscoveryEvent>.broadcast(sync: true);
+  late final Timer _expiryTimer;
   bool _stopped = false;
 
   bool get isStopped => _stopped;
@@ -600,7 +630,26 @@ class DiscoverySession {
   /// endpoint changes are retained or emitted.
   void recordEndpoint(DiscoveredEndpoint endpoint) {
     if (_stopped) return;
+    final previous = _endpoints[endpoint.id];
     _endpoints[endpoint.id] = endpoint;
+    _lastObservedAt[endpoint.id] = _now();
+    if (previous == null) {
+      _events.add(EndpointFound(endpoint));
+    } else if (previous.rssi != endpoint.rssi ||
+        previous.localName != endpoint.localName) {
+      _events.add(EndpointUpdated(previous, endpoint));
+    }
+  }
+
+  void _expireStaleEndpoints() {
+    if (_stopped) return;
+    final now = _now();
+    for (final entry in _lastObservedAt.entries.toList()) {
+      if (now.difference(entry.value) < endpointLostAfter) continue;
+      final endpoint = _endpoints.remove(entry.key);
+      _lastObservedAt.remove(entry.key);
+      if (endpoint != null) _events.add(EndpointLost(endpoint));
+    }
   }
 
   /// Stops scanning once and emits exactly one terminal discovery event. It
@@ -608,6 +657,7 @@ class DiscoverySession {
   Future<void> stop() async {
     if (_stopped) return;
     _stopped = true;
+    _expiryTimer.cancel();
     try {
       await _stopPlatformScan();
     } finally {
@@ -846,6 +896,34 @@ class NearbyRuntime {
         _startNextKnownPeerProbe();
       }
       return existing;
+    }
+    final existingPeer = _gattPeersByEndpoint[discoveryEndpointId];
+    if (existingPeer != null &&
+        (existingPeer.state == PeerConnectionState.ready ||
+            existingPeer.state == PeerConnectionState.reconnecting)) {
+      _log(
+          'connect reuse endpoint=$discoveryEndpointId peer=${existingPeer.peerId} state=${existingPeer.state.name}');
+      late final StreamSubscription<PeerConnectionEvent> subscription;
+      late final ConnectionAttempt attempt;
+      attempt = ConnectionAttempt._(discoveryEndpointId, () async {
+        await subscription.cancel();
+      });
+      subscription = existingPeer.events.listen((event) {
+        if (event is PeerReconnected) {
+          unawaited(subscription.cancel());
+          attempt._connected(existingPeer);
+        } else if (event is PeerDisconnected) {
+          unawaited(subscription.cancel());
+          attempt._failed(const LpcException(LpcErrorCode.transportClosed));
+        }
+      });
+      if (existingPeer.state == PeerConnectionState.ready) {
+        unawaited(Future<void>.microtask(() {
+          unawaited(subscription.cancel());
+          attempt._connected(existingPeer);
+        }));
+      }
+      return attempt;
     }
     return _connect(discoveryEndpointId, automaticProbe: false);
   }
@@ -1125,7 +1203,6 @@ class NearbyRuntime {
 
   void _scheduleKnownPeerProbe(String endpointId) {
     if (!config.autoConnectKnownPeers ||
-        _hasReadyPeer ||
         _completedKnownPeerProbeEndpoints.containsKey(endpointId) ||
         _automaticProbeEndpoints.contains(endpointId) ||
         _attempts.containsKey(endpointId) ||
@@ -1187,7 +1264,6 @@ class NearbyRuntime {
   }
 
   void _startNextKnownPeerProbe() {
-    if (_hasReadyPeer) return;
     while (
         _automaticProbeEndpoints.length < config.maxConcurrentKnownPeerProbes &&
             _pendingKnownPeerProbes.isNotEmpty) {
@@ -1247,29 +1323,6 @@ class NearbyRuntime {
     }
     _automaticProbeEndpoints.remove(endpointId);
     _startNextKnownPeerProbe();
-  }
-
-  bool get _hasReadyPeer =>
-      _peers.any((peer) => peer.state == PeerConnectionState.ready);
-
-  /// A platform endpoint is only a local observation and may change across
-  /// Android BLE privacy-address rotations.  Once one authenticated peer is
-  /// READY, any other automatic identity probes are competing physical links,
-  /// not a second way to represent that peer.  Stop those probes here; the
-  /// dedicated logical reconnect scheduler remains independent and resumes
-  /// only after the READY peer enters RECONNECTING.
-  void _cancelCompetingKnownPeerProbes({String? exceptEndpointId}) {
-    final endpointIds = _automaticProbeEndpoints
-        .where((endpointId) => endpointId != exceptEndpointId)
-        .toList(growable: false);
-    for (final endpointId in endpointIds) {
-      _automaticProbeEndpoints.remove(endpointId);
-      _knownPeerProbeTimers.remove(endpointId)?.cancel();
-      final attempt = _attempts.remove(endpointId);
-      if (attempt != null) unawaited(attempt.cancel().catchError((_) {}));
-      _log('known probe cancelled as competing endpoint=$endpointId');
-    }
-    _pendingKnownPeerProbes.clear();
   }
 
   int get _monotonicMs => DateTime.now().microsecondsSinceEpoch ~/ 1000;
@@ -1687,7 +1740,7 @@ class NearbyRuntime {
         onMembershipCommitted: _groupMembershipCommitted);
     final routing = _RuntimeGroupRouteTransport(
         group: group,
-        peers: () => Set.unmodifiable(_peers),
+        peers: () => Set.unmodifiable(_groupPeers[group] ?? const {}),
         maxReservedBytesPerDestination: this.config.maxQueuedBytesPerPeer,
         maxReservedMessagesPerDestination:
             this.config.maxQueuedMessagesPerPeer);
@@ -1713,12 +1766,30 @@ class NearbyRuntime {
 
   void _groupMembershipCommitted(GroupSession group, Set<PeerId> memberIds) {
     final previous = _groupPeers[group] ?? <PeerConnection>{};
-    final next =
-        _peers.where((peer) => memberIds.contains(peer.peerId)).toSet();
+    final profile = _autoGroupProfile;
+    final next = _peers
+        .where((peer) =>
+            memberIds.contains(peer.peerId) &&
+            (profile == null || _peerMatchesGroupProfile(peer, profile)))
+        .toSet();
     _groupPeers[group] = next;
     for (final peer in previous.difference(next)) {
       if (!_hasOtherOwner(peer)) unawaited(peer.disconnect());
     }
+  }
+
+  bool _peerMatchesGroupProfile(
+      PeerConnection peer, _AutoGroupHandshakeProfile profile) {
+    return switch (profile.trustMode) {
+      HandshakeTrustMode.tofu =>
+        peer.securityLevel == SecurityLevel.encryptedTofu,
+      HandshakeTrustMode.psk32 =>
+        peer.securityLevel == SecurityLevel.authenticatedPsk,
+      HandshakeTrustMode.sas =>
+        peer.securityLevel == SecurityLevel.authenticatedSas,
+      HandshakeTrustMode.knownPeer =>
+        peer.securityLevel == SecurityLevel.authenticatedKnownPeer,
+    };
   }
 
   bool _hostMatchesGroupProfile(
@@ -2040,7 +2111,6 @@ class NearbyRuntime {
         : null;
     _log(
         'peer owned peer=${peer.peerId} security=${securityLevel.name} endpoint=${gattEndpointId ?? 'none'} role=${gattRole ?? 'none'}');
-    _cancelCompetingKnownPeerProbes(exceptEndpointId: gattEndpointId);
     for (final entry in _groupRouting.entries) {
       if (!entry.key.hasRouteTransport) {
         entry.key.attachRouteTransport(entry.value);

@@ -239,4 +239,34 @@ void main() {
     );
     expect(platform.transmissions, [GattFragmentTransmission.notify]);
   });
+
+  test('diagnostic logger reports GATT queue and terminal failure state',
+      () async {
+    final platform = _GattPlatform([GattFragmentSubmission.terminalFailure]);
+    final logs = <String>[];
+    final backend = GattBackendConnection(
+      connectionId: 'gatt',
+      platform: platform,
+      logger: logs.add,
+    );
+
+    await backend.write(Uint8List.fromList([1, 2, 3])).completion;
+
+    expect(logs, contains(contains('queued frame')));
+    expect(logs, contains(contains('terminal failure')));
+    expect(logs.join('\n'), isNot(contains('[1, 2, 3]')));
+  });
+
+  test('a throwing GATT diagnostic logger cannot break queue progress',
+      () async {
+    final platform = _GattPlatform([GattFragmentSubmission.submitted]);
+    final backend = GattBackendConnection(
+      connectionId: 'gatt',
+      platform: platform,
+      logger: (_) => throw StateError('diagnostics unavailable'),
+    );
+
+    expect(await backend.write(Uint8List.fromList([1])).completion,
+        TransportWriteState.submittedToPlatform);
+  });
 }

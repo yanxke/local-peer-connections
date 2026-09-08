@@ -306,6 +306,42 @@ void main() {
         subscriptions.map((subscription) => subscription.cancel()));
   });
 
+  test('GroupSession close is idempotent and emits one GroupClosed event',
+      () async {
+    final runtime = await createRuntime(localPeerId: peer(1));
+    final group = runtime.joinOrCreateGroup(GroupConfig(
+        applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
+    final events = <GroupEvent>[];
+    final subscription = group.events.listen(events.add);
+
+    group.close();
+    group.close();
+    group.leave();
+
+    expect(group.state, GroupState.closed);
+    expect(events.whereType<GroupClosed>(), hasLength(1));
+    await subscription.cancel();
+    await runtime.close();
+  });
+
+  test('GroupSession members returns an immutable point-in-time snapshot',
+      () async {
+    final runtime = await createRuntime(localPeerId: peer(1));
+    final group = runtime.joinOrCreateGroup(GroupConfig(
+        applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
+    group.commitMembership([GroupMember(peer(1), 8), GroupMember(peer(2), 8)],
+        coordinator: peer(1));
+    final snapshot = group.members;
+
+    expect(snapshot, hasLength(2));
+    expect(() => snapshot.clear(), throwsUnsupportedError);
+    group.commitMembership([GroupMember(peer(1), 8)], coordinator: peer(1));
+
+    expect(snapshot, hasLength(2));
+    expect(group.members, hasLength(1));
+    await runtime.close();
+  });
+
   // UT-104: application destinations must be committed members.
   test('UT-104 rejects a destination absent from committed membership',
       () async {

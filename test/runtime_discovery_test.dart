@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,7 +8,8 @@ import 'package:local_peer_connections/local_peer_connections.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('UT-158 runtime owns one service-scoped discovery session', () async {
+  test('UT-158/191 runtime preserves pre-auth discovery local-name metadata',
+      () async {
     const methods = MethodChannel('runtime-discovery-test');
     var starts = 0;
     var stops = 0;
@@ -27,14 +29,95 @@ void main() {
     final discovery = await runtime.startDiscovery();
     expect(starts, 1);
     await expectLater(runtime.startDiscovery(), throwsA(isA<LpcException>()));
-    events.add(const PlatformEndpointFound('endpoint', rssi: -40));
+    events.add(
+        const PlatformEndpointFound('endpoint', rssi: -40, localName: 'Maple'));
     await Future<void>.delayed(Duration.zero);
     expect(discovery.currentEndpoints().single.id, 'endpoint');
+    expect(discovery.currentEndpoints().single.localName, 'Maple');
 
     await runtime.close();
     expect(stops, 1);
     expect(discovery.isStopped, isTrue);
     await events.close();
+  });
+
+  test('discovery emits found, updated, and lost endpoint lifecycle events',
+      () async {
+    var now = DateTime(2026, 1, 1);
+    final discovery = DiscoverySession(
+      now: () => now,
+      endpointLostAfter: const Duration(milliseconds: 20),
+    );
+    final events = <DiscoveryEvent>[];
+    final subscription = discovery.events.listen(events.add);
+
+    discovery.recordEndpoint(
+        const DiscoveredEndpoint('endpoint', rssi: -40, localName: 'Maple'));
+    discovery.recordEndpoint(
+        const DiscoveredEndpoint('endpoint', rssi: -52, localName: 'Maple'));
+    discovery.recordEndpoint(
+        const DiscoveredEndpoint('endpoint', rssi: -52, localName: 'Maple'));
+    expect(discovery.currentEndpoints(), hasLength(1));
+    expect(events[0], isA<EndpointFound>());
+    expect(events[1], isA<EndpointUpdated>());
+    expect(events, hasLength(2));
+
+    now = now.add(const Duration(milliseconds: 25));
+    await Future<void>.delayed(const Duration(milliseconds: 1050));
+    expect(events[2], isA<EndpointLost>());
+    expect(discovery.currentEndpoints(), isEmpty);
+
+    await discovery.stop();
+    await subscription.cancel();
+  });
+
+  test('currentEndpoints returns an immutable point-in-time snapshot',
+      () async {
+    final discovery = DiscoverySession();
+    const first = DiscoveredEndpoint('first', rssi: -40);
+    const replacement = DiscoveredEndpoint('first', rssi: -52);
+    discovery.recordEndpoint(first);
+
+    final snapshot = discovery.currentEndpoints();
+    expect(snapshot, hasLength(1));
+    expect(snapshot.single.rssi, -40);
+    expect(() => snapshot.clear(), throwsUnsupportedError);
+
+    discovery.recordEndpoint(replacement);
+    expect(snapshot.single.rssi, -40);
+    expect(discovery.currentEndpoints().single.rssi, -52);
+    await discovery.stop();
+  });
+
+  test('stopped discovery emits no endpoint changes', () async {
+    final discovery = DiscoverySession();
+    final events = <DiscoveryEvent>[];
+    final subscription = discovery.events.listen(events.add);
+    await discovery.stop();
+    discovery.recordEndpoint(const DiscoveredEndpoint('endpoint', rssi: -40));
+    expect(events, hasLength(1));
+    expect(events.single, isA<DiscoveryStopped>());
+    expect(discovery.currentEndpoints(), isEmpty);
+    await subscription.cancel();
+  });
+
+  test('DiscoverySession stop is idempotent under concurrent calls', () async {
+    var platformStops = 0;
+    var callbacks = 0;
+    final discovery = DiscoverySession(
+      stopPlatformScan: () async => platformStops++,
+      onStopped: () async => callbacks++,
+    );
+    final events = <DiscoveryEvent>[];
+    final subscription = discovery.events.listen(events.add);
+
+    await Future.wait([discovery.stop(), discovery.stop()]);
+    await discovery.stop();
+
+    expect(platformStops, 1);
+    expect(callbacks, 1);
+    expect(events.whereType<DiscoveryStopped>(), hasLength(1));
+    await subscription.cancel();
   });
 
   test('runtime without a platform backend does not claim discovery', () async {
@@ -64,6 +147,94 @@ void main() {
     RuntimeConfig(
             trustMode: HandshakeTrustMode.psk32, psk32: List.filled(32, 9))
         .validate();
+  });
+
+  test('UT-178 automatic known-peer probing requires a resolver', () {
+    expect(
+        () => RuntimeConfig(autoConnectKnownPeers: true).validate(),
+        throwsA(isA<LpcException>()
+            .having((error) => error.code, 'code', LpcErrorCode.invalidState)));
+  });
+
+  test('UT-188 a large known-peer database creates no runtime probe state',
+      () async {
+    const methods = MethodChannel('runtime-large-known-database-test');
+    var connects = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'connectGatt') connects++;
+      return null;
+    });
+    final resolver = _LargeKnownPeerResolver();
+    final runtime = await createRuntime(
+      config: RuntimeConfig(
+        autoConnectKnownPeers: true,
+        knownPeerResolver: resolver,
+      ),
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(methods: methods),
+    );
+
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(resolver.lookups, 0);
+    expect(connects, 0);
+    final discovery = await runtime.startDiscovery();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(resolver.lookups, 0);
+    expect(connects, 0);
+
+    await discovery.stop();
+    await runtime.close();
+  });
+
+  test('runtime diagnostic logger reports discovery observations', () async {
+    const methods = MethodChannel('runtime-logger-test');
+    final logs = <String>[];
+    final events = StreamController<PlatformBleEvent>.broadcast();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async => null);
+    final runtime = await createRuntime(
+      config: RuntimeConfig(logger: logs.add),
+      localPeerId: PeerId(List.filled(16, 1)),
+      platformBleBackend: PlatformBleBackend(
+        methods: methods,
+        eventStream: events.stream,
+      ),
+    );
+
+    final discovery = await runtime.startDiscovery();
+    events.add(const PlatformEndpointFound('diagnostic-endpoint', rssi: -42));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(logs, contains(contains('endpoint found')));
+    expect(logs, contains(contains('diagnostic-endpoint')));
+    await discovery.stop();
+    await runtime.close();
+    await events.close();
+  });
+
+  test('a throwing runtime diagnostic logger cannot stop discovery', () async {
+    const methods = MethodChannel('runtime-throwing-logger-test');
+    final events = StreamController<PlatformBleEvent>.broadcast();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async => null);
+    final runtime = await createRuntime(
+      config: RuntimeConfig(logger: (_) => throw StateError('diagnostics')),
+      localPeerId: PeerId(List.filled(16, 1)),
+      platformBleBackend: PlatformBleBackend(
+        methods: methods,
+        eventStream: events.stream,
+      ),
+    );
+
+    final discovery = await runtime.startDiscovery();
+    events.add(const PlatformEndpointFound('still-works', rssi: -42));
+    await Future<void>.delayed(Duration.zero);
+    expect(discovery.currentEndpoints().single.id, 'still-works');
+
+    await discovery.stop();
+    await runtime.close();
+    await events.close();
   });
 
   test('UT-159 runtime multiplexes compatible HostSession advertising demand',
@@ -102,6 +273,148 @@ void main() {
     expect(
         () => RuntimeConfig(applicationMetadata: List.filled(32, 1)).validate(),
         throwsA(isA<LpcException>()));
+  });
+
+  test('UT-193 automatic known-peer probes put runtime metadata in HELLO',
+      () async {
+    const methods = MethodChannel('runtime-known-probe-metadata-test');
+    final events = StreamController<PlatformBleEvent>.broadcast();
+    final fragments = <int, Uint8List>{};
+    Uint8List? helloBytes;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'connectGatt') {
+        events.add(const PlatformGattConnected('metadata-endpoint', 'central'));
+      } else if (call.method == 'submitGattFragment') {
+        final arguments = call.arguments as Map<Object?, Object?>;
+        final fragment = GattFragment.decode(
+            (arguments['fragment'] as Uint8List).toList(growable: false));
+        fragments[fragment.sequence] = fragment.bytes;
+        if (fragment.end) {
+          final bytes = BytesBuilder(copy: false);
+          for (var sequence = 0; fragments.containsKey(sequence); sequence++) {
+            bytes.add(fragments[sequence]!);
+          }
+          helloBytes = bytes.takeBytes();
+        }
+        return 'submitted';
+      }
+      return null;
+    });
+
+    final runtime = await createRuntime(
+      config: RuntimeConfig(
+        autoConnectKnownPeers: true,
+        applicationMetadata: const [7, 8, 9],
+        knownPeerResolver: _KnownPeerResolver(),
+        reconnectTimeoutMs: 1000,
+      ),
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(
+        methods: methods,
+        eventStream: events.stream,
+      ),
+    );
+    final discovery = await runtime.startDiscovery();
+    events.add(const PlatformEndpointFound('metadata-endpoint', rssi: -40));
+
+    for (var i = 0; i < 100 && helloBytes == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(helloBytes, isNotNull);
+    final frame = LpcFrame.decode(helloBytes!);
+    expect(frame.type, FrameType.hello);
+    final hello = await HelloPayload.decode(frame.payload);
+    expect(hello.applicationMetadata, [7, 8, 9]);
+
+    await discovery.stop();
+    await runtime.close();
+    await events.close();
+  });
+
+  test('UT-194 HostSession inherits and overrides runtime metadata', () async {
+    const methods = MethodChannel('runtime-host-metadata-test');
+    final events = StreamController<PlatformBleEvent>.broadcast();
+    final capture = _OutgoingFrameCapture();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'submitGattFragment') {
+        final arguments = call.arguments as Map<Object?, Object?>;
+        capture.add(arguments['endpointId'] as String,
+            arguments['fragment'] as Uint8List);
+        return 'submitted';
+      }
+      return null;
+    });
+
+    final runtime = await createRuntime(
+      config: RuntimeConfig(applicationMetadata: const [1, 2, 3]),
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(
+        methods: methods,
+        eventStream: events.stream,
+      ),
+    );
+
+    final inherited = runtime.createHostSession(HostConfig(autoAccept: true));
+    await inherited.startAdvertising();
+    events.add(const PlatformGattConnected('inherited-endpoint', 'peripheral'));
+    final inheritedFrame = await capture.waitFor('inherited-endpoint');
+    final inheritedHello = await _helloFromFrame(inheritedFrame);
+    expect(inheritedHello.applicationMetadata, [1, 2, 3]);
+    await inherited.close();
+
+    final overridden = runtime.createHostSession(
+        HostConfig(autoAccept: true, applicationMetadata: const [9, 8]));
+    await overridden.startAdvertising();
+    events
+        .add(const PlatformGattConnected('overridden-endpoint', 'peripheral'));
+    final overriddenFrame = await capture.waitFor('overridden-endpoint');
+    final overriddenHello = await _helloFromFrame(overriddenFrame);
+    expect(overriddenHello.applicationMetadata, [9, 8]);
+
+    await overridden.close();
+    await runtime.close();
+    await events.close();
+  });
+
+  test('UT-195 one runtime can advertise and discover concurrently', () async {
+    const methods = MethodChannel('runtime-host-discovery-concurrent-test');
+    var listenCalls = 0;
+    var advertiseCalls = 0;
+    var discoveryCalls = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      switch (call.method) {
+        case 'listenGatt':
+          listenCalls++;
+          break;
+        case 'startAdvertising':
+          advertiseCalls++;
+          break;
+        case 'startDiscovery':
+          discoveryCalls++;
+          break;
+      }
+      return null;
+    });
+    final runtime = await createRuntime(
+      localPeerId: PeerId(List.filled(16, 5)),
+      platformBleBackend: PlatformBleBackend(methods: methods),
+    );
+    final host = runtime.createHostSession(HostConfig());
+    await host.startAdvertising();
+    final discovery = await runtime.startDiscovery();
+
+    expect(listenCalls, 1);
+    expect(advertiseCalls, 1);
+    expect(discoveryCalls, 1);
+    expect(host.isAdvertising, isTrue);
+    expect(discovery.isStopped, isFalse);
+
+    await discovery.stop();
+    await host.close();
+    await runtime.close();
   });
 
   test('UT-202 presentation refreshes advertising without changing identity',
@@ -204,6 +517,53 @@ void main() {
     expect(closes, 1);
   });
 
+  test('ConnectionAttempt cancellation is idempotent after the first cancel',
+      () async {
+    const methods = MethodChannel('runtime-attempt-cancel-idempotence-test');
+    var closes = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'closeGattConnection') closes++;
+      return null;
+    });
+    final runtime = await createRuntime(
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(methods: methods),
+    );
+    final attempt = runtime.connect('opaque-endpoint');
+    final events = <ConnectionAttemptEvent>[];
+    final subscription = attempt.events.listen(events.add);
+
+    await Future<void>.delayed(Duration.zero);
+    await attempt.cancel();
+    await attempt.cancel();
+
+    expect(closes, 1);
+    expect(events.whereType<ConnectionAttemptCancelled>(), hasLength(1));
+    await subscription.cancel();
+    await runtime.close();
+  });
+
+  test('HostSession close is idempotent and emits one terminal event',
+      () async {
+    final runtime = await createRuntime(
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend:
+          PlatformBleBackend(methods: const MethodChannel('host-close-test')),
+    );
+    final host = runtime.createHostSession(HostConfig());
+    final events = <HostSessionEvent>[];
+    final subscription = host.events.listen(events.add);
+
+    await Future.wait([host.close(), host.close()]);
+    await host.close();
+
+    expect(host.isClosed, isTrue);
+    expect(events.whereType<HostSessionClosed>(), hasLength(1));
+    await subscription.cancel();
+    await runtime.close();
+  });
+
   test('automatic known-peer probes time out and release their endpoint',
       () async {
     const methods = MethodChannel('runtime-known-probe-timeout-test');
@@ -236,6 +596,108 @@ void main() {
     expect(failed.discoveryEndpointId, 'stalled-endpoint');
     expect(failed.error.code, LpcErrorCode.connectionTimeout);
     expect(closes, 1);
+
+    await subscription.cancel();
+    await discovery.stop();
+    await runtime.close();
+    await events.close();
+  });
+
+  test('known-peer probes enforce concurrency and preserve dropped candidates',
+      () async {
+    const methods = MethodChannel('runtime-known-probe-queue-test');
+    final events = StreamController<PlatformBleEvent>.broadcast();
+    final connectedEndpoints = <String>[];
+    final runtimeEvents = <RuntimeEvent>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'connectGatt') {
+        final endpoint = (call.arguments as Map)['endpointId'] as String;
+        connectedEndpoints.add(endpoint);
+        events.add(PlatformGattConnected(endpoint, 'central'));
+      }
+      if (call.method == 'submitGattFragment') return 'submitted';
+      return null;
+    });
+    final runtime = await createRuntime(
+      config: RuntimeConfig(
+        autoConnectKnownPeers: true,
+        knownPeerResolver: _KnownPeerResolver(),
+        maxConcurrentKnownPeerProbes: 1,
+        maxPendingKnownPeerProbes: 1,
+        reconnectTimeoutMs: 1000,
+      ),
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(
+        methods: methods,
+        eventStream: events.stream,
+      ),
+    );
+    final subscription = runtime.events.listen(runtimeEvents.add);
+    final discovery = await runtime.startDiscovery();
+
+    events.add(const PlatformEndpointFound('probe-1', rssi: -40));
+    events.add(const PlatformEndpointFound('probe-2', rssi: -41));
+    events.add(const PlatformEndpointFound('probe-3', rssi: -42));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(connectedEndpoints, ['probe-1']);
+    expect(runtimeEvents.whereType<KnownPeerProbeStarted>(), hasLength(1));
+
+    await _waitUntil(
+        () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 2,
+        timeout: const Duration(seconds: 2));
+    expect(connectedEndpoints, ['probe-1', 'probe-2']);
+
+    // probe-3 was over the pending limit and was not completed; a later
+    // advertisement must make it eligible again.
+    events.add(const PlatformEndpointFound('probe-3', rssi: -43));
+    await _waitUntil(
+        () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 3,
+        timeout: const Duration(seconds: 2));
+    expect(connectedEndpoints, ['probe-1', 'probe-2', 'probe-3']);
+
+    await subscription.cancel();
+    await discovery.stop();
+    await runtime.close();
+    await events.close();
+  });
+
+  test('repeated endpoint observations do not start duplicate probes',
+      () async {
+    const methods = MethodChannel('runtime-known-probe-dedup-test');
+    final events = StreamController<PlatformBleEvent>.broadcast();
+    var connects = 0;
+    final runtimeEvents = <RuntimeEvent>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'connectGatt') {
+        connects++;
+        events.add(const PlatformGattConnected('same-endpoint', 'central'));
+      }
+      if (call.method == 'submitGattFragment') return 'submitted';
+      return null;
+    });
+    final runtime = await createRuntime(
+      config: RuntimeConfig(
+        autoConnectKnownPeers: true,
+        knownPeerResolver: _KnownPeerResolver(),
+        reconnectTimeoutMs: 1000,
+      ),
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(
+        methods: methods,
+        eventStream: events.stream,
+      ),
+    );
+    final subscription = runtime.events.listen(runtimeEvents.add);
+    final discovery = await runtime.startDiscovery();
+    events.add(const PlatformEndpointFound('same-endpoint', rssi: -40));
+    events.add(const PlatformEndpointFound('same-endpoint', rssi: -55));
+
+    await _waitUntil(
+        () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 1);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(connects, 1);
 
     await subscription.cancel();
     await discovery.stop();
@@ -303,4 +765,65 @@ void main() {
 class _KnownPeerResolver implements KnownPeerResolver {
   @override
   Future<bool> isKnownPeer(PeerId peerId) async => true;
+}
+
+class _LargeKnownPeerResolver implements KnownPeerResolver {
+  _LargeKnownPeerResolver()
+      : database = {
+          for (var value = 0; value < 4096; value++)
+            PeerId(List<int>.generate(
+                16, (index) => (value >> ((index % 4) * 8)) & 0xff)),
+        };
+
+  final Set<PeerId> database;
+  int lookups = 0;
+
+  @override
+  Future<bool> isKnownPeer(PeerId peerId) async {
+    lookups++;
+    return database.contains(peerId);
+  }
+}
+
+Future<void> _waitUntil(bool Function() condition,
+    {Duration timeout = const Duration(seconds: 1)}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition() && DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  expect(condition(), isTrue);
+}
+
+class _OutgoingFrameCapture {
+  final Map<String, Map<int, Uint8List>> _fragments = {};
+  final Map<String, Uint8List> _frames = {};
+
+  void add(String endpointId, Uint8List encodedFragment) {
+    final fragment = GattFragment.decode(encodedFragment);
+    final fragments = _fragments.putIfAbsent(endpointId, () => {});
+    fragments[fragment.sequence] = fragment.bytes;
+    if (!fragment.end) return;
+    final bytes = BytesBuilder(copy: false);
+    for (var sequence = 0; fragments.containsKey(sequence); sequence++) {
+      bytes.add(fragments[sequence]!);
+    }
+    _frames[endpointId] = bytes.takeBytes();
+  }
+
+  Future<Uint8List> waitFor(String endpointId) async {
+    for (var i = 0; i < 100 && !_frames.containsKey(endpointId); i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    final frame = _frames[endpointId];
+    if (frame == null) {
+      throw StateError('timed out waiting for frame from $endpointId');
+    }
+    return frame;
+  }
+}
+
+Future<HelloPayload> _helloFromFrame(Uint8List bytes) async {
+  final frame = LpcFrame.decode(bytes);
+  expect(frame.type, FrameType.hello);
+  return HelloPayload.decode(frame.payload);
 }

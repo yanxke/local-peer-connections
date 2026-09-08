@@ -1,7 +1,7 @@
 # Local Peer Connections
 ## Normative Cross-Platform Offline Proximity Networking Specification
 
-**Specification version:** 0.9.12-owner-release-and-lifecycle-clarifications  
+**Specification version:** 0.9.13-diagnostics-and-probe-coordination-clarifications
 **Wire protocol major:** 1  
 **Wire protocol minor:** 0  
 **Working project name:** `local_peer_connections`
@@ -575,6 +575,13 @@ and repeat continuously until connected or stopped.
 ## 10.2 Duplicate Physical Connections
 
 Because both peers advertise and scan, opposite-direction GATT connections may be created simultaneously.
+
+A binding/runtime MUST coalesce duplicate platform readiness callbacks for the
+same current `DiscoveryEndpointId`/physical endpoint so they do not start
+multiple concurrent handshake bindings for that endpoint. This per-endpoint
+coalescing MUST NOT globally suppress automatic probes for unrelated
+discovery endpoints or authenticated PeerIds; known-peer probe concurrency is
+bounded by Section 33.1.2.
 
 After authentication, if two physical links are redundant candidates for the same PeerId pair and the same LPC logical/security session requirement, retain exactly one.
 
@@ -5008,6 +5015,18 @@ Validation is identical to the corresponding `RuntimeConfig` fields. On success:
 
 If the platform requires an internal stop/start of its physical advertisement to refresh the local-name hint, that refresh MUST be treated as a Runtime backend operation and MUST NOT emit a logical `HostSession` stop or `GroupSession` leave.
 
+### Runtime diagnostics
+
+`RuntimeConfig` MAY accept an optional local diagnostic logger:
+
+```text
+logger(message: UTF-8 string)
+```
+
+When configured, the Runtime and its binding-owned transport/protocol components SHOULD emit lifecycle and failure diagnostics, including discovery observations, platform connection identifiers, GATT state changes, handshake phases, probe/reconnect attempts, duplicate-connection decisions, queue/backpressure outcomes, and terminal errors. Logger delivery is advisory: a logger failure MUST NOT change Runtime, connection, or protocol behavior.
+
+Platform transport identifiers such as Bluetooth addresses, platform GUIDs, and `DiscoveryEndpointId` values are non-secret correlation data and MAY appear verbatim in local diagnostic logs and the Diagnostics view. They MUST NOT be used as authenticated or persistent peer identity, sent as wire protocol identity, or persisted as relationship state. Diagnostic logs MUST NOT include private keys, PSKs, authentication secrets, or raw application payload contents; payloads SHOULD be summarized by frame/message type, length, and state.
+
 Ownership:
 
 - Runtime owns every GroupSession, HostSession, DiscoverySession, ConnectionAttempt, and PeerConnection created from it. Runtime also arbitrates logical ownership of reusable PeerConnections among those children and retention policies.
@@ -5244,6 +5263,20 @@ stop()
 
 `currentEndpoints()` returns a snapshot, not a live mutable collection.
 
+Discovery events are:
+
+```text
+EndpointFound { endpoint }
+EndpointUpdated { previous, endpoint }
+EndpointLost { endpoint }
+DiscoveryStopped
+```
+
+Repeated observations for one active endpoint update the current snapshot and
+MUST NOT create a second endpoint record. After `EndpointLost`, the endpoint
+is removed from the current snapshot and no further lifecycle event is
+emitted after `stop()`.
+
 `stop()`:
 
 - releases this DiscoverySession's logical scan demand; the Runtime stops platform scanning only when no other logical owner, including an active GroupSession, requires it;
@@ -5405,6 +5438,7 @@ EndpointFound
 EndpointUpdated
 EndpointLost
 KnownPeerProbeStarted
+KnownPeerProbeFailed
 UnknownPeerIdentified
 KnownPeerConnected
 ConnectionRequested
@@ -5448,6 +5482,11 @@ KnownPeerProbeStarted {
     discoveryEndpointId
 }
 
+KnownPeerProbeFailed {
+    discoveryEndpointId
+    error
+}
+
 UnknownPeerIdentified {
     discoveryEndpointId optional
     peerId
@@ -5456,6 +5495,7 @@ UnknownPeerIdentified {
 }
 
 KnownPeerConnected {
+    discoveryEndpointId optional
     peerId
     sessionId
     securityLevel
@@ -7830,21 +7870,43 @@ expected parser result
 - [x] UT-189 a Bloom/probabilistic positive without exact membership confirmation never produces KnownPeerConnected.
 - [x] UT-190 Configured `discoveryDisplayName` is requested as the BLE local-name hint where the backend supports local-name advertising and is never used as PeerId or known-peer lookup input.
 - [x] UT-191 A pre-authentication local-name hint is exposed only as unauthenticated presentation metadata; absence of a hint does not cause LPC to synthesize a BLE address, GUID, PeerId fragment, `DiscoveryEndpointId`, or random user-visible identifier.
-- [ ] UT-192 RuntimeConfig.applicationMetadata accepts 0..31 bytes and rejects larger values.
-- [ ] UT-193 Automatic known-peer candidate probes place RuntimeConfig.applicationMetadata in local HELLO.
-- [ ] UT-194 HostSession inherits RuntimeConfig.applicationMetadata when HostConfig.applicationMetadata is omitted and overrides it when explicitly supplied.
-- [ ] UT-195 One Runtime may simultaneously operate one advertising HostSession and one DiscoverySession without assigning an application-visible host/client role.
-- [ ] UT-196 `joinOrCreateGroup()` reuses already-active compatible Runtime advertising/listener and scan resources and does not create duplicate GATT service registrations or platform scans.
-- [ ] UT-197 Stopping HostSession advertising while GroupSession still demands advertising leaves the shared physical advertiser/listener active; leaving GroupSession while HostSession still demands it does the converse.
-- [ ] UT-198 Stopping DiscoverySession while GroupSession still demands discovery leaves the shared physical scan active; leaving GroupSession while DiscoverySession still demands it does the converse.
-- [ ] UT-199 A READY TOFU PeerConnection may be simultaneously owned by a direct/HostSession path and an OPEN_TOFU GroupSession without creating a second authenticated connection.
-- [ ] UT-200 Releasing one logical owner does not disconnect a PeerConnection still required by another owner.
-- [ ] UT-201 A TOFU PeerConnection is never silently adopted as satisfying a GROUP_PSK_32/PSK_32 owner.
-- [ ] UT-202 Runtime `updateLocalPresentation()` atomically updates future inherited HELLO application metadata and refreshes active discovery display-name advertising where supported without changing PeerId or disconnecting READY peers.
-- [ ] UT-203 Every binding exposes the semantics of `releasePeerRetention(peerId)`; releasing Runtime-managed direct/known-peer ownership preserves a PeerConnection still owned by GroupSession.
-- [ ] UT-204 `releasePeerRetention(peerId)` invalidates any cached resolver result for that PeerId, is idempotent when no matching Runtime-managed owner exists, and initiates graceful close when its release removes the final logical owner.
-- [ ] UT-205 `HostSession.disconnect(peerId, ...)` and `HostSession.close()` send connection-level CLOSE only for PeerConnections whose HostSession release removes the final logical owner; shared connections survive without transport force-close.
-- [ ] UT-206 When an existing READY/RECONNECTING PeerConnection satisfies the complete requested security profile, compatible ownership reuses that PeerConnection and does not create a duplicate authenticated connection absent another normative requirement for a distinct logical/security session.
+- [x] UT-192 RuntimeConfig.applicationMetadata accepts 0..31 bytes and rejects larger values.
+- [x] UT-193 Automatic known-peer candidate probes place RuntimeConfig.applicationMetadata in local HELLO.
+- [x] UT-194 HostSession inherits RuntimeConfig.applicationMetadata when HostConfig.applicationMetadata is omitted and overrides it when explicitly supplied.
+- [x] UT-195 One Runtime may simultaneously operate one advertising HostSession and one DiscoverySession without assigning an application-visible host/client role.
+- [x] UT-196 `joinOrCreateGroup()` reuses already-active compatible Runtime advertising/listener and scan resources and does not create duplicate GATT service registrations or platform scans.
+- [x] UT-197 Stopping HostSession advertising while GroupSession still demands advertising leaves the shared physical advertiser/listener active; leaving GroupSession while HostSession still demands it does the converse.
+- [x] UT-198 Stopping DiscoverySession while GroupSession still demands discovery leaves the shared physical scan active; leaving GroupSession while DiscoverySession still demands it does the converse.
+- [x] UT-199 A READY TOFU PeerConnection may be simultaneously owned by a direct/HostSession path and an OPEN_TOFU GroupSession without creating a second authenticated connection.
+- [x] UT-200 Releasing one logical owner does not disconnect a PeerConnection still required by another owner.
+- [x] UT-201 A TOFU PeerConnection is never silently adopted as satisfying a GROUP_PSK_32/PSK_32 owner.
+- [x] UT-202 Runtime `updateLocalPresentation()` atomically updates future inherited HELLO application metadata and refreshes active discovery display-name advertising where supported without changing PeerId or disconnecting READY peers.
+- [x] UT-203 Every binding exposes the semantics of `releasePeerRetention(peerId)`; releasing Runtime-managed direct/known-peer ownership preserves a PeerConnection still owned by GroupSession.
+- [x] UT-204 `releasePeerRetention(peerId)` invalidates any cached resolver result for that PeerId, is idempotent when no matching Runtime-managed owner exists, and initiates graceful close when its release removes the final logical owner.
+- [x] UT-205 `HostSession.disconnect(peerId, ...)` and `HostSession.close()` send connection-level CLOSE only for PeerConnections whose HostSession release removes the final logical owner; shared connections survive without transport force-close.
+- [x] UT-206 When an existing READY/RECONNECTING PeerConnection satisfies the complete requested security profile, compatible ownership reuses that PeerConnection and does not create a duplicate authenticated connection absent another normative requirement for a distinct logical/security session.
+- [x] UT-207 Configured diagnostics report discovery, transport, handshake, queue, and terminal states; non-secret platform endpoint identifiers may be included, while payload bytes and key material are omitted.
+- [x] UT-208 DiscoverySession emits one EndpointFound, updates repeated endpoint observations, and emits EndpointLost after the observation timeout.
+- [x] UT-209 DiscoverySession emits no endpoint lifecycle events or retains endpoints after stop().
+- [x] UT-210 Duplicate platform GATT readiness callbacks start only one handshake binding per endpoint.
+- [x] UT-211 A central-side transport loss automatically resumes the existing PeerConnection without creating a second logical peer.
+- [x] UT-212 Automatic known-peer probing enforces concurrent and pending limits, while candidates rejected by the pending limit remain eligible on a later advertisement.
+- [x] UT-213 Repeated observations of one active DiscoveryEndpointId do not start duplicate automatic known-peer probes.
+- [x] UT-214 Exceptions from platform, GATT, handshake, or Runtime diagnostic sinks do not interrupt networking progress.
+- [x] UT-215 Reconnect timeout transitions the logical peer to terminal disconnected state and removes it from HostSession presentation.
+- [x] UT-216 DiscoverySession stop is idempotent under concurrent and repeated calls.
+- [x] UT-217 ConnectionAttempt cancel is idempotent after its first terminal cancellation.
+- [x] UT-218 `ConnectionAttempt.cancel()` after `Connected` is a no-op and does not
+  close or alter the authenticated PeerConnection.
+- [x] UT-219 `HostSession.close()` is idempotent and emits exactly one
+  `HostSessionClosed` event.
+- [x] UT-220 `DiscoverySession.currentEndpoints()` is an immutable point-in-time
+  snapshot and does not change after later observations.
+- [x] UT-221 `PeerConnection.disconnect()` is idempotent and emits one terminal
+  `PeerDisconnected` event.
+- [x] UT-222 `GroupSession.close()` is idempotent and emits one `GroupClosed`
+  event.
+- [x] UT-223 `GroupSession.members()` is an immutable point-in-time snapshot.
 
 # 55. Mandatory Physical Integration Tests
 

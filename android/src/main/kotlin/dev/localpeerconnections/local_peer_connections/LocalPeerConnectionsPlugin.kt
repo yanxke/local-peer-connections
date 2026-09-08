@@ -180,7 +180,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         val previous = lastScanLogMs[result.device.address] ?: 0L
         if (now - previous >= 5000L) {
           lastScanLogMs[result.device.address] = now
-          Log.d(logTag, "scan match address=${result.device.address} name=${result.scanRecord?.deviceName} rssi=${result.rssi}")
+          Log.d(logTag, "scan match endpoint=${result.device.address} name=${result.scanRecord?.deviceName} rssi=${result.rssi}")
         }
         emitSuccess(mapOf("type" to "endpointFound", "endpointId" to result.device.address,
           "localName" to result.scanRecord?.deviceName, "rssi" to result.rssi))

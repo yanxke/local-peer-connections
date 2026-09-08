@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:local_peer_connections/local_peer_connections.dart';
@@ -109,6 +111,43 @@ void main() {
     expect((event as PlatformGattFragment).bytes, [1, 2]);
   });
 
+  test('UT-161 GATT binding ignores terminal events for another endpoint',
+      () async {
+    final events = StreamController<PlatformBleEvent>.broadcast();
+    const methods = MethodChannel('platform-ble-binding-scope-test');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async => null);
+    final backend = PlatformBleBackend(
+      methods: methods,
+      eventStream: events.stream,
+    );
+    final connection = GattBackendConnection(
+      connectionId: 'target',
+      platform: PlatformGattFragmentPlatform(
+        backend: backend,
+        endpointId: 'target',
+        platformSafeWriteSize: 20,
+      ),
+    );
+    final binding = PlatformGattConnectionBinding(
+      backend: backend,
+      endpointId: 'target',
+      connection: connection,
+    );
+
+    events.add(const PlatformGattDisconnected('other'));
+    await Future<void>.delayed(Duration.zero);
+    expect(connection.state, TransportConnectionState.open);
+
+    events.add(const PlatformGattDisconnected('target'));
+    await Future<void>.delayed(Duration.zero);
+    expect(connection.state, TransportConnectionState.failed);
+
+    await binding.close();
+    await connection.close();
+    await events.close();
+  });
+
   test('GATT terminal and writable events remain transport-scoped', () {
     expect(
         PlatformBleEvent.fromPlatform(
@@ -130,10 +169,54 @@ void main() {
             (error) => error.code, 'code', LpcErrorCode.bluetoothPoweredOff)));
   });
 
+  test('diagnostic logger summarizes method calls without payload bytes',
+      () async {
+    const channel = MethodChannel('platform-ble-logger-test');
+    final logs = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async => 'submitted');
+
+    await PlatformBleBackend(methods: channel, logger: logs.add)
+        .submitGattFragment(
+      'opaque-endpoint',
+      Uint8List.fromList([1, 2, 3]),
+      transmission: GattFragmentTransmission.normal,
+    );
+
+    expect(logs, contains(contains('invoke method=submitGattFragment')));
+    expect(logs, contains(contains('endpointId=opaque-endpoint')));
+    expect(logs, contains(contains('bytes(3)')));
+    expect(logs.join('\n'), isNot(contains('[1, 2, 3]')));
+  });
+
+  test('a throwing diagnostic logger cannot break platform operations',
+      () async {
+    const channel = MethodChannel('platform-ble-throwing-logger-test');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async => 'submitted');
+
+    final result = await PlatformBleBackend(
+      methods: channel,
+      logger: (_) => throw StateError('diagnostics unavailable'),
+    ).submitGattFragment(
+      'opaque-endpoint',
+      Uint8List.fromList([9]),
+      transmission: GattFragmentTransmission.normal,
+    );
+
+    expect(result, GattFragmentSubmission.submitted);
+  });
+
   test('discovery endpoint event is explicitly not a protocol PeerId', () {
-    final event = PlatformBleEvent.fromPlatform(
-        {'type': 'endpointFound', 'endpointId': 'native-id', 'rssi': -50});
+    final event = PlatformBleEvent.fromPlatform({
+      'type': 'endpointFound',
+      'endpointId': 'native-id',
+      'rssi': -50,
+      'localName': 'Maple',
+    });
     expect(event, isA<PlatformEndpointFound>());
-    expect((event as PlatformEndpointFound).endpointId, 'native-id');
+    final endpoint = event as PlatformEndpointFound;
+    expect(endpoint.endpointId, 'native-id');
+    expect(endpoint.localName, 'Maple');
   });
 }
