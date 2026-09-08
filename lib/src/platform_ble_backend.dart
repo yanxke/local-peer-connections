@@ -17,7 +17,8 @@ class PlatformBleBackend {
   PlatformBleBackend(
       {MethodChannel? methods,
       EventChannel? events,
-      Stream<PlatformBleEvent>? eventStream})
+      Stream<PlatformBleEvent>? eventStream,
+      this.logger})
       : _methods = methods ?? const MethodChannel(_methodChannelName),
         _events = events ?? const EventChannel(_eventChannelName),
         _eventStream = eventStream;
@@ -29,25 +30,40 @@ class PlatformBleBackend {
   final MethodChannel _methods;
   final EventChannel _events;
   final Stream<PlatformBleEvent>? _eventStream;
-  late final Stream<PlatformBleEvent> _sharedEvents =
-      (_eventStream ??
-              _events.receiveBroadcastStream().map((Object? value) {
-                final map = value is Map ? value : const <Object?, Object?>{};
-                final type = map['type'];
-                final endpoint = map['endpointId'];
-                final key = '$type:$endpoint';
-                final now = DateTime.now();
-                final previous = _lastEventLog[key];
-                if (previous == null ||
-                    now.difference(previous) >= const Duration(seconds: 5) ||
-                    type != 'endpointFound') {
-                  _lastEventLog[key] = now;
-                  debugPrint('[LocalPeerConnections][${now.toIso8601String()}] native event: $value');
-                }
-                return PlatformBleEvent.fromPlatform(value);
-              }))
-          .asBroadcastStream();
+
+  /// Optional diagnostic sink. Raw GATT fragment bytes are summarized and
+  /// never included in log output.
+  final void Function(String message)? logger;
+  late final Stream<PlatformBleEvent> _sharedEvents = (_eventStream ??
+          _events.receiveBroadcastStream().map((Object? value) {
+            final map = value is Map ? value : const <Object?, Object?>{};
+            final type = map['type'];
+            final endpoint = map['endpointId'];
+            final key = '$type:$endpoint';
+            final now = DateTime.now();
+            final previous = _lastEventLog[key];
+            if (previous == null ||
+                now.difference(previous) >= const Duration(seconds: 5) ||
+                type != 'endpointFound') {
+              _lastEventLog[key] = now;
+              _log('native ${_eventSummary(value)}');
+            }
+            return PlatformBleEvent.fromPlatform(value);
+          }))
+      .asBroadcastStream();
   final Map<String, DateTime> _lastEventLog = <String, DateTime>{};
+
+  void _log(String message) {
+    try {
+      if (logger != null) {
+        logger!(message);
+      } else {
+        debugPrint('[LocalPeerConnections] $message');
+      }
+    } on Object {
+      // Diagnostics must never affect the platform event stream.
+    }
+  }
 
   /// A single shared stream is important: EventChannel has one native sink,
   /// while discovery, GATT bindings, and apps may all listen concurrently.
@@ -126,15 +142,51 @@ class PlatformBleBackend {
   }
 
   Future<T> _invoke<T>(String method, [Map<String, Object?>? arguments]) async {
+    _log('invoke method=$method${_argumentsSummary(arguments)}');
     try {
-      return (await _methods.invokeMethod<T>(method, arguments)) as T;
+      final result = (await _methods.invokeMethod<T>(method, arguments)) as T;
+      _log('invoke complete method=$method');
+      return result;
     } on PlatformException catch (error) {
+      _log(
+          'invoke failed method=$method code=${error.code} message=${error.message ?? 'none'}');
       throw LpcException(_errorCodes[error.code] ?? LpcErrorCode.platformError,
           error.message ?? 'native backend failure');
     } on MissingPluginException {
+      _log('invoke failed method=$method code=missing-plugin');
       throw const LpcException(LpcErrorCode.unsupportedCapability);
     }
   }
+}
+
+String _argumentsSummary(Map<String, Object?>? arguments) {
+  if (arguments == null || arguments.isEmpty) return '';
+  final parts = <String>[];
+  for (final entry in arguments.entries) {
+    final value = entry.value;
+    final summary = value is Uint8List
+        ? 'bytes(${value.length})'
+        : value is List<int>
+            ? 'list(${value.length})'
+            : value is List
+                ? 'list(${value.length})'
+                : '$value';
+    parts.add('${entry.key}=$summary');
+  }
+  return ' ${parts.join(' ')}';
+}
+
+String _eventSummary(Object? value) {
+  if (value is! Map) return 'invalid-event';
+  final type = value['type'] ?? 'unknown';
+  final endpoint = value['endpointId'];
+  final role = value['localRole'];
+  final status = value['status'];
+  final bytes = value['bytes'];
+  return 'event=$type${endpoint == null ? '' : ' endpoint=$endpoint'}'
+      '${role == null ? '' : ' role=$role'}'
+      '${status == null ? '' : ' status=$status'}'
+      '${bytes is List ? ' bytes=${bytes.length}' : ''}';
 }
 
 /// Flutter binding of the Section 44 GATT fragment submission boundary.
@@ -234,8 +286,7 @@ sealed class PlatformBleEvent {
       // Android ByteArray payloads may arrive as signed values; normalize
       // them here as a defensive compatibility measure.
       if (bytes.every((byte) => byte is int && byte >= -128 && byte <= 255)) {
-        return PlatformGattFragment(
-            value['endpointId'] as String,
+        return PlatformGattFragment(value['endpointId'] as String,
             bytes.cast<int>().map((byte) => byte & 0xff).toList());
       }
     }

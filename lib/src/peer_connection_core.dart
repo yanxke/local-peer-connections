@@ -753,6 +753,8 @@ class PeerConnectionCore {
   /// Moves an active generation into the protocol reconnect path.  Backend
   /// close/error callbacks are intentionally harmless once reconnecting: an
   /// impossible or stale callback cannot manufacture another transition.
+  void transportLost() => _handleTransportLoss();
+
   void _handleTransportLoss() {
     if (state == PeerConnectionState.ready) {
       _state.requireTransition(PeerConnectionState.reconnecting);

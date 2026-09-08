@@ -204,6 +204,45 @@ void main() {
     expect(closes, 1);
   });
 
+  test('automatic known-peer probes time out and release their endpoint',
+      () async {
+    const methods = MethodChannel('runtime-known-probe-timeout-test');
+    var closes = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'closeGattConnection') closes++;
+      return null;
+    });
+    final events = StreamController<PlatformBleEvent>.broadcast();
+    final runtimeEvents = <RuntimeEvent>[];
+    final runtime = await createRuntime(
+      config: RuntimeConfig(
+        autoConnectKnownPeers: true,
+        knownPeerResolver: _KnownPeerResolver(),
+        reconnectTimeoutMs: 1000,
+      ),
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(
+        methods: methods,
+        eventStream: events.stream,
+      ),
+    );
+    final subscription = runtime.events.listen(runtimeEvents.add);
+    final discovery = await runtime.startDiscovery();
+    events.add(const PlatformEndpointFound('stalled-endpoint', rssi: -40));
+    await Future<void>.delayed(const Duration(milliseconds: 1100));
+
+    final failed = runtimeEvents.whereType<KnownPeerProbeFailed>().single;
+    expect(failed.discoveryEndpointId, 'stalled-endpoint');
+    expect(failed.error.code, LpcErrorCode.connectionTimeout);
+    expect(closes, 1);
+
+    await subscription.cancel();
+    await discovery.stop();
+    await runtime.close();
+    await events.close();
+  });
+
   test('UT-165 HostSession snapshots peers and broadcasts an empty target set',
       () async {
     final runtime = await createRuntime(
@@ -259,4 +298,9 @@ void main() {
         throwsA(isA<LpcException>()));
     await runtime.close();
   });
+}
+
+class _KnownPeerResolver implements KnownPeerResolver {
+  @override
+  Future<bool> isKnownPeer(PeerId peerId) async => true;
 }

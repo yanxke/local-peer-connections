@@ -23,6 +23,7 @@ class HandshakeConnection {
     required this.backend,
     required this.exchange,
     required this.localPeerId,
+    this.logger,
     PeerId? remotePeerId,
     this.onSasRequired,
     this.candidateOnly = false,
@@ -32,6 +33,10 @@ class HandshakeConnection {
   final BackendConnection backend;
   final HandshakeExchange exchange;
   final PeerId localPeerId;
+
+  /// Optional lifecycle diagnostics. Only frame type/size/state is exposed;
+  /// frame payloads and cryptographic material are intentionally omitted.
+  final void Function(String message)? logger;
 
   /// An initiator only has a platform-local discovery endpoint before HELLO.
   /// This optional value is a policy assertion for callers that already know
@@ -61,6 +66,14 @@ class HandshakeConnection {
   bool _sasNotified = false;
   Timer? _sasTimeout;
 
+  void _log(String message) {
+    try {
+      logger?.call(message);
+    } on Object {
+      // Logging must never affect protocol progress.
+    }
+  }
+
   Future<PeerConnectionCore> get ready => _ready.future;
   Future<HandshakeResult> get authenticated => _authenticated.future;
   Future<List<int>> get candidateInitialFrame => _candidateInitialFrame.future;
@@ -81,6 +94,8 @@ class HandshakeConnection {
           LpcErrorCode.invalidState, 'handshake has already started');
     }
     _started = true;
+    _log(
+        'start candidateOnly=$candidateOnly acceptCandidateResume=$acceptCandidateResume');
     _subscription = backend.events.listen((event) {
       if (event is BackendBytesReceived) unawaited(_receive(event.bytes));
       if (event is BackendClosed) {
@@ -91,7 +106,12 @@ class HandshakeConnection {
         onError: (Object error, StackTrace stackTrace) =>
             _fail(error, stackTrace));
     try {
-      await _send(exchange.createHello());
+      // Create the HELLO exactly once so diagnostics describe the frame that
+      // is actually submitted.
+      // ignore: unnecessary_local_variable
+      final hello = exchange.createHello();
+      _log('send ${_frameSummary(hello)}');
+      await _send(hello);
     } catch (error, stackTrace) {
       await _closeWithError(error, stackTrace);
       rethrow;
@@ -115,9 +135,11 @@ class HandshakeConnection {
     if (_ready.isCompleted) return;
     try {
       final frame = LpcFrame.decode(bytes);
+      _log('receive ${_frameSummary(frame)} state=${exchange.state.name}');
       if (!frame.encrypted) {
         final response = await exchange.receivePlaintext(frame);
         if (response != null) {
+          _log('protocol response ${_frameSummary(response)}; closing');
           // Section 16.2.1 requires this response to be sent before close.
           await _send(response);
           await _closeWithError(
@@ -131,6 +153,7 @@ class HandshakeConnection {
                 LpcErrorCode.authenticationFailed, 'unexpected HELLO PeerId');
           }
           await _send(await exchange.createAuth());
+          _log('AUTH submitted remote=${remotePeerId}');
         }
         _notifySasIfRequired();
         await _sendReadyIfAuthenticated();
@@ -146,6 +169,7 @@ class HandshakeConnection {
         await _subscription?.cancel();
         if (!_authenticated.isCompleted)
           _authenticated.complete(exchange.result!);
+        _log('candidate authenticated remote=${remotePeerId}');
         if (!_candidateInitialFrame.isCompleted) {
           _candidateInitialFrame.complete(List<int>.from(bytes));
         }
@@ -167,6 +191,7 @@ class HandshakeConnection {
       return;
     }
     _sasNotified = true;
+    _log('SAS verification required remote=${remotePeerId}');
     _sasTimeout = Timer(const Duration(seconds: 30), () {
       _fail(const LpcException(
           LpcErrorCode.authenticationFailed, 'SAS verification timed out'));
@@ -205,6 +230,7 @@ class HandshakeConnection {
       throw const LpcException(LpcErrorCode.transportClosed);
     }
     _localReadySubmitted = true;
+    _log('READY submitted remote=$remote generation=1');
     await _completeIfReady();
   }
 
@@ -233,6 +259,7 @@ class HandshakeConnection {
         await const FrameProtector().decrypt(frame, await key.extractBytes());
     result.verifyRemoteReady(ReadyPayload.decode(clear.payload));
     _remoteReadyAuthenticated = true;
+    _log('READY authenticated remote=${remotePeerId}');
     await _completeIfReady();
   }
 
@@ -256,6 +283,7 @@ class HandshakeConnection {
             List<int>.generate(4, (_) => Random.secure().nextInt(256))),
         initialNextSequence: 2,
         initialHighestReceivedSequence: 1));
+    _log('handshake complete remote=${remotePeerId}');
   }
 
   Future<void> _send(LpcFrame frame) async {
@@ -269,6 +297,8 @@ class HandshakeConnection {
       backend.write(frame.encode()).completion;
 
   Future<void> _closeWithError(Object error, [StackTrace? stackTrace]) async {
+    final lpcError = error is LpcException ? error : null;
+    _log('failed code=${lpcError?.code.name ?? 'unknown'} detail=$error');
     _sasTimeout?.cancel();
     _sasTimeout = null;
     if (!_ready.isCompleted) _ready.completeError(error, stackTrace);
@@ -286,6 +316,9 @@ class HandshakeConnection {
     unawaited(_closeWithError(error, stackTrace));
   }
 }
+
+String _frameSummary(LpcFrame frame) =>
+    'frame=${frame.type.name} encrypted=${frame.encrypted} generation=${frame.transportGeneration} sequence=${frame.sequenceNumber} bytes=${frame.encode().length}';
 
 int _direction(PeerId sender, PeerId receiver) =>
     _compare(sender.bytes, receiver.bytes) < 0 ? 0 : 1;

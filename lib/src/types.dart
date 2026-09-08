@@ -166,6 +166,7 @@ class RuntimeConfig {
       this.enableLan = true,
       this.autoReconnect = true,
       this.autoConnectKnownPeers = false,
+      this.logger,
       this.knownPeerResolver,
       this.maxConcurrentKnownPeerProbes = 4,
       this.maxPendingKnownPeerProbes = 64,
@@ -187,6 +188,10 @@ class RuntimeConfig {
   final List<int>? psk32;
   final bool enableGatt, enableL2cap, enableLan, autoReconnect;
   final bool autoConnectKnownPeers;
+
+  /// Optional diagnostic sink. Messages contain lifecycle/state information
+  /// only; protocol payloads and private key material are never logged.
+  final void Function(String message)? logger;
   final KnownPeerResolver? knownPeerResolver;
   final int maxConcurrentKnownPeerProbes,
       maxPendingKnownPeerProbes,

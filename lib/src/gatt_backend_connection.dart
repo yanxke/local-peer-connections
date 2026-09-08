@@ -40,6 +40,7 @@ class GattBackendConnection implements RealtimeBackendConnection {
     required this.connectionId,
     required GattFragmentPlatform platform,
     this.localRole,
+    this.logger,
     this.maxQueuedBytes = 262144,
     int Function()? monotonicNowMs,
   })  : _platform = platform,
@@ -52,6 +53,9 @@ class GattBackendConnection implements RealtimeBackendConnection {
   final String connectionId;
   final GattFragmentPlatform _platform;
   final GattLinkRole? localRole;
+
+  /// Optional diagnostic sink. Logs frame/queue state, never fragment bytes.
+  final void Function(String message)? logger;
   final GattFragmenter _fragmenter;
   final int maxQueuedBytes;
   final int Function() _nowMs;
@@ -62,6 +66,14 @@ class GattBackendConnection implements RealtimeBackendConnection {
   TransportConnectionState _state = TransportConnectionState.open;
   int _queuedBytes = 0;
   bool _draining = false;
+
+  void _log(String message) {
+    try {
+      logger?.call(message);
+    } on Object {
+      // Logging must never affect transport behavior.
+    }
+  }
 
   @override
   TransportType get transportType => TransportType.gatt;
@@ -113,6 +125,8 @@ class GattBackendConnection implements RealtimeBackendConnection {
     final pending = _PendingGattWrite(encoded, byteCount, transmission);
     _writes.add(pending);
     _queuedBytes += byteCount;
+    _log(
+        'queued frame bytes=${completeSerializedLpcFrame.length} fragments=${encoded.length} transmission=${transmission.name} queueBytes=$_queuedBytes queueFrames=${_writes.length}');
     unawaited(_drain());
     return pending.write;
   }
@@ -130,8 +144,13 @@ class GattBackendConnection implements RealtimeBackendConnection {
     try {
       final frame =
           _reassembler.add(GattFragment.decode(encoded), nowMs: _nowMs());
-      if (frame != null) _events.add(BackendBytesReceived(frame));
+      if (frame != null) {
+        _log('received complete frame bytes=${frame.length}');
+        _events.add(BackendBytesReceived(frame));
+      }
     } on LpcException catch (error) {
+      _log(
+          'receive fragment failed code=${error.code.name} detail=${error.message}');
       _events.add(BackendError(error));
     }
   }
@@ -145,6 +164,8 @@ class GattBackendConnection implements RealtimeBackendConnection {
   void terminalFailure(
       [LpcException error = const LpcException(LpcErrorCode.transportClosed)]) {
     if (_state != TransportConnectionState.open) return;
+    _log(
+        'terminal failure code=${error.code.name} pendingFrames=${_writes.length} queuedBytes=$_queuedBytes');
     _state = TransportConnectionState.failed;
     while (_writes.isNotEmpty) {
       final pending = _writes.removeFirst();
@@ -173,9 +194,13 @@ class GattBackendConnection implements RealtimeBackendConnection {
             pending.fragments[pending.nextFragment],
             transmission: pending.transmission);
         if (result == GattFragmentSubmission.temporarilyUnavailable) {
+          _log(
+              'fragment temporarily unavailable index=${pending.nextFragment + 1}/${pending.fragments.length} queueFrames=${_writes.length}');
           return;
         }
         if (result == GattFragmentSubmission.terminalFailure) {
+          _log(
+              'fragment terminal failure index=${pending.nextFragment + 1}/${pending.fragments.length}');
           terminalFailure();
           return;
         }
@@ -186,9 +211,12 @@ class GattBackendConnection implements RealtimeBackendConnection {
           // Only this final platform API submission constitutes frame-level
           // SENT_TO_TRANSPORT (Section 44.1).
           pending.write.submittedToPlatform();
+          _log(
+              'frame submitted transmission=${pending.transmission.name} remainingFrames=${_writes.length} queueBytes=$_queuedBytes');
         }
       }
-    } catch (_) {
+    } catch (error) {
+      _log('drain failed error=$error');
       terminalFailure();
     } finally {
       _draining = false;
