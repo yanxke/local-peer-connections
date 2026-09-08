@@ -1,7 +1,7 @@
 # Local Peer Connections
 ## Normative Cross-Platform Offline Proximity Networking Specification
 
-**Specification version:** 0.9.13-diagnostics-and-probe-coordination-clarifications
+**Specification version:** 0.9.14-durable-checkpoint-acknowledgements
 **Wire protocol major:** 1  
 **Wire protocol minor:** 0  
 **Working project name:** `local_peer_connections`
@@ -981,12 +981,17 @@ CoordinatorChanged {
 
 The networking framework can automatically migrate the coordinator role and transport topology, but it cannot infer arbitrary game simulation state.
 
-To make game migration low-friction, `GroupSession` MUST provide an optional replicated coordinator checkpoint facility:
+To make application coordinator-state migration low-friction, `GroupSession` MUST provide an optional replicated coordinator checkpoint facility with application-visible replication acknowledgement:
 
 ```text
-publishCoordinatorCheckpoint(bytes)
+publishCoordinatorCheckpoint(bytes, CheckpointPublishOptions = default)
+    -> CoordinatorCheckpointHandle
+
 latestCoordinatorCheckpoint()
+    -> bytes optional
 ```
+
+The checkpoint bytes are opaque to LPC. This facility is generic application-state replication and MUST NOT interpret game state, document state, workflow state, caches, indexes, or any other application-specific schema.
 
 Constraints:
 
@@ -998,18 +1003,47 @@ replication queue per target: 1 in-flight + 1 replaceable pending
 ```
 
 The publish-rate limit is a rolling one-second acceptance window. If accepting
-`publishCoordinatorCheckpoint(bytes)` would make five accepted publishes in
+`publishCoordinatorCheckpoint(...)` would make five accepted publishes in
 that window, the call MUST fail synchronously with `RESOURCE_EXHAUSTED`.
-The failed value MUST NOT replace `latestCoordinatorCheckpoint` and MUST NOT
-enter any target replication slot.
+The failed value MUST NOT allocate a publicationId, MUST NOT replace
+`latestCoordinatorCheckpoint`, and MUST NOT enter any target replication slot.
 
-The framework retains the most recently published checkpoint and replicates checkpoint state to READY members using the bounded latest-pending policy defined in Section 31.
+Every accepted publication allocates one GroupSession-local `publicationId`
+and returns a `CoordinatorCheckpointHandle`. The handle correlates that one
+application publication with the already-defined independent per-target
+`COORDINATOR_CHECKPOINT` ACK-required operations. `publicationId` is local API
+state only. It is not serialized and is not a replacement for per-target
+`checkpoint_sequence` or pairwise `MessageId`.
 
-Publishing faster than transport throughput MUST NOT create an unbounded checkpoint backlog.
+By default, the handle's required acknowledgement set is an immutable snapshot
+of every other PeerId in the current committed membership at the instant the
+publication is accepted. The application MAY instead request `NONE` or an
+explicit subset of current committed non-local members as defined in Section
+31.11. An explicit required set affects only the publication's durability
+barrier. The checkpoint value continues to follow normal LPC checkpoint
+replication policy and MUST NOT be treated as access-control or confidentiality
+selection.
 
-When a local peer becomes coordinator, `CoordinatorChanged` MUST include the most recent fully received checkpoint, if any.
+`CoordinatorCheckpointHandle` reaches `DURABLE` only when every required peer
+has ACKed the exact publication after complete checkpoint reassembly and local
+checkpoint commit on that peer. Thus a `DURABLE` result is stronger than
+`SENT_TO_TRANSPORT` and stronger than local `latestCoordinatorCheckpoint`
+retention.
 
-Applications that do not require authoritative application-state migration MAY ignore this facility.
+The framework retains the most recently published checkpoint and replicates
+checkpoint state using the bounded latest-pending policy defined in Section 31.
+Publishing faster than transport throughput MUST NOT create an unbounded
+checkpoint backlog.
+
+When a local peer becomes coordinator, `CoordinatorChanged` MUST include the
+most recent fully received checkpoint available locally, if any. This promotion
+value is recovery data. Its presence alone MUST NOT be described as proof that
+the previous coordinator's application-visible durability barrier completed.
+Only the publisher-side `CoordinatorCheckpointHandle` has that aggregate ACK
+knowledge in protocol minor 0.
+
+Applications that do not require coordinator-state migration or a replication
+barrier MAY ignore this facility.
 
 
 # 11. GATT Service Definition
@@ -4329,6 +4363,240 @@ Implementations MAY share immutable buffers between these references, but observ
 
 This rule is REQUIRED even if checkpoint publication occurs faster than transport throughput.
 
+### 31.11.8 Publication Identity and Required Acknowledgement Set
+
+Each accepted `publishCoordinatorCheckpoint(...)` call allocates exactly one:
+
+```text
+publication_id: uint64, GroupSession-local, starts at 1
+```
+
+Allocation is:
+
+```text
+allocated = next_checkpoint_publication_id
+if allocated == UINT64_MAX:
+    checkpoint_publication_id_exhausted = true
+else:
+    next_checkpoint_publication_id += 1
+```
+
+After allocating `UINT64_MAX`, another checkpoint publication MUST fail with
+`RESOURCE_EXHAUSTED` until a new GroupSession is created.
+
+`publication_id`:
+
+- identifies one accepted application publication only within the local GroupSession;
+- MUST NOT be serialized into `COORDINATOR_CHECKPOINT`;
+- MUST NOT be compared between peers;
+- MUST NOT be compared between GroupSession instances;
+- MUST NOT alter `checkpoint_sequence` allocation;
+- MUST NOT alter MessageId allocation.
+
+`CheckpointPublishOptions.acknowledgementRequirement` has exactly these conceptual values:
+
+```text
+NONE
+ALL_COMMITTED_MEMBERS
+EXPLICIT_PEERS(set<PeerId>)
+```
+
+Default:
+
+```text
+ALL_COMMITTED_MEMBERS
+```
+
+The required acknowledgement set is snapshotted atomically when the publication is accepted:
+
+```text
+NONE:
+    required_peer_ids = empty set
+
+ALL_COMMITTED_MEMBERS:
+    required_peer_ids =
+        current committed membership PeerIds
+        excluding local coordinator PeerId
+
+EXPLICIT_PEERS(S):
+    required_peer_ids = S
+```
+
+For `EXPLICIT_PEERS`, every PeerId MUST:
+
+- be in the current committed membership snapshot;
+- not equal the local PeerId;
+- appear at most once.
+
+Otherwise publication fails synchronously with `INVALID_ARGUMENT` and MUST NOT
+allocate `publication_id` or mutate checkpoint replication state.
+
+A later member join MUST NOT enlarge an existing publication's required set.
+A later member leave MUST NOT silently shrink it.
+
+The acknowledgement requirement is a completion condition only. LPC still
+replicates the opaque checkpoint according to normal checkpoint replication
+rules. Applications MUST NOT use `EXPLICIT_PEERS` as a confidentiality or
+access-control mechanism.
+
+### 31.11.9 Per-Peer Publication State
+
+For each required peer, the publisher tracks exactly one application-visible
+state for that publication:
+
+```text
+PENDING
+ACKNOWLEDGED
+SUPERSEDED
+ACK_TIMEOUT
+PEER_LEFT
+SESSION_TERMINATED
+AUTHORITY_LOST
+GROUP_CLOSED
+```
+
+State transitions are monotonic. A terminal state MUST NOT return to `PENDING`.
+
+`ACKNOWLEDGED` is set only when the generic ACK for the exact per-target
+checkpoint logical operation associated with this publication is authenticated
+and accepted by the publisher. A hop submission boundary, checkpoint chunk
+submission, peer READY state, or receipt of an ACK for another checkpoint MUST
+NOT produce `ACKNOWLEDGED`.
+
+A required peer that is temporarily not READY MAY remain `PENDING` while normal
+GroupSession reconnect/membership policy can still restore a route. If this
+publication remains the retained latest checkpoint when the peer becomes READY,
+it MUST be associated with the replication operation scheduled for that peer.
+
+If a newer checkpoint replaces this publication while it is still pending and
+untransmitted for a required peer, that peer's state for the older publication
+becomes `SUPERSEDED` immediately. The older publication can no longer become
+`DURABLE`.
+
+If this publication is already in-flight to a peer, a newer publication MUST
+NOT cancel it. The in-flight operation continues to its ordinary ACK or failure
+terminal result. This preserves Section 31.11.2 semantics.
+
+Final checkpoint ACK timeout maps to `ACK_TIMEOUT` for that required peer.
+Committed removal of a required PeerId before its acknowledgement maps to
+`PEER_LEFT`. Terminal loss of the relevant logical session where no normal
+GroupSession recovery path remains maps to `SESSION_TERMINATED`.
+
+If local coordinator authority is lost before the publication reaches terminal
+`DURABLE`, every still-`PENDING` required-peer result becomes `AUTHORITY_LOST`.
+If the GroupSession closes first, every still-`PENDING` result becomes
+`GROUP_CLOSED`.
+
+### 31.11.10 Publication Completion and Durability Semantics
+
+`CoordinatorCheckpointHandle` has conceptual status:
+
+```text
+PENDING
+DURABLE
+FAILED
+```
+
+A publication with an empty required set becomes `DURABLE` immediately after:
+
+1. the publication is accepted;
+2. the bytes pass checkpoint size validation; and
+3. `latestCoordinatorCheckpoint` is atomically updated locally.
+
+For a non-empty required set:
+
+```text
+DURABLE iff every required peer result == ACKNOWLEDGED
+```
+
+For a non-empty required set, the handle remains `PENDING` until every required
+peer has reached a terminal per-peer result. It then becomes:
+
+```text
+DURABLE  if every required peer == ACKNOWLEDGED
+FAILED   otherwise
+```
+
+Thus a failure on one required peer makes `DURABLE` impossible but does not
+freeze inaccurate per-peer results for other required peers that still have
+in-flight operations. Those operations continue to their own terminal results.
+Non-required best-effort replication does not delay handle completion.
+
+The terminal result is:
+
+```text
+CheckpointPublicationResult {
+    publicationId: uint64
+    coordinatorTerm: uint64
+    requiredPeerIds: immutable set<PeerId>
+    perPeerResults: immutable map<PeerId, CheckpointPeerResult>
+    status: DURABLE | FAILED
+}
+```
+
+The handle's completion future/terminal callback MUST fire exactly once.
+
+A `DURABLE` result means all required peers committed the exact checkpoint bytes
+to their LPC checkpoint storage and the publisher authenticated their ACKs. It
+does NOT mean:
+
+- the bytes are persisted across process termination or device reboot;
+- a storage medium was flushed to disk;
+- every future member has the checkpoint;
+- the application payload is semantically valid beyond LPC's opaque-byte rules;
+- the checkpoint is a distributed consensus decision;
+- a later promoted peer can infer from checkpoint bytes alone whether the old
+  publisher observed aggregate durability completion.
+
+Applications that require a state transition to be recoverable before exposing
+it externally SHOULD wait for `DURABLE` using a required set that includes every
+peer the application is willing to allow as a recovery successor.
+
+### 31.11.11 Membership and Publication Races
+
+Checkpoint publication, committed membership changes, coordinator changes, and
+handle state transitions MUST obey the GroupSession serialization rules in
+Section 52.
+
+Therefore a race is resolved by one total local commit order:
+
+```text
+publication accepted before membership removal:
+    removed peer remains in that publication's fixed required set
+    and removal before ACK produces PEER_LEFT
+
+membership removal committed before publication accepted:
+    removed peer is absent from ALL_COMMITTED_MEMBERS snapshot
+    and cannot appear in EXPLICIT_PEERS
+```
+
+A publication that fails because its fixed required set no longer matches the
+application's desired recovery population MUST NOT silently retarget itself.
+The application must publish a new checkpoint, which allocates a new
+`publication_id` and snapshots a new required set.
+
+### 31.11.12 Handle Retention Bound
+
+Application-visible checkpoint publication tracking MUST remain bounded.
+
+A GroupSession MUST retain full mutable per-publication tracking only for:
+
+```text
+1 current latest publication
++ publications that still own an in-flight per-target checkpoint operation
+```
+
+A terminal handle MAY retain its immutable terminal result while referenced by
+application code, but LPC protocol queues MUST release the handle's mutable
+replication bookkeeping once no in-flight operation still references it.
+
+A superseded publication that was never transmitted to any target MUST release
+all mutable replication bookkeeping immediately after its handle becomes
+terminal.
+
+Implementations MUST NOT retain an unbounded history of publication results
+inside GroupSession merely because the application published many checkpoints.
+
 
 ## 31.12 Group Ready Condition
 
@@ -4590,7 +4858,8 @@ broadcast(bytes, SendOptions) -> BroadcastHandle
 sendRealtime(peerId, channelId, bytes, RealtimeOptions) -> RealtimeSendHandle
 broadcastRealtime(channelId, bytes, RealtimeOptions) -> RealtimeBroadcastHandle
 
-publishCoordinatorCheckpoint(bytes)
+publishCoordinatorCheckpoint(bytes, CheckpointPublishOptions = default)
+    -> CoordinatorCheckpointHandle
 latestCoordinatorCheckpoint() -> bytes optional
 
 events()
@@ -4598,6 +4867,26 @@ leave()
 close()
 ```
 
+Checkpoint API structures:
+
+```text
+CheckpointPublishOptions {
+    acknowledgementRequirement = ALL_COMMITTED_MEMBERS
+}
+
+CoordinatorCheckpointHandle {
+    publicationId() -> uint64
+    coordinatorTerm() -> uint64
+    requiredPeerIds() -> immutable set<PeerId>
+    status() -> PENDING | DURABLE | FAILED
+    perPeerResults() -> immutable map<PeerId, CheckpointPeerResult>
+    completion() -> Future<CheckpointPublicationResult>
+}
+```
+
+Bindings MAY expose the completion primitive as a future, promise, callback,
+stream terminal event, or equivalent idiom, but MUST preserve the exact
+terminal semantics in Section 31.11.
 
 
 ### Method State Validity
@@ -4626,6 +4915,23 @@ send/broadcast accepted first:
 LEAVING commits first:
     new send/broadcast fails INVALID_STATE
 ```
+
+`publishCoordinatorCheckpoint(...)` is accepted only when all of the following are true:
+
+```text
+GroupState == READY
+local peer is the committed coordinator
+GroupConfig.coordinatorCheckpointing == true
+```
+
+Otherwise it fails synchronously with `INVALID_STATE` and MUST NOT allocate a
+publicationId or mutate retained/pending checkpoint state.
+
+`latestCoordinatorCheckpoint()` is a read-only snapshot getter and remains
+valid until CLOSED. It returns the bytes of the most recent checkpoint value
+available to this local GroupSession, if any. On a coordinator this includes
+the latest locally accepted publication. On a member or newly promoted
+coordinator it is the latest fully received checkpoint retained locally.
 
 `members()`, `state()`, coordinator getters, diagnostics, and event subscription remain valid until CLOSED according to their normal snapshot semantics.
 
@@ -4831,11 +5137,27 @@ CoordinatorCheckpointUpdated {
     bytes
 }
 
-CoordinatorCheckpointReplicationFailed {
+CoordinatorCheckpointReplicationAcknowledged {
     header
+    publicationId: uint64
     peerId
     checkpointSequence: uint64
+}
+
+CoordinatorCheckpointReplicationFailed {
+    header
+    publicationId: uint64
+    peerId
+    checkpointSequence: uint64 optional
     errorCode
+}
+
+CoordinatorCheckpointPublicationCompleted {
+    header
+    publicationId: uint64
+    status: DURABLE | FAILED
+    requiredPeerIds: immutable set<PeerId>
+    perPeerResults: immutable map<PeerId, CheckpointPeerResult>
 }
 
 ReliableMessageReceived {
@@ -4910,13 +5232,15 @@ The framework migrates networking coordination automatically.
 
 Application authority can migrate automatically only if the application supplies recoverable state.
 
-For games using an authoritative simulation, the application SHOULD:
+Applications with coordinator-owned recoverable state MAY publish opaque serialized state periodically or at application-defined transaction boundaries:
 
 ```text
-publishCoordinatorCheckpoint(serializedAuthoritativeState)
+handle = publishCoordinatorCheckpoint(serializedCoordinatorState)
 ```
 
-at 1 to 4 Hz.
+Best-effort state migration may ignore `handle.completion()`. Applications that
+must know when a particular state value is replicated to a required recovery
+set use the handle's `DURABLE` / `FAILED` result.
 
 After local promotion, the application receives:
 
@@ -4927,9 +5251,12 @@ CoordinatorChanged(
 )
 ```
 
-The application restores its own authoritative state from that checkpoint.
+The application decides how to interpret or restore that checkpoint. LPC MUST
+NOT interpret application-specific checkpoint bytes.
 
-The framework MUST NOT interpret game-specific checkpoint bytes.
+Examples include authoritative game state, collaborative-document coordinator
+state, local workflow state, replicated indexes, session metadata, or another
+application-defined recovery snapshot.
 
 
 # 33. Low-Level Public API Contract and Ownership
@@ -7907,6 +8234,23 @@ expected parser result
 - [x] UT-222 `GroupSession.close()` is idempotent and emits one `GroupClosed`
   event.
 - [x] UT-223 `GroupSession.members()` is an immutable point-in-time snapshot.
+- [x] UT-224 Accepted checkpoint publication allocates one GroupSession-local publicationId and does not serialize it into COORDINATOR_CHECKPOINT frames.
+- [x] UT-225 Default checkpoint acknowledgement requirement snapshots all current committed non-local members atomically at publication acceptance.
+- [x] UT-226 EXPLICIT_PEERS rejects a non-member, local PeerId, or duplicate before publicationId allocation or checkpoint-state mutation.
+- [x] UT-227 Checkpoint handle reaches DURABLE only after every required peer ACKs the exact publication-associated checkpoint operation.
+- [x] UT-228 ACK for an older/newer checkpoint or another peer cannot satisfy a publication peer result.
+- [x] UT-229 Publication with empty required set becomes DURABLE after valid local retained-latest update without requiring a network ACK.
+- [x] UT-230 Required peer removed after publication acceptance remains in the fixed requirement set and causes PEER_LEFT rather than silently shrinking the barrier.
+- [x] UT-231 Required peer removed before publication acceptance is absent from ALL_COMMITTED_MEMBERS snapshot.
+- [x] UT-232 Pending checkpoint B superseded by C for a required peer gives B SUPERSEDED and prevents B from becoming DURABLE.
+- [x] UT-233 Checkpoint B already in flight is not cancelled by newer C; B may still ACK while C remains pending.
+- [x] UT-234 Final COORDINATOR_CHECKPOINT ACK timeout maps to ACK_TIMEOUT on the associated handle and completes it FAILED when that peer is required.
+- [x] UT-235 Coordinator authority loss maps every nonterminal required peer on old-coordinator publications to AUTHORITY_LOST and never reports DURABLE afterward.
+- [x] UT-236 GroupSession close maps every nonterminal required peer to GROUP_CLOSED and completes the handle once.
+- [x] UT-237 New member joining after publication does not enlarge that publication's required set.
+- [x] UT-238 Terminal checkpoint publication result is immutable and completion fires exactly once under duplicate ACK, timeout, leave, and close races.
+- [x] UT-239 Checkpoint publication mutable bookkeeping remains bounded and superseded never-transmitted publications are released without retaining unbounded history.
+- [x] UT-240 publicationId exhausts after UINT64_MAX and subsequent publication fails RESOURCE_EXHAUSTED until a new GroupSession.
 
 # 55. Mandatory Physical Integration Tests
 
@@ -7947,6 +8291,9 @@ Every mobile release candidate MUST run:
 - [ ] IT-033 Two peers with an existing READY TOFU direct PeerConnection can enter the same OPEN_TOFU GroupSession, exchange both direct and group traffic over correctly routed logical ownership, and retain no redundant physical BLE connection.
 - [ ] IT-034 Leaving the GroupSession in IT-033 leaves the direct PeerConnection usable.
 - [ ] IT-035 `releasePeerRetention(peerId)` plus any applicable `HostSession.disconnect(peerId, ...)` in IT-033 releases all direct/known-peer/HostSession ownership while GroupSession still requires the link; GroupSession remains usable, and after GroupSession later releases the final owner the connection closes normally.
+- [ ] IT-036 Three-peer checkpoint publication with ALL_COMMITTED_MEMBERS reaches DURABLE only after both remote peers fully reassemble, commit, and ACK the exact publication; dropping one ACK forces retry and does not produce false durability.
+- [ ] IT-037 During a three-peer checkpoint barrier, one required peer disconnects and resumes within timeout; the same publication may still reach DURABLE after its exact checkpoint operation is ACKed following RESUME.
+- [ ] IT-038 During a three-peer checkpoint barrier, one required peer is terminally removed before ACK; the original publication completes FAILED/PEER_LEFT and a new publication against the new membership can reach DURABLE.
 
 ## Automatic Coordinator Tests
 
@@ -7999,6 +8346,11 @@ Every mobile release candidate MUST run:
 - [x] COORD-047 Same-term membership snapshot B accepted after A MUST prevent later A retransmission from replacing B after RESUME.
 - [x] COORD-048 A ACKed, B partially transmitted, transport loss, RESUME, and B retransmission converges to B without stale rollback to A.
 - [x] COORD-049 A ACKed, B fully transmitted but ACK lost, transport loss, RESUME, duplicate B remains committed exactly once.
+- [x] COORD-071 Checkpoint durability handle correlates one publication across independently allocated per-peer MessageIds and checkpoint_sequence values.
+- [x] COORD-072 A required-peer ACK for publication P is reported as CoordinatorCheckpointReplicationAcknowledged with P's local publicationId.
+- [x] COORD-073 Authority loss before a publication becomes DURABLE terminates that old-authority handle with AUTHORITY_LOST even if some peers already ACKed.
+- [x] COORD-074 A publication that reached DURABLE before authority loss guarantees every peer in its fixed required set had committed the exact checkpoint bytes before migration began.
+- [x] COORD-075 CoordinatorChanged.latestCheckpoint remains the newest locally available recovery checkpoint and is not falsely labeled proof that the previous publisher observed aggregate durability completion.
 - [x] COORD-050 B accepted remotely but ACK lost; post-RESUME retransmission of B is ACKed again without duplicate membership mutation.
 - [x] COORD-051 Transport loss during retransmission of newer same-term snapshot B cannot allow older snapshot A to overwrite B.
 - [x] COORD-052 Coordinator C remains at term T. Under SessionId S1, receiver accepts snapshot counter 100. S1 expires and cannot RESUME. Under new SessionId S2, receiver accepts current snapshot counter 1 as the new ordering baseline and MUST NOT compare it against S1 counter 100.
@@ -8110,7 +8462,7 @@ MUST deliver:
 - automatic coordinator migration;
 - deterministic group merging;
 - replicated membership snapshots;
-- optional coordinator checkpoints;
+- optional coordinator checkpoints with application-visible per-publication durability acknowledgement;
 - RELIABLE_ORDERED;
 - RELIABLE_ACKED;
 - REALTIME_LATEST;
@@ -8329,6 +8681,8 @@ For protocol major 1, the following are fixed and MUST match across implementati
 - GROUP_LEAVE semantics and committed membership removal rules;
 - generic ACK_REQUIRED flag and ACK/retry/dedup/RESUME behavior for critical control frames;
 - coordinator checkpoint chunking with a 4000-byte checkpoint-data maximum per control frame and one MessageId per per-target logical checkpoint operation;
+- GroupSession-local coordinator-checkpoint publicationId allocation and fixed acknowledgement-set snapshot semantics;
+- CoordinatorCheckpointHandle per-peer ACK correlation, DURABLE/FAILED aggregation, supersession, membership-race, authority-loss, and bounded-retention semantics;
 - MessageId `next_message_counter` initialization, allocation, and exhaustion behavior;
 - exact frame-specific final ACK-timeout recovery and per-peer GroupSyncState;
 - exact ACK timer start semantics based on final frame/chunk reaching SENT_TO_TRANSPORT;

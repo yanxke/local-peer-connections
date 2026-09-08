@@ -3,6 +3,8 @@ import 'dart:collection';
 import 'dart:math';
 import 'dart:typed_data';
 import 'types.dart';
+import 'protocol/checkpoint.dart';
+import 'protocol/checkpoint_publication.dart';
 import 'protocol/group_dedup.dart';
 import 'protocol/group_message_id.dart';
 import 'protocol/group_realtime.dart';
@@ -27,6 +29,23 @@ abstract interface class GroupRouteTransport {
   /// Cancels local routing ownership.  Protocol 1.0 has no remote revocation
   /// frame; already submitted traffic may still arrive (Section 43.1.9).
   void cancelReliable(GroupMessageId groupMessageId);
+}
+
+/// Optional extension implemented by transports that carry coordinator
+/// checkpoint replication. Keeping this separate preserves compatibility for
+/// existing GroupRouteTransport implementations.
+abstract interface class CheckpointGroupRouteTransport
+    implements GroupRouteTransport {
+  void checkpointPublicationAccepted(
+      CoordinatorCheckpointHandle handle, List<int> bytes, int coordinatorTerm);
+
+  void checkpointPeerReady(PeerId peerId);
+
+  void checkpointPeerLeft(PeerId peerId);
+
+  void checkpointAuthorityLost();
+
+  void checkpointGroupClosed();
 }
 
 sealed class GroupEvent {
@@ -62,6 +81,49 @@ class CoordinatorChanged extends GroupEvent {
   final PeerId current;
   final bool localIsCoordinator;
   final Uint8List? latestCoordinatorCheckpoint;
+}
+
+class CoordinatorCheckpointUpdated extends GroupEvent {
+  CoordinatorCheckpointUpdated(super.sequence, super.at, this.coordinatorPeerId,
+      this.checkpointSequence, List<int> bytes)
+      : bytes = Uint8List.fromList(bytes);
+  final PeerId coordinatorPeerId;
+  final int checkpointSequence;
+  final Uint8List bytes;
+}
+
+class CoordinatorCheckpointReplicationAcknowledged extends GroupEvent {
+  const CoordinatorCheckpointReplicationAcknowledged(super.sequence, super.at,
+      this.publicationId, this.peerId, this.checkpointSequence);
+  final int publicationId;
+  final PeerId peerId;
+  final int checkpointSequence;
+}
+
+class CoordinatorCheckpointReplicationFailed extends GroupEvent {
+  const CoordinatorCheckpointReplicationFailed(
+      super.sequence, super.at, this.publicationId, this.peerId, this.errorCode,
+      [this.checkpointSequence]);
+  final int publicationId;
+  final PeerId peerId;
+  final int? checkpointSequence;
+  final LpcErrorCode errorCode;
+}
+
+class CoordinatorCheckpointPublicationCompleted extends GroupEvent {
+  CoordinatorCheckpointPublicationCompleted(
+      super.sequence,
+      super.at,
+      this.publicationId,
+      this.status,
+      Set<PeerId> requiredPeerIds,
+      Map<PeerId, CheckpointPeerResult> perPeerResults)
+      : requiredPeerIds = Set.unmodifiable(requiredPeerIds),
+        perPeerResults = Map.unmodifiable(perPeerResults);
+  final int publicationId;
+  final CheckpointPublicationStatus status;
+  final Set<PeerId> requiredPeerIds;
+  final Map<PeerId, CheckpointPeerResult> perPeerResults;
 }
 
 class ReliableMessageReceived extends GroupEvent {
@@ -245,12 +307,18 @@ class RealtimeBroadcastHandle {
 /// Serialized, in-memory GroupSession core. Platform discovery/backends feed this
 /// object with committed membership and authenticated routed envelopes.
 class GroupSession {
+  // Dart's native int is signed on the supported VM targets. LPC wire
+  // counters are uint64, so this is the largest safely representable
+  // positive counter value for the public integer API.
+  static const _maxCheckpointPublicationId = 0x7fffffffffffffff;
   GroupSession.internal(this._config, this._localPeerId, GroupId groupId,
       {void Function(GroupSession)? onClosed,
-      void Function(GroupSession, Set<PeerId>)? onMembershipCommitted})
+      void Function(GroupSession, Set<PeerId>)? onMembershipCommitted,
+      int nextCheckpointPublicationId = 1})
       : _groupId = groupId,
         _onClosed = onClosed,
-        _onMembershipCommitted = onMembershipCommitted {
+        _onMembershipCommitted = onMembershipCommitted,
+        _nextCheckpointPublicationId = nextCheckpointPublicationId {
     _members[_localPeerId] = GroupMember(_localPeerId, _config.maxPeers);
     _transition(GroupState.discovering);
     _transition(GroupState.forming);
@@ -279,6 +347,11 @@ class GroupSession {
   final Queue<_Command> _commands = Queue<_Command>();
   final Queue<int> _checkpointPublishTimes = Queue<int>();
   Uint8List? _latestCoordinatorCheckpoint;
+  CoordinatorCheckpointHandle? _latestCheckpointPublication;
+  final Map<CoordinatorCheckpointHandle, Set<PeerId>> _checkpointInFlightPeers =
+      {};
+  int _nextCheckpointPublicationId;
+  bool _checkpointPublicationIdsExhausted = false;
   GroupState _state = GroupState.starting;
   PeerId? _coordinator;
   int _coordinatorTerm = 0;
@@ -355,6 +428,10 @@ class GroupSession {
     _running = false;
   }
 
+  CheckpointGroupRouteTransport? _checkpointTransport(
+          GroupRouteTransport? transport) =>
+      transport is CheckpointGroupRouteTransport ? transport : null;
+
   /// Runtime integration hook.  Binding is intentionally one-way for a
   /// GroupSession lifetime; replacing an active routing owner could cause an
   /// already-admitted operation to bypass coordinator authority.
@@ -367,6 +444,12 @@ class GroupSession {
       throw const LpcException(LpcErrorCode.invalidState);
     }
     _routeTransport = transport;
+    final publication = _latestCheckpointPublication;
+    final bytes = _latestCoordinatorCheckpoint;
+    if (publication != null && bytes != null) {
+      _checkpointTransport(transport)?.checkpointPublicationAccepted(
+          publication, bytes, publication.coordinatorTerm);
+    }
   }
 
   /// Whether Runtime (or an embedding integration) owns live route delivery
@@ -470,6 +553,8 @@ class GroupSession {
       });
   void leave() => _enqueue(() {
         if (_state == GroupState.closed || _state == GroupState.leaving) return;
+        _failPendingCheckpointPublications(CheckpointPeerResult.groupClosed);
+        _checkpointTransport(_routeTransport)?.checkpointGroupClosed();
         _transition(GroupState.leaving);
         _transition(GroupState.closed);
         _emit((s, a) => GroupClosed(s, a));
@@ -481,10 +566,18 @@ class GroupSession {
   /// Retains the newest coordinator application checkpoint. The transport
   /// owner replicates this immutable value through its bounded per-target
   /// checkpoint queues after this serialized admission succeeds.
-  void publishCoordinatorCheckpoint(List<int> bytes) {
-    if (bytes.length > 262144) {
+  CoordinatorCheckpointHandle publishCoordinatorCheckpoint(List<int> bytes,
+      {CheckpointPublishOptions? options}) {
+    final selected = options ?? CheckpointPublishOptions();
+    if (_state != GroupState.ready ||
+        !isCoordinator ||
+        !_config.coordinatorCheckpointing) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    if (bytes.length > maxCoordinatorCheckpointBytes) {
       throw const LpcException(LpcErrorCode.messageTooLarge);
     }
+    final required = _requiredCheckpointPeers(selected);
     final now = _now();
     while (_checkpointPublishTimes.isNotEmpty &&
         now - _checkpointPublishTimes.first >= 1000) {
@@ -493,18 +586,198 @@ class GroupSession {
     if (_checkpointPublishTimes.length >= 4) {
       throw const LpcException(LpcErrorCode.resourceExhausted);
     }
+    if (_checkpointPublicationIdsExhausted ||
+        _nextCheckpointPublicationId > _maxCheckpointPublicationId) {
+      throw const LpcException(LpcErrorCode.resourceExhausted);
+    }
+    final old = _latestCheckpointPublication;
+    if (old != null && !old.isTerminal) {
+      final inFlight = _checkpointInFlightPeers[old] ?? const <PeerId>{};
+      for (final peerId in old.requiredPeerIds) {
+        if (!inFlight.contains(peerId)) {
+          old.setPeerResult(peerId, CheckpointPeerResult.superseded);
+        }
+      }
+      if (inFlight.isEmpty) _checkpointInFlightPeers.remove(old);
+    }
+    final publicationId = _nextCheckpointPublicationId++;
+    if (publicationId == _maxCheckpointPublicationId) {
+      _checkpointPublicationIdsExhausted = true;
+    }
     _checkpointPublishTimes.addLast(now);
     _latestCoordinatorCheckpoint = Uint8List.fromList(bytes);
+    final publication = CoordinatorCheckpointHandle.internal(
+        publicationId: publicationId,
+        coordinatorTerm: _coordinatorTerm,
+        requiredPeerIds: required,
+        onCompleted: (result) => _emitCheckpointPublicationCompleted(result));
+    _latestCheckpointPublication = publication;
+    if (required.isEmpty) publication.completeImmediately();
+    _checkpointTransport(_routeTransport)?.checkpointPublicationAccepted(
+        publication, _latestCoordinatorCheckpoint!, _coordinatorTerm);
+    return publication;
+  }
+
+  Set<PeerId> _requiredCheckpointPeers(CheckpointPublishOptions options) {
+    final members =
+        _members.keys.where((peerId) => peerId != _localPeerId).toSet();
+    switch (options.acknowledgementRequirement) {
+      case CheckpointAcknowledgementRequirement.none:
+        return const <PeerId>{};
+      case CheckpointAcknowledgementRequirement.allCommittedMembers:
+        return Set.unmodifiable(members);
+      case CheckpointAcknowledgementRequirement.explicitPeers:
+        if (options.hasDuplicateExplicitPeerIds ||
+            options.explicitPeerIds.any((peerId) =>
+                peerId == _localPeerId || !members.contains(peerId))) {
+          throw const LpcException(LpcErrorCode.invalidArgument,
+              'explicit checkpoint peer is not a committed non-local member');
+        }
+        return Set.unmodifiable(options.explicitPeerIds);
+    }
+  }
+
+  void checkpointOperationStarted(
+      CoordinatorCheckpointHandle publication, PeerId peerId) {
+    if (publication.isTerminal || !publication.requiredPeerIds.contains(peerId))
+      return;
+    _checkpointInFlightPeers
+        .putIfAbsent(publication, () => <PeerId>{})
+        .add(peerId);
+  }
+
+  void checkpointOperationFinished(CoordinatorCheckpointHandle publication,
+      PeerId peerId, CheckpointPeerResult result,
+      {int? checkpointSequence}) {
+    _checkpointInFlightPeers[publication]?.remove(peerId);
+    final changed = publication.setPeerResult(peerId, result);
+    if (!changed) return;
+    if (result == CheckpointPeerResult.acknowledged) {
+      if (checkpointSequence != null) {
+        _emit((s, a) => CoordinatorCheckpointReplicationAcknowledged(
+            s, a, publication.publicationId, peerId, checkpointSequence));
+      }
+    } else {
+      _emit((s, a) => CoordinatorCheckpointReplicationFailed(
+          s,
+          a,
+          publication.publicationId,
+          peerId,
+          _checkpointErrorCode(result),
+          checkpointSequence));
+    }
+    if (_checkpointInFlightPeers[publication]?.isEmpty ?? false) {
+      _checkpointInFlightPeers.remove(publication);
+    }
+  }
+
+  void _emitCheckpointPublicationCompleted(CheckpointPublicationResult result) {
+    if (_state == GroupState.closed) return;
+    _emit((s, a) => CoordinatorCheckpointPublicationCompleted(
+        s,
+        a,
+        result.publicationId,
+        result.status,
+        result.requiredPeerIds,
+        result.perPeerResults));
+  }
+
+  LpcErrorCode _checkpointErrorCode(CheckpointPeerResult result) {
+    switch (result) {
+      case CheckpointPeerResult.ackTimeout:
+        return LpcErrorCode.ackTimeout;
+      case CheckpointPeerResult.peerLeft:
+        return LpcErrorCode.destinationNotInGroup;
+      case CheckpointPeerResult.sessionTerminated:
+        return LpcErrorCode.transportClosed;
+      case CheckpointPeerResult.authorityLost:
+      case CheckpointPeerResult.groupClosed:
+      case CheckpointPeerResult.superseded:
+        return LpcErrorCode.invalidState;
+      case CheckpointPeerResult.pending:
+      case CheckpointPeerResult.acknowledged:
+        return LpcErrorCode.invalidState;
+    }
+  }
+
+  ({CoordinatorCheckpointHandle publication, Uint8List bytes})?
+      latestCheckpointForReplication() {
+    final publication = _latestCheckpointPublication;
+    final bytes = _latestCoordinatorCheckpoint;
+    if (publication == null || bytes == null) {
+      return null;
+    }
+    return (publication: publication, bytes: Uint8List.fromList(bytes));
+  }
+
+  void checkpointPeerLeft(PeerId peerId) {
+    final publications = <CoordinatorCheckpointHandle>{
+      if (_latestCheckpointPublication != null) _latestCheckpointPublication!,
+      ..._checkpointInFlightPeers.keys,
+    };
+    for (final publication in publications) {
+      if (publication.setPeerResult(peerId, CheckpointPeerResult.peerLeft)) {
+        _emitCheckpointReplicationFailed(
+            publication, peerId, CheckpointPeerResult.peerLeft);
+      }
+      _checkpointInFlightPeers[publication]?.remove(peerId);
+      if (_checkpointInFlightPeers[publication]?.isEmpty ?? false) {
+        _checkpointInFlightPeers.remove(publication);
+      }
+    }
+    _checkpointTransport(_routeTransport)?.checkpointPeerLeft(peerId);
+  }
+
+  void checkpointAuthorityLost() {
+    final publications = <CoordinatorCheckpointHandle>{
+      if (_latestCheckpointPublication != null) _latestCheckpointPublication!,
+      ..._checkpointInFlightPeers.keys,
+    };
+    for (final publication in publications) {
+      _failPending(publication, CheckpointPeerResult.authorityLost);
+    }
+    _checkpointInFlightPeers.clear();
+  }
+
+  void _failPendingCheckpointPublications(CheckpointPeerResult result) {
+    final publications = <CoordinatorCheckpointHandle>{
+      if (_latestCheckpointPublication != null) _latestCheckpointPublication!,
+      ..._checkpointInFlightPeers.keys,
+    };
+    for (final publication in publications) {
+      _failPending(publication, result);
+    }
+    _checkpointInFlightPeers.clear();
+  }
+
+  void _failPending(
+      CoordinatorCheckpointHandle publication, CheckpointPeerResult result) {
+    for (final peerId in publication.requiredPeerIds) {
+      if (publication.setPeerResult(peerId, result)) {
+        _emitCheckpointReplicationFailed(publication, peerId, result);
+      }
+    }
+  }
+
+  void _emitCheckpointReplicationFailed(CoordinatorCheckpointHandle publication,
+      PeerId peerId, CheckpointPeerResult result) {
+    _emit((s, a) => CoordinatorCheckpointReplicationFailed(
+        s, a, publication.publicationId, peerId, _checkpointErrorCode(result)));
   }
 
   /// Backend/core hook after a newer complete authenticated checkpoint has
   /// committed. The receiver's term/sequence validation happens before this
   /// GroupSession ownership boundary.
-  void commitCoordinatorCheckpoint(List<int> bytes) {
+  void commitCoordinatorCheckpoint(List<int> bytes,
+      {PeerId? coordinator, int? checkpointSequence}) {
     if (bytes.length > 262144) {
       throw const LpcException(LpcErrorCode.messageTooLarge);
     }
     _latestCoordinatorCheckpoint = Uint8List.fromList(bytes);
+    if (coordinator != null && checkpointSequence != null) {
+      _emit((s, a) => CoordinatorCheckpointUpdated(
+          s, a, coordinator, checkpointSequence, bytes));
+    }
   }
 
   /// Backend/core hook for a committed nonterminal group error. The event is
@@ -546,14 +819,20 @@ class GroupSession {
         for (final id
             in _members.keys.where((id) => !next.containsKey(id)).toList()) {
           _members.remove(id);
+          checkpointPeerLeft(id);
           _emit((s, a) => MemberLeft(s, a, id));
         }
         final previous = _coordinator;
         _coordinator = coordinator;
         _coordinatorTerm = coordinatorTerm;
-        if (previous != coordinator)
+        if (previous != coordinator) {
+          if (previous == _localPeerId && coordinator != _localPeerId) {
+            checkpointAuthorityLost();
+            _checkpointTransport(_routeTransport)?.checkpointAuthorityLost();
+          }
           _emit((s, a) => CoordinatorChanged(s, a, previous, coordinator,
               isCoordinator, _latestCoordinatorCheckpoint));
+        }
         _onMembershipCommitted?.call(this, Set.unmodifiable(next.keys));
       });
 
@@ -591,6 +870,7 @@ class GroupSession {
         for (final id
             in _members.keys.where((id) => !next.containsKey(id)).toList()) {
           _members.remove(id);
+          checkpointPeerLeft(id);
           _emit((s, a) => MemberLeft(s, a, id));
         }
         for (final entry in next.entries) {
@@ -609,6 +889,10 @@ class GroupSession {
           _transition(GroupState.ready);
         }
         if (previous != coordinator) {
+          if (previous == _localPeerId && coordinator != _localPeerId) {
+            checkpointAuthorityLost();
+            _checkpointTransport(_routeTransport)?.checkpointAuthorityLost();
+          }
           _emit((s, a) => CoordinatorChanged(s, a, previous, coordinator,
               isCoordinator, _latestCoordinatorCheckpoint));
         }

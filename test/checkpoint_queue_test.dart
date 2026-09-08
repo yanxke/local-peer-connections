@@ -32,12 +32,13 @@ void main() {
   test('UT-093/094/095 promote only the latest pending checkpoint without gap',
       () {
     final queue = CheckpointReplicationQueue();
-    expect(queue.publish([1])!.sequence, 1);
-    queue.publish([2]);
-    queue.publish([3]); // Replaces [2] before it owns a sequence.
+    expect(queue.publish([1], publicationId: 10)!.sequence, 1);
+    queue.publish([2], publicationId: 11);
+    queue.publish([3], publicationId: 12); // Replaces [2] before promotion.
     final promoted = queue.completeInFlight()!;
     expect(promoted.bytes, [3]);
     expect(promoted.sequence, 2);
+    expect(promoted.publicationId, 12);
   });
 
   test('UT-096/COORD-045 reconnected peer receives only retained latest', () {

@@ -15,6 +15,10 @@ import 'protocol/application_payload.dart';
 import 'protocol/ack.dart';
 import 'protocol/auth.dart';
 import 'protocol/control_payload.dart';
+import 'protocol/checkpoint.dart';
+import 'protocol/checkpoint_publication.dart';
+import 'protocol/checkpoint_queue.dart';
+import 'protocol/checkpoint_receiver.dart';
 import 'protocol/frame.dart';
 import 'protocol/handshake_connection.dart';
 import 'protocol/handshake_exchange.dart';
@@ -1423,8 +1427,6 @@ class NearbyRuntime {
         .retransmitReliableDataAfterResume(nowMs: peer._core.monotonicNowMs);
     await peer._core.retransmitAckRequiredFramesAfterResume(
         nowMs: peer._core.monotonicNowMs);
-    await peer._core.retransmitAckRequiredCheckpointsAfterResume(
-        nowMs: peer._core.monotonicNowMs);
     _gattLinks[peer] =
         _GattLink(event.endpointId, event.localRole == 'central');
     if (previousEndpoint != null && previousEndpoint != event.endpointId) {
@@ -1627,8 +1629,6 @@ class NearbyRuntime {
       await peer._core
           .retransmitReliableDataAfterResume(nowMs: peer._core.monotonicNowMs);
       await peer._core.retransmitAckRequiredFramesAfterResume(
-          nowMs: peer._core.monotonicNowMs);
-      await peer._core.retransmitAckRequiredCheckpointsAfterResume(
           nowMs: peer._core.monotonicNowMs);
       _gattLinks[peer] =
           _GattLink(event.endpointId, event.localRole == 'central');
@@ -2140,7 +2140,8 @@ class NearbyRuntime {
 /// bytes enter and leave through authenticated [PeerConnection] instances.
 /// The coordinator-star decision is made from committed GroupSession state;
 /// a `send(destination, ...)` never opens a destination shortcut link.
-class _RuntimeGroupRouteTransport implements GroupRouteTransport {
+class _RuntimeGroupRouteTransport
+    implements GroupRouteTransport, CheckpointGroupRouteTransport {
   _RuntimeGroupRouteTransport({
     required this.group,
     required this.peers,
@@ -2166,6 +2167,7 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
   final Map<PeerConnection, StreamSubscription<PeerConnectionEvent>>
       _peerEventSubscriptions = {};
   final Map<PeerConnection, GroupReliableReassembler> _reassemblers = {};
+  final Map<PeerConnection, CheckpointReceiver> _checkpointReceivers = {};
   final MembershipSnapshotOrderTable _membershipOrdering =
       MembershipSnapshotOrderTable();
   final Map<PeerConnection, GroupInfoPayload> _remoteGroupInfo = {};
@@ -2174,6 +2176,9 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
       committedTerm: group.coordinatorTerm,
       committedMembers: group.members);
   final Map<String, _LiveGroupHop> _ackHops = {};
+  final Map<String, _LiveCheckpointHop> _checkpointHops = {};
+  final Map<PeerId, CheckpointReplicationQueue> _checkpointQueues = {};
+  final Map<int, _CheckpointPublicationData> _checkpointPublications = {};
   final Map<GroupMessageId, SendHandleController> _sourceHandles = {};
   GroupMemberRouter? _memberRouter;
   GroupCoordinatorRouter? _coordinatorRouter;
@@ -2186,6 +2191,7 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
     if (_disposed || _frameSubscriptions.containsKey(peer)) return;
     _reassemblers[peer] = GroupReliableReassembler(
         maxIncompleteMessages: 64, maxIncompleteBytes: 1048576);
+    _checkpointReceivers[peer] = CheckpointReceiver();
     _frameSubscriptions[peer] = peer.groupFrames.listen(
         (frame) => unawaited(_receiveFrame(peer, frame)),
         onError: (_) => _onPeerLost(peer));
@@ -2201,6 +2207,7 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
       }
     });
     unawaited(_sendGroupInfo(peer));
+    checkpointPeerReady(peer.peerId);
     if (!group.isCoordinator && peer.peerId == group.coordinatorPeerId) {
       unawaited(_rerouteMemberOperations());
     }
@@ -2242,6 +2249,167 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
       entry.value.peer._core.ackRetention.cancel(entry.value.messageId);
       _ackHops.remove(entry.key);
     }
+  }
+
+  @override
+  void checkpointPublicationAccepted(CoordinatorCheckpointHandle handle,
+      List<int> bytes, int coordinatorTerm) {
+    if (_disposed ||
+        !group.isCoordinator ||
+        !group.config.coordinatorCheckpointing) {
+      return;
+    }
+    final value = _CheckpointPublicationData(
+        handle, Uint8List.fromList(bytes), coordinatorTerm);
+    _checkpointPublications[handle.publicationId] = value;
+    for (final peerId in group.members
+        .map((member) => member.peerId)
+        .where((peerId) => peerId != group.localPeerId)) {
+      final peer = _readyPeer(peerId);
+      if (peer != null) _offerCheckpoint(peer, value);
+    }
+    _pruneCheckpointPublications();
+  }
+
+  @override
+  void checkpointPeerReady(PeerId peerId) {
+    if (_disposed ||
+        !group.isCoordinator ||
+        !group.config.coordinatorCheckpointing ||
+        !group.members.any((member) => member.peerId == peerId)) {
+      return;
+    }
+    final latest = group.latestCheckpointForReplication();
+    if (latest == null) return;
+    final value = _CheckpointPublicationData(
+        latest.publication, latest.bytes, latest.publication.coordinatorTerm);
+    _checkpointPublications[latest.publication.publicationId] = value;
+    final peer = _readyPeer(peerId);
+    if (peer != null && peer.peerId != group.localPeerId) {
+      _offerCheckpoint(peer, value);
+    }
+  }
+
+  @override
+  void checkpointPeerLeft(PeerId peerId) {
+    final queue = _checkpointQueues.remove(peerId);
+    if (queue?.inFlight != null) {
+      final operation = queue!.inFlight!;
+      final value = _checkpointPublications[operation.publicationId];
+      if (value != null) {
+        group.checkpointOperationFinished(
+            value.handle, peerId, CheckpointPeerResult.peerLeft,
+            checkpointSequence: operation.sequence);
+      }
+    }
+    for (final entry in _checkpointHops.entries.toList()) {
+      if (entry.value.peer.peerId != peerId) continue;
+      entry.value.peer._core.ackRetention.cancel(entry.value.messageId);
+      _checkpointHops.remove(entry.key);
+    }
+    _pruneCheckpointPublications();
+  }
+
+  @override
+  void checkpointAuthorityLost() {
+    for (final entry in _checkpointHops.entries.toList()) {
+      entry.value.peer._core.ackRetention.cancel(entry.value.messageId);
+      _checkpointHops.remove(entry.key);
+    }
+    _checkpointQueues.clear();
+    _checkpointPublications.clear();
+  }
+
+  @override
+  void checkpointGroupClosed() {
+    for (final entry in _checkpointHops.entries.toList()) {
+      entry.value.peer._core.ackRetention.cancel(entry.value.messageId);
+      _checkpointHops.remove(entry.key);
+    }
+    _checkpointQueues.clear();
+    _checkpointPublications.clear();
+  }
+
+  void _offerCheckpoint(
+      PeerConnection peer, _CheckpointPublicationData publication) {
+    if (_disposed || peer.state != PeerConnectionState.ready) return;
+    final queue = _checkpointQueues.putIfAbsent(
+        peer.peerId, CheckpointReplicationQueue.new);
+    final operation = queue.publish(publication.bytes,
+        publicationId: publication.handle.publicationId);
+    if (operation != null) {
+      _sendCheckpoint(peer, operation, publication);
+    }
+  }
+
+  void _sendCheckpoint(
+      PeerConnection peer,
+      CheckpointReplicationOperation operation,
+      _CheckpointPublicationData value) {
+    if (_disposed || peer.state != PeerConnectionState.ready) return;
+    final chunks = chunkCheckpoint(value.bytes,
+        term: value.coordinatorTerm, sequence: operation.sequence);
+    final messageId = peer._core.messageIdAllocator!.allocate();
+    final hop = _LiveCheckpointHop(
+        peer: peer,
+        messageId: messageId,
+        chunks: chunks,
+        operation: operation,
+        publication: value.handle);
+    _checkpointHops[_hopKey(peer, messageId)] = hop;
+    group.checkpointOperationStarted(value.handle, peer.peerId);
+    unawaited(() async {
+      try {
+        final results = await peer._core.submitAckRequiredCheckpoint(
+            chunks: chunks,
+            messageId: messageId,
+            nowMs: peer._core.monotonicNowMs);
+        if (results.any(
+            (result) => result != TransportWriteState.submittedToPlatform)) {
+          _logCheckpointFailure(
+              peer, hop, CheckpointPeerResult.sessionTerminated);
+        }
+      } on Object {
+        if (peer.state == PeerConnectionState.disconnected) {
+          _finishCheckpoint(peer, hop, CheckpointPeerResult.sessionTerminated);
+        }
+      }
+    }());
+  }
+
+  void _logCheckpointFailure(PeerConnection peer, _LiveCheckpointHop hop,
+      CheckpointPeerResult result) {
+    if (peer.state == PeerConnectionState.disconnected) {
+      _finishCheckpoint(peer, hop, result);
+    }
+  }
+
+  void _finishCheckpoint(PeerConnection peer, _LiveCheckpointHop hop,
+      CheckpointPeerResult result) {
+    final key = _hopKey(peer, hop.messageId);
+    if (_checkpointHops.remove(key) == null) return;
+    group.checkpointOperationFinished(hop.publication, peer.peerId, result,
+        checkpointSequence: hop.operation.sequence);
+    final queue = _checkpointQueues[peer.peerId];
+    final next = queue?.completeInFlight();
+    if (next != null) {
+      final value = _checkpointPublications[next.publicationId];
+      if (value != null) _sendCheckpoint(peer, next, value);
+    } else if (queue != null && !queue.hasPending && queue.inFlight == null) {
+      _checkpointQueues.remove(peer.peerId);
+    }
+    _pruneCheckpointPublications();
+  }
+
+  void _pruneCheckpointPublications() {
+    final retained = <int>{
+      if (_checkpointPublications.isNotEmpty) _checkpointPublications.keys.last,
+      ..._checkpointHops.values.map((hop) => hop.publication.publicationId),
+      for (final queue in _checkpointQueues.values)
+        if (queue.inFlight?.publicationId != null)
+          queue.inFlight!.publicationId!,
+    };
+    _checkpointPublications.removeWhere((id, _) => !retained.contains(id));
   }
 
   @override
@@ -2393,6 +2561,8 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
           await _receiveGroupMerge(peer, frame);
         case FrameType.membershipSnapshot:
           await _receiveMembershipSnapshot(peer, frame);
+        case FrameType.coordinatorCheckpoint:
+          await _receiveCoordinatorCheckpoint(peer, frame);
         default:
           return;
       }
@@ -2598,6 +2768,28 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
           committedMembers: group.members);
     }
     await peer._core.submitAck(frame.messageId);
+  }
+
+  Future<void> _receiveCoordinatorCheckpoint(
+      PeerConnection peer, LpcFrame frame) async {
+    if (frame.flags != 1 ||
+        group.config.coordinatorCheckpointing == false ||
+        group.isCoordinator ||
+        peer.peerId != group.coordinatorPeerId) {
+      throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    final chunk = CoordinatorCheckpointChunk.decode(frame.payload);
+    final receiver = _checkpointReceivers[peer] ??= CheckpointReceiver();
+    final result = receiver.add(frame.messageId, chunk, commit: (checkpoint) {
+      if (checkpoint.term < group.coordinatorTerm) {
+        throw const LpcException(LpcErrorCode.protocolMismatch);
+      }
+      group.commitCoordinatorCheckpoint(checkpoint.bytes,
+          coordinator: peer.peerId, checkpointSequence: checkpoint.sequence);
+    });
+    if (result.acknowledgmentMessageId != null) {
+      await peer._core.submitAck(frame.messageId);
+    }
   }
 
   Future<void> _receiveReliable(PeerConnection peer, LpcFrame frame) async {
@@ -2821,6 +3013,22 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
 
   Future<void> _receiveGenericAck(
       PeerConnection peer, List<int> messageId) async {
+    final checkpoint = _checkpointHops.remove(_hopKey(peer, messageId));
+    if (checkpoint != null) {
+      group.checkpointOperationFinished(checkpoint.publication, peer.peerId,
+          CheckpointPeerResult.acknowledged,
+          checkpointSequence: checkpoint.operation.sequence);
+      final queue = _checkpointQueues[peer.peerId];
+      final next = queue?.completeInFlight();
+      if (next != null) {
+        final value = _checkpointPublications[next.publicationId];
+        if (value != null) _sendCheckpoint(peer, next, value);
+      } else if (queue != null && !queue.hasPending && queue.inFlight == null) {
+        _checkpointQueues.remove(peer.peerId);
+      }
+      _pruneCheckpointPublications();
+      return;
+    }
     final hop = _ackHops.remove(_hopKey(peer, messageId));
     if (hop == null || !hop.finalHop) return;
     final actions = _coordinator().reliableController.finalHopAcknowledged(
@@ -2859,12 +3067,42 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
     }
   }
 
+  Future<void> _retransmitCheckpointsFor(PeerConnection peer) async {
+    for (final hop in _checkpointHops.values
+        .where((hop) => identical(hop.peer, peer))
+        .toList()) {
+      final retry =
+          peer._core.ackRetention.retransmitOneAfterResume(hop.messageId);
+      if (retry == AckTimeoutResult.retransmitWholeOperation) {
+        try {
+          for (final chunk in hop.chunks) {
+            final submitted = await peer._core.submitEncrypted(
+                FrameType.coordinatorCheckpoint, chunk.encode(),
+                flags: 1, messageId: hop.messageId);
+            if (submitted != TransportWriteState.submittedToPlatform) {
+              throw const LpcException(LpcErrorCode.transportClosed);
+            }
+          }
+          peer._core.ackRetention.finalFrameSubmitted(hop.messageId,
+              nowMs: peer._core.monotonicNowMs);
+        } on Object {
+          // Transport loss leaves the retained operation for the next READY
+          // generation; the timeout policy remains authoritative.
+        }
+      } else if (retry == AckTimeoutResult.terminalAckTimeout) {
+        _finishCheckpoint(peer, hop, CheckpointPeerResult.ackTimeout);
+      }
+    }
+  }
+
   Future<void> _onPeerReconnected(PeerConnection peer) async {
     // GROUP_INFO is current-state, not a retained operation. Send it again
     // after every READY generation so a previous handoff race cannot leave
     // a peer with only a pre-merge view.
     await _sendGroupInfo(peer);
     await _retransmitHopsFor(peer);
+    await _retransmitCheckpointsFor(peer);
+    checkpointPeerReady(peer.peerId);
     if (group.isCoordinator) {
       // ACK-required final hops were replayed above through their retained
       // encoders. Ordered relays have no generic ACK retention, so only they
@@ -2893,6 +3131,11 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
 
   Future<void> _onPeerDisconnected(PeerConnection peer) async {
     _onPeerLost(peer);
+    for (final hop in _checkpointHops.values
+        .where((hop) => identical(hop.peer, peer))
+        .toList()) {
+      _finishCheckpoint(peer, hop, CheckpointPeerResult.sessionTerminated);
+    }
     if (!group.isCoordinator) return;
     for (final actions in _coordinator().destinationResumeFailed(peer.peerId)) {
       await _applyCoordinatorActions(null, actions);
@@ -2956,6 +3199,31 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
   /// MessageId (Section 43.1.8).
   Future<void> _pollAckTimeouts() async {
     if (_disposed) return;
+    for (final hop in _checkpointHops.values.toList()) {
+      final peer = hop.peer;
+      if (peer.state != PeerConnectionState.ready) continue;
+      final result = peer._core.ackRetention
+          .onTimer(hop.messageId, nowMs: peer._core.monotonicNowMs);
+      if (result == AckTimeoutResult.ignored) continue;
+      if (result == AckTimeoutResult.retransmitWholeOperation) {
+        try {
+          for (final chunk in hop.chunks) {
+            final submitted = await peer._core.submitEncrypted(
+                FrameType.coordinatorCheckpoint, chunk.encode(),
+                flags: 1, messageId: hop.messageId);
+            if (submitted != TransportWriteState.submittedToPlatform) {
+              throw const LpcException(LpcErrorCode.transportClosed);
+            }
+          }
+          peer._core.ackRetention.finalFrameSubmitted(hop.messageId,
+              nowMs: peer._core.monotonicNowMs);
+        } on Object {
+          // Transport loss pauses ACK retention; RESUME retries from chunk 0.
+        }
+      } else if (result == AckTimeoutResult.terminalAckTimeout) {
+        _finishCheckpoint(peer, hop, CheckpointPeerResult.ackTimeout);
+      }
+    }
     for (final hop in _ackHops.values.toList()) {
       final peer = hop.peer;
       if (peer.state != PeerConnectionState.ready) continue;
@@ -3001,6 +3269,7 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
 
   void _onPeerLost(PeerConnection peer) {
     _reassemblers[peer]?.onTransportGenerationLost();
+    _checkpointReceivers[peer]?.onTransportGenerationLost();
   }
 
   List<int> _nextMessageId(PeerConnection peer) =>
@@ -3028,6 +3297,10 @@ class _RuntimeGroupRouteTransport implements GroupRouteTransport {
     _frameSubscriptions.clear();
     _ackSubscriptions.clear();
     _peerEventSubscriptions.clear();
+    _checkpointHops.clear();
+    _checkpointQueues.clear();
+    _checkpointPublications.clear();
+    _checkpointReceivers.clear();
     _memberRouter?.close();
   }
 }
@@ -3045,6 +3318,28 @@ class _LiveGroupHop {
   final List<GroupReliableChunk> chunks;
   final ReassembledGroupReliable operation;
   final bool finalHop;
+}
+
+class _CheckpointPublicationData {
+  _CheckpointPublicationData(this.handle, this.bytes, this.coordinatorTerm);
+  final CoordinatorCheckpointHandle handle;
+  final Uint8List bytes;
+  final int coordinatorTerm;
+}
+
+class _LiveCheckpointHop {
+  _LiveCheckpointHop({
+    required this.peer,
+    required this.messageId,
+    required this.chunks,
+    required this.operation,
+    required this.publication,
+  });
+  final PeerConnection peer;
+  final List<int> messageId;
+  final List<CoordinatorCheckpointChunk> chunks;
+  final CheckpointReplicationOperation operation;
+  final CoordinatorCheckpointHandle publication;
 }
 
 /// Convenience factory matching the specification's conceptual entry point.

@@ -43,6 +43,7 @@ export 'src/protocol/group_dedup.dart';
 export 'src/protocol/cancellation.dart';
 export 'src/protocol/checkpoint.dart';
 export 'src/protocol/checkpoint_queue.dart';
+export 'src/protocol/checkpoint_publication.dart';
 export 'src/protocol/checkpoint_reassembly.dart';
 export 'src/protocol/checkpoint_receiver.dart';
 export 'src/protocol/control_timeout_recovery.dart';

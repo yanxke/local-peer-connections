@@ -42,7 +42,8 @@ enum LpcErrorCode {
   udpAuthenticationFailed(0x0026),
   groupStateSyncFailed(0x0027),
   destinationNotInGroup(0x0028),
-  destinationUnavailable(0x0029);
+  destinationUnavailable(0x0029),
+  invalidArgument(0x002A);
 
   const LpcErrorCode(this.value);
   final int value;
