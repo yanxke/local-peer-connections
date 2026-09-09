@@ -5288,6 +5288,7 @@ RuntimeConfig {
     knownPeerLookupTimeoutMs = 2000
     maxKnownPeerCacheEntries = 256
     keepaliveIntervalMs = 2000
+    gattFragmentInactivityTimeoutMs = 5000
     reconnectTimeoutMs = 15000
     maxQueuedBytesPerPeer = 262144
     maxQueuedMessagesPerPeer = 1024
@@ -5305,6 +5306,7 @@ Validation:
 - `knownPeerLookupTimeoutMs` must be 100..10000;
 - `maxKnownPeerCacheEntries` must be 0..65536;
 - `keepaliveIntervalMs` must be 1000..10000;
+- `gattFragmentInactivityTimeoutMs` must be 1000..10000;
 - `reconnectTimeoutMs` must be 1000..60000.
 - `applicationMetadata` MUST be 0..31 bytes.
 - `discoveryDisplayName`, when present, MUST satisfy the human-readable/stability requirements of Section 8.1 and MUST NOT be treated as peer identity or authentication material.
@@ -6360,7 +6362,7 @@ SAS verification timeout:              30000 ms
 Default keepalive interval:             2000 ms
 Derived dead timeout:         max(6000, 3 * negotiated interval)
 Default reconnect timeout:             15000 ms
-GATT frame fragment inactivity:         2000 ms
+GATT frame fragment inactivity:          5000 ms
 DATA message chunk inactivity:         10000 ms
 Upgrade candidate connect timeout:      5000 ms
 Old transport post-switch grace:        2000 ms

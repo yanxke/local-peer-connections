@@ -42,11 +42,13 @@ class GattBackendConnection implements RealtimeBackendConnection {
     this.localRole,
     this.logger,
     this.maxQueuedBytes = 262144,
+    this.fragmentTimeoutMs = 5000,
     int Function()? monotonicNowMs,
   })  : _platform = platform,
         _fragmenter = GattFragmenter(platform.platformSafeWriteSize),
         _nowMs = monotonicNowMs ?? _wallClockMs {
     if (maxQueuedBytes < 1) throw ArgumentError.value(maxQueuedBytes);
+    if (fragmentTimeoutMs < 1) throw ArgumentError.value(fragmentTimeoutMs);
   }
 
   @override
@@ -58,11 +60,13 @@ class GattBackendConnection implements RealtimeBackendConnection {
   final void Function(String message)? logger;
   final GattFragmenter _fragmenter;
   final int maxQueuedBytes;
+  final int fragmentTimeoutMs;
   final int Function() _nowMs;
   final Queue<_PendingGattWrite> _writes = Queue<_PendingGattWrite>();
   final StreamController<BackendConnectionEvent> _events =
       StreamController<BackendConnectionEvent>.broadcast();
-  final GattReassembler _reassembler = GattReassembler();
+  late final GattReassembler _reassembler =
+      GattReassembler(timeoutMs: fragmentTimeoutMs);
   TransportConnectionState _state = TransportConnectionState.open;
   int _queuedBytes = 0;
   bool _draining = false;
@@ -142,8 +146,10 @@ class GattBackendConnection implements RealtimeBackendConnection {
   void receiveGattFragment(List<int> encoded) {
     if (_state != TransportConnectionState.open) return;
     try {
-      final frame =
-          _reassembler.add(GattFragment.decode(encoded), nowMs: _nowMs());
+      final fragment = GattFragment.decode(encoded);
+      _log(
+          'received fragment sequence=${fragment.sequence} start=${fragment.start} end=${fragment.end} bytes=${fragment.bytes.length}');
+      final frame = _reassembler.add(fragment, nowMs: _nowMs());
       if (frame != null) {
         _log('received complete frame bytes=${frame.length}');
         _events.add(BackendBytesReceived(frame));

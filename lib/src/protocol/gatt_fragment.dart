@@ -78,11 +78,11 @@ class GattFragmenter {
 }
 
 /// Reassembles one non-interleaved Section 12 LPC frame. The owner calls
-/// [discardExpired] from its backend timer; no incomplete frame survives two
-/// seconds without fragment progress.
+/// [discardExpired] from its backend timer; no incomplete frame survives five
+/// seconds without fragment progress by default.
 class GattReassembler {
   GattReassembler(
-      {this.maxBufferedBytes = 16384 + 62 + 16, this.timeoutMs = 2000})
+      {this.maxBufferedBytes = 16384 + 62 + 16, this.timeoutMs = 5000})
       : assert(maxBufferedBytes > 0),
         assert(timeoutMs > 0);
 

@@ -37,8 +37,8 @@ void main() {
   test('missing or expired fragment invalidates only the incomplete frame', () {
     final reassembler = GattReassembler();
     reassembler.add(GattFragment(0, [1], start: true), nowMs: 0);
-    expect(reassembler.discardExpired(2000), isTrue);
-    expect(() => reassembler.add(GattFragment(1, [2], end: true), nowMs: 2001),
+    expect(reassembler.discardExpired(5000), isTrue);
+    expect(() => reassembler.add(GattFragment(1, [2], end: true), nowMs: 5001),
         throwsA(isA<LpcException>()));
   });
 }

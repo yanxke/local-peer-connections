@@ -1017,8 +1017,7 @@ class NearbyRuntime {
     final reconnect = _gattReconnects[event.endpointId];
     if (reconnect != null && reconnect.attempting) {
       if (_startingGattEndpoints.add(event.endpointId)) {
-        unawaited(_startGattResume(event, reconnect).whenComplete(
-            () => _startingGattEndpoints.remove(event.endpointId)));
+        _launchGattResume(event, reconnect);
       } else {
         _log(
             'gatt connected ignored duplicate resume callback endpoint=${event.endpointId}');
@@ -1056,18 +1055,54 @@ class NearbyRuntime {
           () => backend.closeGattConnection(event.endpointId));
       if (host == null) {
         if (_startingGattEndpoints.add(event.endpointId)) {
-          unawaited(
-              _startGattHandshake(event, attempt, groupProfile: groupProfile)
-                  .whenComplete(
-                      () => _startingGattEndpoints.remove(event.endpointId)));
+          _launchGattHandshake(event, attempt, groupProfile: groupProfile);
         }
         return;
       }
     }
     if (_startingGattEndpoints.add(event.endpointId)) {
-      unawaited(_startGattHandshake(event, attempt, host: host)
-          .whenComplete(() => _startingGattEndpoints.remove(event.endpointId)));
+      _launchGattHandshake(event, attempt, host: host);
     }
+  }
+
+  /// Runs a platform-triggered handshake as a consumed background task.
+  ///
+  /// A rejected probe is an expected network outcome, not an uncaught Dart
+  /// error.  In particular, [Future.whenComplete] preserves an error when its
+  /// returned Future is ignored, which used to surface normal GATT races as
+  /// Flutter "Unhandled Exception" messages.  Keep the endpoint startup lock
+  /// and the Future error handling in one place for every handshake path.
+  void _launchGattHandshake(
+      PlatformGattConnected event, ConnectionAttempt attempt,
+      {HostSession? host, _AutoGroupHandshakeProfile? groupProfile}) {
+    unawaited(_startGattHandshake(event, attempt,
+            host: host, groupProfile: groupProfile)
+        .then<void>((_) {
+      _startingGattEndpoints.remove(event.endpointId);
+    }, onError: (Object error, StackTrace stack) {
+      _startingGattEndpoints.remove(event.endpointId);
+      if (!_attempts.containsKey(event.endpointId)) {
+        _log(
+            'background handshake ended endpoint=${event.endpointId} code=${_asLpcError(error).code.name}');
+      } else {
+        attempt._failed(_asLpcError(error));
+      }
+    }));
+  }
+
+  /// Same containment boundary for automatic RESUME.  Resume failures are
+  /// converted into the reconnect scheduler's next attempt by the method
+  /// itself, but cleanup failures must not become unhandled Futures.
+  void _launchGattResume(
+      PlatformGattConnected event, _GattReconnect reconnect) {
+    unawaited(_startGattResume(event, reconnect).then<void>((_) {
+      _startingGattEndpoints.remove(event.endpointId);
+    }, onError: (Object error, StackTrace stack) {
+      _startingGattEndpoints.remove(event.endpointId);
+      _log(
+          'background resume ended endpoint=${event.endpointId} peer=${reconnect.peer.peerId} code=${_asLpcError(error).code.name}');
+      _reconnectAttemptFailed(reconnect);
+    }));
   }
 
   Future<void> _startGattHandshake(
@@ -1092,7 +1127,8 @@ class NearbyRuntime {
           localRole: event.localRole == 'central'
               ? GattLinkRole.central
               : GattLinkRole.peripheral,
-          maxQueuedBytes: config.maxQueuedBytesPerPeer);
+          maxQueuedBytes: config.maxQueuedBytesPerPeer,
+          fragmentTimeoutMs: config.gattFragmentInactivityTimeoutMs);
       _gattBindings[event.endpointId] = PlatformGattConnectionBinding(
           backend: backend,
           endpointId: event.endpointId,
@@ -1146,8 +1182,13 @@ class NearbyRuntime {
       // than reported by Flutter as an unhandled Future error.
       final ready = handshake.ready;
       final authenticated = handshake.authenticated;
+      final candidateInitialFrame = handshake.candidateInitialFrame;
       unawaited(ready.then<void>((_) {}, onError: (_, __) {}));
       unawaited(authenticated.then<void>((_) {}, onError: (_, __) {}));
+      // Responder-side candidate handoff reports a failed physical link
+      // through this Future before normal READY is selected. It must have an
+      // observer even when this particular handshake is not a reconnect.
+      unawaited(candidateInitialFrame.then<void>((_) {}, onError: (_, __) {}));
       await handshake.start();
       _log('handshake HELLO submitted endpoint=${event.endpointId}');
       if (host != null || groupProfile != null) {
@@ -1196,9 +1237,23 @@ class NearbyRuntime {
       final lpcError = _asLpcError(error);
       _log(
           'handshake failed endpoint=${event.endpointId} code=${lpcError.code.name} detail=$error');
-      attempt._failed(_asLpcError(error));
-      await _gattBindings.remove(event.endpointId)?.close();
-      await backend.closeGattConnection(event.endpointId);
+      // The platform may not deliver a second disconnected callback after a
+      // protocol-level handshake failure. Release the attempt here so the
+      // endpoint can be probed again on the next discovery observation.
+      _attempts.remove(event.endpointId);
+      attempt._failed(lpcError);
+      try {
+        await _gattBindings.remove(event.endpointId)?.close();
+      } on Object catch (cleanupError) {
+        _log(
+            'handshake binding cleanup failed endpoint=${event.endpointId} error=$cleanupError');
+      }
+      try {
+        await backend.closeGattConnection(event.endpointId);
+      } on Object catch (cleanupError) {
+        _log(
+            'handshake platform close failed endpoint=${event.endpointId} error=$cleanupError');
+      }
       if (_automaticProbeEndpoints.remove(event.endpointId)) {
         _startNextKnownPeerProbe();
       }
@@ -1563,7 +1618,8 @@ class NearbyRuntime {
           localRole: event.localRole == 'central'
               ? GattLinkRole.central
               : GattLinkRole.peripheral,
-          maxQueuedBytes: config.maxQueuedBytesPerPeer);
+          maxQueuedBytes: config.maxQueuedBytesPerPeer,
+          fragmentTimeoutMs: config.gattFragmentInactivityTimeoutMs);
       _gattBindings[event.endpointId] = PlatformGattConnectionBinding(
           backend: backend,
           endpointId: event.endpointId,
@@ -1644,8 +1700,18 @@ class NearbyRuntime {
     } on Object catch (error) {
       _log(
           'resume failed endpoint=${event.endpointId} peer=${peer.peerId} error=$error');
-      await _gattBindings.remove(event.endpointId)?.close();
-      await backend.closeGattConnection(event.endpointId);
+      try {
+        await _gattBindings.remove(event.endpointId)?.close();
+      } on Object catch (cleanupError) {
+        _log(
+            'resume binding cleanup failed endpoint=${event.endpointId} error=$cleanupError');
+      }
+      try {
+        await backend.closeGattConnection(event.endpointId);
+      } on Object catch (cleanupError) {
+        _log(
+            'resume platform close failed endpoint=${event.endpointId} error=$cleanupError');
+      }
       _reconnectAttemptFailed(reconnect);
     }
   }

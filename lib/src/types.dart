@@ -174,6 +174,7 @@ class RuntimeConfig {
       this.knownPeerLookupTimeoutMs = 2000,
       this.maxKnownPeerCacheEntries = 256,
       this.keepaliveIntervalMs = 2000,
+      this.gattFragmentInactivityTimeoutMs = 5000,
       this.reconnectTimeoutMs = 15000,
       this.maxQueuedBytesPerPeer = 262144,
       this.maxQueuedMessagesPerPeer = 1024,
@@ -199,6 +200,7 @@ class RuntimeConfig {
       knownPeerLookupTimeoutMs,
       maxKnownPeerCacheEntries;
   final int keepaliveIntervalMs,
+      gattFragmentInactivityTimeoutMs,
       reconnectTimeoutMs,
       maxQueuedBytesPerPeer,
       maxQueuedMessagesPerPeer,
@@ -207,6 +209,8 @@ class RuntimeConfig {
     if (serviceUuid.length != 16 ||
         keepaliveIntervalMs < 1000 ||
         keepaliveIntervalMs > 10000 ||
+        gattFragmentInactivityTimeoutMs < 1000 ||
+        gattFragmentInactivityTimeoutMs > 10000 ||
         reconnectTimeoutMs < 1000 ||
         reconnectTimeoutMs > 60000) {
       throw const LpcException(

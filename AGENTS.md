@@ -46,6 +46,10 @@ For protocol-affecting work:
 7. search for stale contradictory wording;
 8. verify test IDs remain unique;
 9. verify explicit Section references still resolve.
+10. when fixing bugs in the implementation or when there
+are platform (Android/iOS/Bluetooth) caveats, document the
+reason for the fixes in the code so that future maintainers
+can understand why the specific logic is there.
 
 For implementation-only work, do not modify protocol semantics.
 
@@ -223,3 +227,6 @@ If you cannot point to the normative rule that justifies an implementation choic
 Check `local_peer_connections_spec.md`.
 
 If the rule is missing, document the ambiguity and fix the specification first.
+
+If there is something in AGENTS.md that is wrong and conflicts
+with the spec, you can fix AGENTS.md.

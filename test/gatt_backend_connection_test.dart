@@ -209,6 +209,30 @@ void main() {
     expect(backend.state, TransportConnectionState.open);
   });
 
+  test('configured GATT fragment timeout tolerates delayed ordered progress',
+      () async {
+    var nowMs = 0;
+    final platform = _GattPlatform(const []);
+    final backend = GattBackendConnection(
+      connectionId: 'gatt',
+      platform: platform,
+      fragmentTimeoutMs: 3000,
+      monotonicNowMs: () => nowMs,
+    );
+    final events = <BackendConnectionEvent>[];
+    final subscription = backend.events.listen(events.add);
+
+    backend
+        .receiveGattFragment(GattFragment(0, [1, 2, 3], start: true).encode());
+    nowMs = 2500;
+    backend.receiveGattFragment(GattFragment(1, [4], end: true).encode());
+    await _turn();
+
+    expect(events.whereType<BackendBytesReceived>().single.bytes, [1, 2, 3, 4]);
+    expect(events.whereType<BackendError>(), isEmpty);
+    await subscription.cancel();
+  });
+
   test('RT-011 GATT central realtime uses Write Without Response', () async {
     final platform = _GattPlatform([GattFragmentSubmission.submitted]);
     final backend = GattBackendConnection(

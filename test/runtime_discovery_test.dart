@@ -132,6 +132,7 @@ void main() {
       () {
     const defaults = RuntimeConfig();
     expect(defaults.trustMode, HandshakeTrustMode.sas);
+    expect(defaults.gattFragmentInactivityTimeoutMs, 5000);
     expect(
         () => RuntimeConfig(trustMode: HandshakeTrustMode.psk32).validate(),
         throwsA(isA<LpcException>()
@@ -147,6 +148,11 @@ void main() {
     RuntimeConfig(
             trustMode: HandshakeTrustMode.psk32, psk32: List.filled(32, 9))
         .validate();
+    expect(() => RuntimeConfig(gattFragmentInactivityTimeoutMs: 999).validate(),
+        throwsA(isA<LpcException>()));
+    expect(
+        () => RuntimeConfig(gattFragmentInactivityTimeoutMs: 10001).validate(),
+        throwsA(isA<LpcException>()));
   });
 
   test('UT-178 automatic known-peer probing requires a resolver', () {
@@ -596,6 +602,67 @@ void main() {
     expect(failed.discoveryEndpointId, 'stalled-endpoint');
     expect(failed.error.code, LpcErrorCode.connectionTimeout);
     expect(closes, 1);
+
+    await subscription.cancel();
+    await discovery.stop();
+    await runtime.close();
+    await events.close();
+  });
+
+  test('automatic probe protocol failure is reported and releases its slot',
+      () async {
+    const methods = MethodChannel('runtime-known-probe-protocol-failure-test');
+    final events = StreamController<PlatformBleEvent>.broadcast();
+    final runtimeEvents = <RuntimeEvent>[];
+    var helloSubmitted = false;
+    final logs = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'connectGatt') {
+        final endpoint = (call.arguments as Map)['endpointId'] as String;
+        events.add(PlatformGattConnected(endpoint, 'central'));
+      }
+      if (call.method == 'submitGattFragment') {
+        helloSubmitted = true;
+        return 'submitted';
+      }
+      return null;
+    });
+    final runtime = await createRuntime(
+      config: RuntimeConfig(
+        autoConnectKnownPeers: true,
+        knownPeerResolver: _KnownPeerResolver(),
+        reconnectTimeoutMs: 1000,
+        logger: logs.add,
+      ),
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(
+        methods: methods,
+        eventStream: events.stream,
+      ),
+    );
+    final subscription = runtime.events.listen(runtimeEvents.add);
+    final discovery = await runtime.startDiscovery();
+    events.add(const PlatformEndpointFound('malformed-endpoint', rssi: -40));
+
+    // Wait until the runtime has installed the connection-scoped binding,
+    // then inject a validly encoded but non-contiguous fragment.  This is an
+    // expected failed candidate, not an application-level uncaught error.
+    await _waitUntil(
+        () => runtimeEvents.whereType<KnownPeerProbeStarted>().isNotEmpty);
+    await _waitUntil(() => helloSubmitted);
+    events.add(PlatformGattFragment(
+        'malformed-endpoint', GattFragment(1, [1], end: true).encode()));
+    await _waitUntil(
+        () => runtimeEvents.whereType<KnownPeerProbeFailed>().isNotEmpty);
+    expect(runtimeEvents.whereType<KnownPeerProbeFailed>().single.error.code,
+        LpcErrorCode.protocolMismatch);
+
+    // The failed endpoint must be eligible for a later observation rather
+    // than permanently consuming the bounded automatic-probe slot.
+    events.add(const PlatformEndpointFound('malformed-endpoint', rssi: -41));
+    await _waitUntil(
+        () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 2);
 
     await subscription.cancel();
     await discovery.stop();

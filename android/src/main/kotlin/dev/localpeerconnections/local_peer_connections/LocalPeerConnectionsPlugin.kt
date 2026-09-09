@@ -58,7 +58,14 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
   // bounded LPC probe may therefore need to cancel a GATT object that is not
   // in gattClients yet.
   private val gattHandles = mutableMapOf<String, BluetoothGatt>()
+  // A Bluetooth address identifies a device, not a physical GATT link.  A
+  // phone can have an outbound central link and an inbound server link to the
+  // same address at the same time.  Server links therefore use an opaque,
+  // connection-scoped endpoint ID; the discovered address remains the
+  // central-side endpoint ID.
   private val gattServerPeers = mutableMapOf<String, BluetoothDevice>()
+  private val gattServerEndpointByAddress = mutableMapOf<String, String>()
+  private var nextServerEndpointId = 1L
   // A central normally writes the TX CCCD once per physical link, but some
   // Android stacks repeat that callback.  Do not turn repeated CCCD writes
   // into multiple portable GATT sessions for the same server endpoint.
@@ -214,20 +221,39 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
       override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
         Log.d(logTag, "server connection endpoint=${device.address} status=$status state=$newState")
         if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
-          gattServerPeers[device.address] = device
+          // BluetoothGattServer callbacks carry only BluetoothDevice, not a
+          // server connection handle.  Consequently two simultaneous server
+          // links from the same address would be indistinguishable and their
+          // fragments could be interleaved in one LPC endpoint. Keep the
+          // first link and ignore duplicates until its disconnect callback
+          // releases the address.
+          if (gattServerEndpointByAddress.containsKey(device.address)) {
+            Log.w(logTag, "ignore duplicate server connection address=${device.address}")
+            // The Android server API cannot target one of two same-address
+            // links independently. Keep the existing association so a
+            // repeated connected callback cannot relabel its live stream.
+            return
+          }
+          val endpointId = "server-${nextServerEndpointId++}"
+          gattServerEndpointByAddress[device.address] = endpointId
+          gattServerPeers[endpointId] = device
         } else {
-          gattServerPeers.remove(device.address)
-          gattServerReady.remove(device.address)
-          clearServerNotifications(device.address)
-          emitSuccess(mapOf("type" to "gattDisconnected", "endpointId" to device.address))
+          val endpointId = gattServerEndpointByAddress.remove(device.address)
+          if (endpointId != null) {
+            gattServerPeers.remove(endpointId)
+            gattServerReady.remove(endpointId)
+            clearServerNotifications(endpointId)
+            emitSuccess(mapOf("type" to "gattDisconnected", "endpointId" to endpointId))
+          }
         }
       }
       override fun onCharacteristicWriteRequest(device: BluetoothDevice, requestId: Int,
           characteristic: BluetoothGattCharacteristic, preparedWrite: Boolean,
           responseNeeded: Boolean, offset: Int, value: ByteArray) {
         Log.d(logTag, "server fragment endpoint=${device.address} request=$requestId bytes=${value.size} responseNeeded=$responseNeeded")
+        val endpointId = gattServerEndpointByAddress[device.address] ?: return
         if (characteristic.uuid == characteristicUuid(serviceUuid, 1) && !preparedWrite && offset == 0) {
-          emitSuccess(mapOf("type" to "gattFragment", "endpointId" to device.address,
+          emitSuccess(mapOf("type" to "gattFragment", "endpointId" to endpointId,
             "bytes" to value.map { it.toInt() and 0xff }))
           if (responseNeeded) sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
         } else if (responseNeeded) {
@@ -238,15 +264,16 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
           descriptor: BluetoothGattDescriptor, preparedWrite: Boolean,
           responseNeeded: Boolean, offset: Int, value: ByteArray) {
         Log.d(logTag, "server descriptor endpoint=${device.address} request=$requestId uuid=${descriptor.uuid} bytes=${value.size}")
+        val endpointId = gattServerEndpointByAddress[device.address] ?: return
         if (descriptor.uuid == CLIENT_CONFIGURATION_UUID &&
             descriptor.characteristic.uuid == characteristicUuid(serviceUuid, 2) &&
             !preparedWrite && offset == 0 &&
             (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
              value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE))) {
           if (responseNeeded) sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-          if (gattServerReady.add(device.address)) {
-            Log.d(logTag, "server notifications ready endpoint=${device.address}")
-            emitSuccess(mapOf("type" to "gattConnected", "endpointId" to device.address,
+          if (gattServerReady.add(endpointId)) {
+            Log.d(logTag, "server notifications ready endpoint=$endpointId address=${device.address}")
+            emitSuccess(mapOf("type" to "gattConnected", "endpointId" to endpointId,
                 "localRole" to "peripheral", "platformSafeWriteSize" to 20))
           }
         } else if (responseNeeded) {
@@ -254,7 +281,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         }
       }
       override fun onNotificationSent(device: BluetoothDevice, status: Int) {
-        val endpointId = device.address
+        val endpointId = gattServerEndpointByAddress[device.address] ?: return
         Log.d(logTag, "server notification acknowledged endpoint=$endpointId status=$status")
         var disconnected = false
         synchronized(gattServerNotificationLock) {
@@ -273,6 +300,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         if (disconnected) {
           Log.w(logTag, "server notification failed; closing endpoint=$endpointId status=$status")
           gattServerPeers.remove(endpointId)
+          gattServerEndpointByAddress.remove(device.address, endpointId)
           gattServerReady.remove(endpointId)
           emitSuccess(mapOf("type" to "gattDisconnected", "endpointId" to endpointId))
           gattServer?.cancelConnection(device)
@@ -313,6 +341,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     gattServer?.close()
     gattServer = null
     gattServerPeers.clear()
+    gattServerEndpointByAddress.clear()
     gattServerReady.clear()
     synchronized(gattServerNotificationLock) {
       gattServerNotificationQueues.clear()
@@ -333,6 +362,9 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     val controlUuid = characteristicUuid(serviceUuid, 3)
     val device = try { adapterOrThrow().getRemoteDevice(endpointId) }
     catch (_: IllegalArgumentException) { throw BackendError("ENDPOINT_LOST", "unknown discovery endpoint") }
+    if (gattHandles.containsKey(endpointId) || gattClients.containsKey(endpointId)) {
+      throw BackendError("ENDPOINT_BUSY", "GATT endpoint already has a client link")
+    }
     Log.d(logTag, "client connect requested endpoint=$endpointId")
     val gatt = device.connectGatt(applicationContext, false, object : BluetoothGattCallback() {
       override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
@@ -413,6 +445,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     gattHandles[endpointId] = gatt
   }
 
+
   private fun submitGattFragment(call: MethodCall): String {
     val endpointId = call.argument<String>("endpointId") ?: throw BackendError("ENDPOINT_LOST")
     val fragment = call.argument<ByteArray>("fragment") ?: throw BackendError("PLATFORM_ERROR", "missing GATT fragment")
@@ -484,8 +517,12 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     val serverDevice = gattServerPeers.remove(endpointId)
     gattServerReady.remove(endpointId)
     clearServerNotifications(endpointId)
-    serverDevice?.let { gattServer?.cancelConnection(it) }
+    serverDevice?.let {
+      gattServerEndpointByAddress.remove(it.address, endpointId)
+      gattServer?.cancelConnection(it)
+    }
   }
+
 
   /** Starts exactly one peripheral notification for an endpoint. */
   private fun startNextServerNotificationLocked(endpointId: String): Boolean {
@@ -521,6 +558,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     Log.w(logTag, "fail server notification endpoint=$endpointId")
     clearServerNotifications(endpointId)
     gattServerPeers.remove(endpointId)
+    gattServerEndpointByAddress.remove(device.address, endpointId)
     gattServerReady.remove(endpointId)
     emitSuccess(mapOf("type" to "gattDisconnected", "endpointId" to endpointId))
     gattServer?.cancelConnection(device)
