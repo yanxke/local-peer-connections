@@ -44,6 +44,7 @@ class DeviceTestController extends ChangeNotifier {
   DiscoverySession? discovery;
   GroupSession? group;
   HttpServer? _server;
+  Timer? _notifyTimer;
   int _eventSequence = 0;
   // Capabilities are current runtime state, not diagnostic history. Keep a
   // dedicated value because high-rate endpoint updates can evict the
@@ -479,6 +480,7 @@ class DeviceTestController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _notifyTimer?.cancel();
     unawaited(_server?.close());
     unawaited(_closeRuntime());
     super.dispose();
@@ -613,7 +615,7 @@ class DeviceTestController extends ChangeNotifier {
       case DiscoveryStopped():
         _record('discoveryStopped', {});
     }
-    notifyListeners();
+    _scheduleNotify();
   }
 
   void _onGroupEvent(GroupEvent event) {
@@ -922,7 +924,18 @@ class DeviceTestController extends ChangeNotifier {
     };
     events.add(event);
     if (events.length > maxEventHistory) events.removeAt(0);
-    notifyListeners();
+    // Discovery and transport diagnostics can arrive much faster than a UI
+    // can repaint (especially during the message-load test). Coalesce those
+    // repaint requests while retaining every event in the control API history.
+    _scheduleNotify();
+  }
+
+  void _scheduleNotify() {
+    if (_disposed || _notifyTimer != null) return;
+    _notifyTimer = Timer(const Duration(milliseconds: 100), () {
+      _notifyTimer = null;
+      if (!_disposed) notifyListeners();
+    });
   }
 
   void _recordError(
