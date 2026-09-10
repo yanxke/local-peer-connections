@@ -5493,6 +5493,7 @@ If the result is `false`:
 - the Runtime MUST NOT mark the peer as known;
 - the Runtime MAY emit `UnknownPeerIdentified`;
 - if no explicit application connection request, HostSession ownership, or GroupSession ownership requires the PeerConnection to remain open, the Runtime SHOULD close a probe-only connection promptly;
+- when a local advertising `HostSession` with `autoAccept = true` is active, the Runtime MAY defer that close for a bounded handoff window so an authenticated application request arriving over the simultaneous physical link can be processed; this does not classify the peer as known or create persistent relationship state;
 - the Runtime MUST NOT create persistent relationship state on behalf of the application.
 
 `UnknownPeerIdentified` does not mean unauthenticated. It means LPC established an authenticated PeerId but the application resolver did not classify that PeerId as known.

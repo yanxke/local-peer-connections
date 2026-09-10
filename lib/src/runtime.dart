@@ -1511,7 +1511,18 @@ class NearbyRuntime {
       final inboundHandshakeInProgress = _startingGattEndpoints.any(
         (candidate) => candidate != endpointId,
       );
-      if (!_hasOtherOwner(peer) && !inboundHandshakeInProgress) {
+      // A local auto-accepting HostSession can be the application-level
+      // receiver while this same physical link is also being used by the
+      // remote side's explicit Connect. Keep the unknown probe briefly in
+      // that case so the authenticated FRIEND_REQUEST/control frame is not
+      // lost when the probe resolver returns false. This remains bounded and
+      // does not classify or persist the peer as known.
+      final hasAutoAcceptHost = _advertisingHosts.any(
+        (candidate) => candidate.config.autoAccept,
+      );
+      if (!_hasOtherOwner(peer) &&
+          !inboundHandshakeInProgress &&
+          !hasAutoAcceptHost) {
         await peer.disconnect();
       } else if (!_hasOtherOwner(peer)) {
         // HostSession ownership is published only after the inbound
@@ -1528,7 +1539,7 @@ class NearbyRuntime {
           }
         });
         _log(
-            'known probe deferred release peer=${peer.peerId} endpoint=$endpointId reason=inbound-handshake');
+            'known probe deferred release peer=${peer.peerId} endpoint=$endpointId reason=${inboundHandshakeInProgress ? 'inbound-handshake' : 'auto-accept-host'}');
       } else {
         _log(
             'known probe retained shared peer=${peer.peerId} endpoint=$endpointId');

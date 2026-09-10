@@ -614,6 +614,46 @@ void main() {
     await link.close();
   });
 
+  test(
+      'UT-241 unknown probe stays open briefly for an auto-accept host handoff',
+      () async {
+    final resolver = _CountingKnownPeerResolver(result: false);
+    final link = await _RuntimeLink.create(
+      configA: RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoConnectKnownPeers: true,
+        knownPeerResolver: resolver,
+        reconnectTimeoutMs: 1000,
+      ),
+    );
+    final localHost = link.a.createHostSession(HostConfig(autoAccept: true));
+    await localHost.startAdvertising();
+    final remoteHost = link.b.createHostSession(HostConfig(autoAccept: true));
+    await remoteHost.startAdvertising();
+    final discovery = await link.a.startDiscovery();
+    final events = <RuntimeEvent>[];
+    final subscription = link.a.events.listen(events.add);
+
+    link.discoverA('auto-accept-handoff-endpoint');
+    await _waitFor(() => events.whereType<UnknownPeerIdentified>().length == 1);
+    final unknown = events.whereType<UnknownPeerIdentified>().single;
+
+    expect(unknown.discoveryEndpointId, 'auto-accept-handoff-endpoint');
+    expect(events.whereType<KnownPeerConnected>(), isEmpty);
+    expect(unknown.connection.state, PeerConnectionState.ready);
+
+    // The application can explicitly release the probe once its handoff
+    // decision is complete; the bounded fallback timer is not needed here.
+    await link.a.releasePeerRetention(unknown.connection.peerId);
+    await _waitForState(unknown.connection, PeerConnectionState.disconnected);
+
+    await subscription.cancel();
+    await discovery.stop();
+    await localHost.close();
+    await remoteHost.close();
+    await link.close();
+  });
+
   test('UT-185 resolver failure is conservative for an automatic probe',
       () async {
     final link = await _RuntimeLink.create(
