@@ -42,12 +42,17 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     registrar.addMethodCallDelegate(instance, channel: identity)
     registrar.addMethodCallDelegate(instance, channel: backend)
     events.setStreamHandler(instance)
-    instance.central = CBCentralManager(delegate: instance, queue: nil)
-    instance.peripheral = CBPeripheralManager(delegate: instance, queue: nil)
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     print("[LocalPeerConnections] method \(call.method)")
+    // CoreBluetooth can remain in .unknown when its managers are created
+    // during plugin registration, before Flutter has presented the app. Defer
+    // construction until the first backend call, when the host application is
+    // active and iOS can initialize Bluetooth and present authorization.
+    if call.method != "loadOrCreateEd25519Seed" {
+      ensureBluetoothManagers()
+    }
     switch call.method {
     case "loadOrCreateEd25519Seed":
       do { result(try loadOrCreateSeed()) }
@@ -405,6 +410,31 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     eventSink?(["type": "gattWritable"])
   }
 
+  private func ensureBluetoothManagers() {
+    let initialize = {
+      if self.central == nil {
+        self.central = CBCentralManager(delegate: self, queue: DispatchQueue.main)
+        print("[LocalPeerConnections] central manager initialized state=\(self.central.state.rawValue) \(self.authorizationDiagnostics()) appState=\(UIApplication.shared.applicationState.rawValue)")
+      }
+      if self.peripheral == nil {
+        self.peripheral = CBPeripheralManager(delegate: self, queue: DispatchQueue.main)
+        print("[LocalPeerConnections] peripheral manager initialized state=\(self.peripheral.state.rawValue) \(self.authorizationDiagnostics()) appState=\(UIApplication.shared.applicationState.rawValue)")
+      }
+    }
+    if Thread.isMainThread {
+      initialize()
+    } else {
+      DispatchQueue.main.sync(execute: initialize)
+    }
+  }
+
+  private func authorizationDiagnostics() -> String {
+    if #available(iOS 13.1, *) {
+      return "centralAuthorization=\(CBCentralManager.authorization.rawValue) peripheralAuthorization=\(CBPeripheralManager.authorization.rawValue)"
+    }
+    return "authorization=unavailable"
+  }
+
   /// Hosts exactly the Section 11 service. The Dart GATT backend remains the
   /// owner of fragment framing and LPC protocol state.
   private func listenGatt(_ serviceUuid: CBUUID) throws {
@@ -507,12 +537,16 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     eventSink?(FlutterError(code: "PLATFORM_ERROR", message: message, details: nil))
   }
   private func requirePoweredOn(_ state: CBManagerState) throws {
+    // Include the numeric CoreBluetooth state in diagnostics.  In particular,
+    // .unknown during manager startup is different from .poweredOff or
+    // .unauthorized, and collapsing them made real-device fixture failures
+    // impossible to distinguish from a disabled radio.
     switch state {
     case .poweredOn: return
     case .poweredOff: throw BackendError("BLUETOOTH_POWERED_OFF", "Bluetooth is powered off")
     case .unauthorized: throw BackendError("PERMISSION_DENIED", "Bluetooth permission denied")
     case .unsupported: throw BackendError("BLUETOOTH_UNAVAILABLE", "Bluetooth is unsupported")
-    default: throw BackendError("BLUETOOTH_UNAVAILABLE", "Bluetooth is unavailable")
+    default: throw BackendError("BLUETOOTH_UNAVAILABLE", "Bluetooth is unavailable (CoreBluetooth state=\(state.rawValue); \(authorizationDiagnostics()))")
     }
   }
   private struct BackendError: Error {

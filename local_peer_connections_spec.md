@@ -8260,39 +8260,39 @@ Every mobile release candidate MUST run:
 
 - [ ] IT-001 iOS advertises only service UUID and Android discovers it.
 - [ ] IT-002 Android canonical service-UUID advertisement is discovered by iOS.
-- [ ] IT-003 Android central -> iOS peripheral.
-- [ ] IT-004 iOS central -> Android peripheral.
-- [ ] IT-005 Ed25519 identity continuity verified across reconnect.
-- [ ] IT-006 SAS values match on honest Android/iOS connection.
+- [x] IT-003 Android central -> iOS peripheral.
+- [x] IT-004 iOS central -> Android peripheral.
+- [x] IT-005 Ed25519 identity continuity verified across reconnect.
+- [x] IT-006 SAS values match on honest Android/iOS connection.
 - [ ] IT-007 deliberately altered handshake fails SAS/known-peer authentication.
-- [ ] IT-008 1000 x 32-byte messages, zero corruption.
-- [ ] IT-009 1 MiB application message over GATT succeeds via DATA chunking.
-- [ ] IT-010 keepalive remains healthy during 1 MiB transfer.
+- [x] IT-008 1000 x 32-byte messages, zero corruption.
+- [x] IT-009 1 MiB application message over GATT succeeds via DATA chunking.
+- [x] IT-010 keepalive remains healthy during 1 MiB transfer.
 - [ ] IT-011 ACK retry with intentionally dropped ACK produces one app delivery.
 - [ ] IT-012 out-of-range enters Reconnecting.
 - [ ] IT-013 return within timeout resumes same SessionId.
 - [ ] IT-014 resumed wire generation increments and sequence restarts.
 - [ ] IT-015 return after timeout produces PeerDisconnected.
 - [ ] IT-016 Bluetooth off/on recovery.
-- [ ] IT-017 30-minute two-player soak.
-- [ ] IT-018 four-player star.
-- [ ] IT-019 eight-player star where hardware permits.
+- [x] IT-017 30-minute two-player soak.
+- [x] IT-018 four-player star.
+- [x] IT-019 eight-player star where hardware permits.
 - [ ] IT-020 weak client does not stall other clients.
-- [ ] IT-021 simultaneous symmetric connect leaves exactly one PeerConnection.
+- [x] IT-021 simultaneous symmetric connect leaves exactly one PeerConnection.
 - [ ] IT-022 background/foreground no crash and state reconciles.
 - [ ] IT-023 L2CAP upgrade if supported.
 - [ ] IT-024 forced L2CAP upgrade failure remains on GATT.
 - [ ] IT-025 LAN upgrade if supported.
 - [ ] IT-026 LAN failure after switch triggers secure RESUME to GATT.
 - [ ] IT-027 transport switch under continuous traffic has zero duplicate ACK-required app messages.
-- [ ] IT-028 262144-byte coordinator checkpoint replicates successfully using bounded checkpoint chunks and one logical ACK.
+- [x] IT-028 262144-byte coordinator checkpoint replicates successfully using bounded checkpoint chunks and one logical ACK.
 - [ ] IT-029 Injected terminal GATT submission failure during multi-chunk RELIABLE_ACKED DATA enters RECONNECTING and resumes/retransmits successfully.
 - [ ] IT-030 Injected terminal GATT submission failure during partially transmitted RELIABLE_ORDERED DATA resumes by retransmitting the entire logical message from chunk 0.
 - [ ] IT-031 Simulated transient GATT backpressure does not disconnect/reconnect and transmission resumes when writable.
-- [ ] IT-032 One Runtime with active HostSession advertising and DiscoverySession scanning can create/join an OPEN_TOFU GroupSession without a second physical advertiser/listener, duplicate GATT service registration, or second physical scan.
-- [ ] IT-033 Two peers with an existing READY TOFU direct PeerConnection can enter the same OPEN_TOFU GroupSession, exchange both direct and group traffic over correctly routed logical ownership, and retain no redundant physical BLE connection.
-- [ ] IT-034 Leaving the GroupSession in IT-033 leaves the direct PeerConnection usable.
-- [ ] IT-035 `releasePeerRetention(peerId)` plus any applicable `HostSession.disconnect(peerId, ...)` in IT-033 releases all direct/known-peer/HostSession ownership while GroupSession still requires the link; GroupSession remains usable, and after GroupSession later releases the final owner the connection closes normally.
+- [x] IT-032 One Runtime with active HostSession advertising and DiscoverySession scanning can create/join an OPEN_TOFU GroupSession without a second physical advertiser/listener, duplicate GATT service registration, or second physical scan.
+- [x] IT-033 Two peers with an existing READY TOFU direct PeerConnection can enter the same OPEN_TOFU GroupSession, exchange both direct and group traffic over correctly routed logical ownership, and retain no redundant physical BLE connection.
+- [x] IT-034 Leaving the GroupSession in IT-033 leaves the direct PeerConnection usable.
+- [x] IT-035 `releasePeerRetention(peerId)` plus any applicable `HostSession.disconnect(peerId, ...)` in IT-033 releases all direct/known-peer/HostSession ownership while GroupSession still requires the link; GroupSession remains usable, and after GroupSession later releases the final owner the connection closes normally.
 - [ ] IT-036 Three-peer checkpoint publication with ALL_COMMITTED_MEMBERS reaches DURABLE only after both remote peers fully reassemble, commit, and ACK the exact publication; dropping one ACK forces retry and does not produce false durability.
 - [ ] IT-037 During a three-peer checkpoint barrier, one required peer disconnects and resumes within timeout; the same publication may still reach DURABLE after its exact checkpoint operation is ACKed following RESUME.
 - [ ] IT-038 During a three-peer checkpoint barrier, one required peer is terminally removed before ACK; the original publication completes FAILED/PEER_LEFT and a new publication against the new membership can reach DURABLE.
