@@ -14,8 +14,9 @@ class ReliableDataReceiveResult {
       ReassembledData delivered, List<int>? acknowledgmentMessageId)
       : this._(
             delivered: delivered,
-            acknowledgmentMessageId:
-                List<int>.unmodifiable(acknowledgmentMessageId ?? const []));
+            acknowledgmentMessageId: acknowledgmentMessageId == null
+                ? null
+                : List<int>.unmodifiable(acknowledgmentMessageId));
   ReliableDataReceiveResult.duplicate(List<int> acknowledgmentMessageId)
       : this._(
             acknowledgmentMessageId:

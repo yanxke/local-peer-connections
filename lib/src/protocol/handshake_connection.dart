@@ -62,6 +62,11 @@ class HandshakeConnection {
   bool _started = false;
   bool _localReadySubmitted = false;
   bool _remoteReadyAuthenticated = false;
+  // BackendClosed can race the async decrypt/validation of a READY frame that
+  // was already delivered by the GATT reassembler.  Keep that frame's
+  // protocol result authoritative; malformed READY still completes [ready]
+  // with an error from _receive.
+  bool _remoteReadyFrameReceived = false;
   bool _normalReadySelected = false;
   bool _sasNotified = false;
   Timer? _sasTimeout;
@@ -99,9 +104,15 @@ class HandshakeConnection {
     _subscription = backend.events.listen((event) {
       if (event is BackendBytesReceived) unawaited(_receive(event.bytes));
       if (event is BackendClosed) {
-        _fail(const LpcException(LpcErrorCode.transportClosed));
+        if (!_ready.isCompleted && !_remoteReadyFrameReceived) {
+          _fail(const LpcException(LpcErrorCode.transportClosed));
+        }
       }
-      if (event is BackendError) _fail(event.error);
+      if (event is BackendError &&
+          !_ready.isCompleted &&
+          !_remoteReadyFrameReceived) {
+        _fail(event.error);
+      }
     },
         onError: (Object error, StackTrace stackTrace) =>
             _fail(error, stackTrace));
@@ -136,6 +147,9 @@ class HandshakeConnection {
     try {
       final frame = LpcFrame.decode(bytes);
       _log('receive ${_frameSummary(frame)} state=${exchange.state.name}');
+      if (frame.encrypted && frame.type == FrameType.ready) {
+        _remoteReadyFrameReceived = true;
+      }
       if (!frame.encrypted) {
         final response = await exchange.receivePlaintext(frame);
         if (response != null) {
@@ -269,8 +283,7 @@ class HandshakeConnection {
         _ready.isCompleted) {
       return;
     }
-    await _subscription?.cancel();
-    _ready.complete(PeerConnectionCore(
+    final core = PeerConnectionCore(
         backend: backend,
         sessionRootKey: exchange.result!.secrets.sessionRootKey,
         sessionId: exchange.result!.secrets.sessionId,
@@ -282,8 +295,15 @@ class HandshakeConnection {
         messageIdAllocator: MessageIdAllocator(
             List<int>.generate(4, (_) => Random.secure().nextInt(256))),
         initialNextSequence: 2,
-        initialHighestReceivedSequence: 1));
+        initialHighestReceivedSequence: 1);
+    // READY has already been authenticated in both directions. Publish that
+    // protocol result before awaiting listener teardown: a simultaneous
+    // duplicate-link close can otherwise complete _ready with transportClosed
+    // during subscription cancellation, even though this handshake reached
+    // the authoritative READY state.
     _log('handshake complete remote=${remotePeerId}');
+    _ready.complete(core);
+    await _subscription?.cancel();
   }
 
   Future<void> _send(LpcFrame frame) async {

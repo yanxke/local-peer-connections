@@ -133,13 +133,20 @@ void main() {
       backend: backend,
       endpointId: 'target',
       connection: connection,
+      connectionGeneration: 2,
     );
 
     events.add(const PlatformGattDisconnected('other'));
     await Future<void>.delayed(Duration.zero);
     expect(connection.state, TransportConnectionState.open);
 
-    events.add(const PlatformGattDisconnected('target'));
+    events
+        .add(const PlatformGattDisconnected('target', connectionGeneration: 1));
+    await Future<void>.delayed(Duration.zero);
+    expect(connection.state, TransportConnectionState.open);
+
+    events
+        .add(const PlatformGattDisconnected('target', connectionGeneration: 2));
     await Future<void>.delayed(Duration.zero);
     expect(connection.state, TransportConnectionState.failed);
 
@@ -149,10 +156,13 @@ void main() {
   });
 
   test('GATT terminal and writable events remain transport-scoped', () {
-    expect(
-        PlatformBleEvent.fromPlatform(
-            {'type': 'gattDisconnected', 'endpointId': 'native-id'}),
-        isA<PlatformGattDisconnected>());
+    final disconnected = PlatformBleEvent.fromPlatform({
+      'type': 'gattDisconnected',
+      'endpointId': 'native-id',
+      'connectionGeneration': 7,
+    });
+    expect(disconnected, isA<PlatformGattDisconnected>());
+    expect((disconnected as PlatformGattDisconnected).connectionGeneration, 7);
     expect(PlatformBleEvent.fromPlatform({'type': 'gattWritable'}),
         isA<PlatformGattWritable>());
   });
@@ -169,23 +179,26 @@ void main() {
             (error) => error.code, 'code', LpcErrorCode.bluetoothPoweredOff)));
   });
 
-  test('diagnostic logger summarizes method calls without payload bytes',
+  test('diagnostic logger samples fragment calls without payload bytes',
       () async {
     const channel = MethodChannel('platform-ble-logger-test');
     final logs = <String>[];
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async => 'submitted');
 
-    await PlatformBleBackend(methods: channel, logger: logs.add)
-        .submitGattFragment(
+    final backend = PlatformBleBackend(methods: channel, logger: logs.add);
+    await backend.submitGattFragment(
       'opaque-endpoint',
       Uint8List.fromList([1, 2, 3]),
       transmission: GattFragmentTransmission.normal,
     );
+    await backend.startDiscovery(List.filled(16, 1));
 
-    expect(logs, contains(contains('invoke method=submitGattFragment')));
-    expect(logs, contains(contains('endpointId=opaque-endpoint')));
-    expect(logs, contains(contains('bytes(3)')));
+    // Per-fragment method-call logging is intentionally suppressed because it
+    // can starve the Flutter isolate during real GATT traffic. Lifecycle
+    // calls remain visible for diagnosing setup failures.
+    expect(logs, isNot(contains(contains('submitGattFragment'))));
+    expect(logs, contains(contains('invoke method=startDiscovery')));
     expect(logs.join('\n'), isNot(contains('[1, 2, 3]')));
   });
 

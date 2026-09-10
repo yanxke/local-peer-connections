@@ -7,6 +7,83 @@ import 'package:local_peer_connections/local_peer_connections.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('AUTO_GROUP merge converges one coordinator and routes broadcasts',
+      () async {
+    final link = await _RuntimeLink.create();
+    final host = link.b.createHostSession(HostConfig(autoAccept: true));
+    await host.startAdvertising();
+
+    final connection = await _connectedPeer(link.a.connect('link'));
+    final hostPeer = await _hostPeer(host);
+    expect(connection.state, PeerConnectionState.ready);
+    expect(hostPeer.state, PeerConnectionState.ready);
+
+    // Each side starts with its own singleton GroupId. The runtime must merge
+    // those authenticated, compatible views before either side routes data.
+    final groupA = link.a.joinOrCreateGroup(_groupConfig());
+    final groupB = link.b.joinOrCreateGroup(_groupConfig());
+    final receivedByB = Completer<ReliableMessageReceived>();
+    final receivedByA = Completer<ReliableMessageReceived>();
+    final subA = groupA.events.listen((event) {
+      if (event is ReliableMessageReceived && !receivedByA.isCompleted) {
+        receivedByA.complete(event);
+      }
+    });
+    final subB = groupB.events.listen((event) {
+      if (event is ReliableMessageReceived && !receivedByB.isCompleted) {
+        receivedByB.complete(event);
+      }
+    });
+
+    await _waitFor(
+      () =>
+          groupA.members.length == 2 &&
+          groupB.members.length == 2 &&
+          groupA.groupId == groupB.groupId &&
+          groupA.coordinatorPeerId == groupB.coordinatorPeerId &&
+          groupA.coordinatorPeerId != null &&
+          groupA.isCoordinator != groupB.isCoordinator,
+      timeout: const Duration(seconds: 3),
+    );
+
+    const reliable = SendOptions(deliveryMode: DeliveryMode.reliableAcked);
+    final fromA = groupA.broadcast([1, 2, 3], options: reliable);
+    final eventAtB = await receivedByB.future.timeout(
+      const Duration(seconds: 3),
+      onTimeout: () => throw StateError('A broadcast was not received by B'),
+    );
+    expect(eventAtB.bytes, [1, 2, 3]);
+    expect(eventAtB.sourcePeerId, link.a.localPeerId);
+    expect(
+        await fromA.completed.timeout(
+          const Duration(seconds: 3),
+          onTimeout: () => throw StateError(
+              'A broadcast acknowledgment timed out: A=${groupA.coordinatorPeerId}/${groupA.isCoordinator}/${groupA.members.length}, '
+              'B=${groupB.coordinatorPeerId}/${groupB.isCoordinator}/${groupB.members.length}'),
+        ),
+        BroadcastState.completed);
+
+    final fromB = groupB.broadcast([4, 5, 6], options: reliable);
+    expect(
+        await fromB.completed.timeout(
+          const Duration(seconds: 3),
+          onTimeout: () => throw StateError(
+              'B broadcast timed out: A=${groupA.coordinatorPeerId}/${groupA.isCoordinator}/${groupA.members.length}, '
+              'B=${groupB.coordinatorPeerId}/${groupB.isCoordinator}/${groupB.members.length}'),
+        ),
+        BroadcastState.completed);
+    final eventAtA = await receivedByA.future.timeout(
+      const Duration(seconds: 3),
+      onTimeout: () => throw StateError('B broadcast was not received by A'),
+    );
+    expect(eventAtA.bytes, [4, 5, 6]);
+    expect(eventAtA.sourcePeerId, link.b.localPeerId);
+
+    await subA.cancel();
+    await subB.cancel();
+    await link.close();
+  });
+
   test('UT-199 direct and group ownership reuse one authenticated connection',
       () async {
     final link = await _RuntimeLink.create();
@@ -75,6 +152,30 @@ void main() {
 
     expect(link.aCloseCalls, closesBeforeCancel);
     expect(connection.state, PeerConnectionState.ready);
+    await link.close();
+  });
+
+  test('runtime close closes an incomplete GATT handshake binding', () async {
+    final link = await _RuntimeLink.create();
+    final host = link.a.createHostSession(HostConfig(autoAccept: true));
+    await host.startAdvertising();
+
+    // Simulate a native inbound link that reached the platform-ready point
+    // but has not completed HELLO/AUTH/READY yet. There is no PeerConnection
+    // owner to disconnect, so runtime shutdown must close the raw binding.
+    link._aEvents.add(const PlatformGattConnected(
+      'inbound',
+      'peripheral',
+      connectionGeneration: 1,
+    ));
+    await Future<void>.delayed(Duration.zero);
+    expect(link.aCloseCalls, 0);
+    await link.a.close();
+    await _waitFor(() => link.aCloseCalls >= 1);
+
+    // The close call above is produced by runtime shutdown, not by the
+    // handshake, and proves the native transport is released.
+    expect(link.aCloseCalls, greaterThanOrEqualTo(1));
     await link.close();
   });
 
@@ -259,6 +360,77 @@ void main() {
     await link.close();
   });
 
+  test('reconnect releases a stale native client before retrying connectGatt',
+      () async {
+    final link = await _RuntimeLink.create(
+      configA: RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: true,
+        reconnectTimeoutMs: 3000,
+      ),
+      configB: RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: true,
+        reconnectTimeoutMs: 3000,
+      ),
+      rejectAConnectWhileNativeLinkOpen: true,
+    );
+    final host = link.b.createHostSession(HostConfig(autoAccept: true));
+    await host.startAdvertising();
+    final connection = await _connectedPeer(link.a.connect('link'));
+    await _hostPeer(host);
+    link.failNextAFragment();
+
+    // The first post-READY write fails inside the native transport. The
+    // native client handle is intentionally left marked open, reproducing
+    // Android's ENDPOINT_BUSY response if reconnect calls connectGatt too
+    // early. Runtime must close that stale generation first.
+    final send = connection.send([1, 2, 3]);
+    await _waitForState(connection, PeerConnectionState.reconnecting);
+    await _waitForState(connection, PeerConnectionState.ready,
+        timeout: const Duration(seconds: 3));
+
+    expect(await send.completed, isNot(SendState.remoteAcknowledged));
+    expect(link.aCloseCalls, greaterThanOrEqualTo(1));
+    expect(link.aGattConnected, greaterThanOrEqualTo(2));
+    expect(connection.state, PeerConnectionState.ready);
+
+    await link.close();
+  });
+
+  test('reconnect expiry closes an in-progress resume candidate', () async {
+    final link = await _RuntimeLink.create(
+      configA: const RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: true,
+        reconnectTimeoutMs: 1000,
+      ),
+      configB: const RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: true,
+        reconnectTimeoutMs: 1000,
+      ),
+      stallAReconnectHandshake: true,
+    );
+    final host = link.b.createHostSession(HostConfig(autoAccept: true));
+    await host.startAdvertising();
+    final connection = await _connectedPeer(link.a.connect('link'));
+    await _hostPeer(host);
+
+    link.dropBoth();
+    await _waitForState(connection, PeerConnectionState.reconnecting);
+    await _waitForState(connection, PeerConnectionState.disconnected,
+        timeout: const Duration(seconds: 2));
+
+    // The candidate received a native connected callback, so expiry must
+    // close that candidate even though the core still owns the old, already
+    // failed transport generation.
+    expect(link.aGattConnected, 2);
+    expect(link.aCloseCalls, greaterThanOrEqualTo(1));
+
+    await link.close();
+  });
+
   test('connect while reconnecting reuses the existing logical peer', () async {
     final link = await _RuntimeLink.create(
       configA: const RuntimeConfig(
@@ -354,6 +526,60 @@ void main() {
     await subscription.cancel();
     await discovery.stop();
     expect(connected.connection.state, PeerConnectionState.ready);
+    await link.close();
+  });
+
+  test('READY peer cancels competing probes without disabling reconnect',
+      () async {
+    final resolver = _CountingKnownPeerResolver();
+    final link = await _RuntimeLink.create(
+      configA: RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoConnectKnownPeers: true,
+        knownPeerResolver: resolver,
+        autoReconnect: true,
+        reconnectTimeoutMs: 4000,
+      ),
+      configB: const RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: true,
+        reconnectTimeoutMs: 4000,
+      ),
+      stalledAEndpoints: {'competing-endpoint'},
+    );
+    final host = link.b.createHostSession(HostConfig(autoAccept: true));
+    await host.startAdvertising();
+    final runtimeEvents = <RuntimeEvent>[];
+    final subscription = link.a.events.listen(runtimeEvents.add);
+    final discovery = await link.a.startDiscovery();
+
+    // Hold one automatic candidate open, then complete a different explicit
+    // connection. The newly authenticated owner must cancel the candidate so
+    // it cannot race the logical session or tear down its transport.
+    link.discoverA('competing-endpoint');
+    await _waitFor(
+        () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 1);
+    final closeCallsBeforeOwner = link.aCloseCalls;
+    final connection = await _connectedPeer(link.a.connect('link'));
+    await _hostPeer(host);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(runtimeEvents.whereType<KnownPeerProbeStarted>(), hasLength(1));
+    expect(link.aCloseCalls, greaterThan(closeCallsBeforeOwner));
+    expect(resolver.lookups, 0);
+    expect(connection.state, PeerConnectionState.ready);
+
+    // Probe suppression is independent from the logical reconnect scheduler.
+    // Losing the central-side transport must still move the same peer through
+    // RECONNECTING and back to READY.
+    link.dropBoth();
+    await _waitForState(connection, PeerConnectionState.reconnecting);
+    await _waitForState(connection, PeerConnectionState.ready,
+        timeout: const Duration(seconds: 3));
+    expect(connection.state, PeerConnectionState.ready);
+    expect(link.aGattConnected, greaterThanOrEqualTo(2));
+
+    await subscription.cancel();
+    await discovery.stop();
     await link.close();
   });
 
@@ -533,7 +759,15 @@ class _RuntimeLink {
   final StreamController<PlatformBleEvent> _bEvents =
       StreamController<PlatformBleEvent>.broadcast();
   final bool duplicateGattCallbacks;
+  final Set<String> stalledAEndpoints;
+  final bool rejectAConnectWhileNativeLinkOpen;
+  final bool stallAReconnectHandshake;
   bool suppressReconnects = false;
+  bool _failNextAFragment = false;
+  bool _aNativeLinkOpen = false;
+  int _nextGeneration = 0;
+  int? _aGeneration;
+  int? _bGeneration;
   late final NearbyRuntime a;
   late final NearbyRuntime b;
   int aGattConnected = 0;
@@ -547,11 +781,17 @@ class _RuntimeLink {
     _aEvents.add(PlatformEndpointFound(endpointId, rssi: -40));
   }
 
+  void failNextAFragment() => _failNextAFragment = true;
+
   static Future<_RuntimeLink> create(
       {RuntimeConfig? configA,
       RuntimeConfig? configB,
-      bool duplicateGattCallbacks = false}) async {
-    final link = _RuntimeLink._(duplicateGattCallbacks);
+      bool duplicateGattCallbacks = false,
+      Set<String> stalledAEndpoints = const <String>{},
+      bool rejectAConnectWhileNativeLinkOpen = false,
+      bool stallAReconnectHandshake = false}) async {
+    final link = _RuntimeLink._(duplicateGattCallbacks, stalledAEndpoints,
+        rejectAConnectWhileNativeLinkOpen, stallAReconnectHandshake);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(link._aMethods, link._handleA);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -576,7 +816,9 @@ class _RuntimeLink {
     return link;
   }
 
-  _RuntimeLink._(this.duplicateGattCallbacks);
+  _RuntimeLink._(this.duplicateGattCallbacks, Set<String> stalledAEndpoints,
+      this.rejectAConnectWhileNativeLinkOpen, this.stallAReconnectHandshake)
+      : stalledAEndpoints = Set.unmodifiable(stalledAEndpoints);
 
   Future<Object?> _handleA(MethodCall call) => _handle(call, true);
   Future<Object?> _handleB(MethodCall call) => _handle(call, false);
@@ -590,6 +832,20 @@ class _RuntimeLink {
     final endpoint = arguments['endpointId'] as String?;
     switch (call.method) {
       case 'connectGatt':
+        if (fromA && rejectAConnectWhileNativeLinkOpen && _aNativeLinkOpen) {
+          throw PlatformException(
+              code: 'ENDPOINT_BUSY',
+              message: 'GATT endpoint already has a client link');
+        }
+        if (fromA) _aNativeLinkOpen = true;
+        final generation = ++_nextGeneration;
+        if (fromA) {
+          _aGeneration = generation;
+          _bGeneration = generation;
+        } else {
+          _bGeneration = generation;
+          _aGeneration = generation;
+        }
         if (fromA) {
           aGattConnected++;
         } else {
@@ -597,6 +853,15 @@ class _RuntimeLink {
         }
         if (suppressReconnects) return null;
         final linkEndpoint = endpoint ?? 'link';
+        if (fromA && stalledAEndpoints.contains(linkEndpoint)) return null;
+        if (fromA && stallAReconnectHandshake && aGattConnected > 1) {
+          // Leave the native link open and report only the local connected
+          // callback. This models a candidate RESUME that never receives a
+          // peer response before the reconnect deadline.
+          ownEvents.add(PlatformGattConnected(linkEndpoint, 'central',
+              connectionGeneration: generation));
+          return null;
+        }
         final callbacks = duplicateGattCallbacks ? 2 : 1;
         for (var remaining = callbacks; remaining > 0; remaining--) {
           if (fromA) {
@@ -606,21 +871,30 @@ class _RuntimeLink {
             bGattCallbacks++;
             aGattCallbacks++;
           }
-          ownEvents.add(PlatformGattConnected(linkEndpoint, 'central'));
-          peerEvents.add(PlatformGattConnected(linkEndpoint, 'peripheral'));
+          ownEvents.add(PlatformGattConnected(linkEndpoint, 'central',
+              connectionGeneration: generation));
+          peerEvents.add(PlatformGattConnected(linkEndpoint, 'peripheral',
+              connectionGeneration: generation));
         }
         return null;
       case 'submitGattFragment':
+        if (fromA && _failNextAFragment) {
+          _failNextAFragment = false;
+          return 'terminalFailure';
+        }
         final fragment = arguments['fragment'] as Uint8List;
         peerEvents.add(PlatformGattFragment(endpoint ?? 'link', fragment));
         return 'submitted';
       case 'closeGattConnection':
+        final generation = fromA ? _aGeneration : _bGeneration;
+        if (fromA) _aNativeLinkOpen = false;
         if (fromA) {
           aCloseCalls++;
         } else {
           bCloseCalls++;
         }
-        peerEvents.add(PlatformGattDisconnected(endpoint ?? 'link'));
+        peerEvents.add(PlatformGattDisconnected(endpoint ?? 'link',
+            connectionGeneration: generation));
         return null;
       default:
         return null;

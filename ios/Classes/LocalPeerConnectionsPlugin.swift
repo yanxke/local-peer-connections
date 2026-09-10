@@ -18,9 +18,20 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   private var gattService: CBMutableService?
   private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
   private var expectedGattServices: [UUID: CBUUID] = [:]
+  private var expectedGattGenerations: [UUID: Int64] = [:]
+  private var closingGattGenerations: [UUID: Int64] = [:]
   private var activeServiceUuid: CBUUID?
   private var gattClients: [UUID: GattClient] = [:]
   private var gattServerCentrals: [UUID: CBCentral] = [:]
+  // A CBCentral UUID identifies the remote device, not a particular GATT
+  // link. iOS can have an outbound central link and an inbound peripheral
+  // link to the same device at the same time, so server links use an opaque
+  // connection-scoped endpoint ID just like Android does.
+  private var gattServerEndpointByCentral: [UUID: String] = [:]
+  private var gattServerCentralByEndpoint: [String: UUID] = [:]
+  private var gattServerGenerations: [String: Int64] = [:]
+  private var nextGattGeneration: Int64 = 1
+  private var nextServerEndpointId: Int64 = 1
   private var lastDiscoveryLog: [UUID: Date] = [:]
 
   public static func register(with registrar: FlutterPluginRegistrar) {
@@ -88,7 +99,13 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
         try self.listenGatt(try self.serviceUuid(arguments))
       }
     case "stopGatt":
-      peripheral.removeAllServices(); gattService = nil; gattServerCentrals.removeAll(); result(nil)
+      peripheral.removeAllServices()
+      gattService = nil
+      gattServerCentrals.removeAll()
+      gattServerEndpointByCentral.removeAll()
+      gattServerCentralByEndpoint.removeAll()
+      gattServerGenerations.removeAll()
+      result(nil)
     case "connectGatt":
       backend(call, result) { arguments in
         try self.requirePoweredOn(self.central.state)
@@ -100,19 +117,80 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
         guard let serviceUuid = self.activeServiceUuid else {
           throw BackendError("UNSUPPORTED_CAPABILITY", "no configured LPC GATT service UUID")
         }
+        guard self.gattClients[identifier] == nil,
+              self.expectedGattServices[identifier] == nil else {
+          throw BackendError("ENDPOINT_BUSY", "GATT endpoint already has a client link")
+        }
+        let generation = self.nextGattGeneration
+        self.nextGattGeneration += 1
         self.expectedGattServices[identifier] = serviceUuid
+        self.expectedGattGenerations[identifier] = generation
+        print("[LocalPeerConnections] client connect requested endpoint=\(endpointId) generation=\(generation)")
         self.central.connect(peripheral, options: nil)
       }
     case "submitGattFragment":
       backendValue(call, result) { arguments in try self.submitGattFragment(arguments) }
     case "closeGattConnection":
       backend(call, result) { arguments in
-        guard let endpointId = arguments["endpointId"] as? String,
-              let identifier = UUID(uuidString: endpointId),
-              let client = self.gattClients.removeValue(forKey: identifier) else {
+        guard let endpointId = arguments["endpointId"] as? String else {
           throw BackendError("ENDPOINT_LOST", "unknown GATT connection")
         }
-        self.central.cancelPeripheralConnection(client.peripheral)
+        let requestedGeneration = (arguments["connectionGeneration"] as? NSNumber)?.int64Value
+
+        // A peripheral-side endpoint is represented by an opaque local
+        // handle. There is no CoreBluetooth API to actively cancel the
+        // remote central, but removing our mapping makes close idempotent and
+        // prevents late Dart writes from being delivered to that link.
+        if let centralIdentifier = self.gattServerCentralByEndpoint[endpointId] {
+          let currentGeneration = self.gattServerGenerations[endpointId]
+          if let requestedGeneration, requestedGeneration != currentGeneration {
+            let currentText = currentGeneration.map { String($0) } ?? "none"
+            print("[LocalPeerConnections] ignore stale close endpoint=\(endpointId) generation=\(requestedGeneration) current=\(currentText)")
+            return
+          }
+          self.gattServerCentralByEndpoint.removeValue(forKey: endpointId)
+          self.gattServerEndpointByCentral.removeValue(forKey: centralIdentifier)
+          self.gattServerCentrals.removeValue(forKey: centralIdentifier)
+          self.gattServerGenerations.removeValue(forKey: endpointId)
+          print("[LocalPeerConnections] closed server endpoint=\(endpointId)")
+          return
+        }
+
+        // Server handles are local, opaque IDs. A disconnect callback may
+        // remove the handle before a racing handshake cleanup reaches this
+        // method, so an unknown server handle is also an idempotent no-op.
+        if endpointId.hasPrefix("server-") {
+          print("[LocalPeerConnections] close ignored; server endpoint already closed \(endpointId)")
+          return
+        }
+
+        guard let identifier = UUID(uuidString: endpointId) else {
+          throw BackendError("ENDPOINT_LOST", "unknown GATT connection")
+        }
+        let currentGeneration = self.gattClients[identifier]?.generation ?? self.expectedGattGenerations[identifier]
+        if let requestedGeneration, requestedGeneration != currentGeneration {
+          let currentText = currentGeneration.map { String($0) } ?? "none"
+          print("[LocalPeerConnections] ignore stale close endpoint=\(endpointId) generation=\(requestedGeneration) current=\(currentText)")
+          return
+        }
+        // Closing is idempotent across the platform backends. A disconnect
+        // callback can remove the client before a racing handshake cleanup
+        // reaches this method, so an already-closed endpoint is not an error.
+        if let client = self.gattClients.removeValue(forKey: identifier) {
+          self.expectedGattServices.removeValue(forKey: identifier)
+          self.expectedGattGenerations.removeValue(forKey: identifier)
+          self.closingGattGenerations[identifier] = client.generation
+          self.central.cancelPeripheralConnection(client.peripheral)
+        } else if let generation = self.expectedGattGenerations.removeValue(forKey: identifier) {
+          self.expectedGattServices.removeValue(forKey: identifier)
+          self.closingGattGenerations[identifier] = generation
+          if let peripheral = self.discoveredPeripherals[identifier] {
+            self.central.cancelPeripheralConnection(peripheral)
+          }
+        } else {
+          self.expectedGattServices.removeValue(forKey: identifier)
+          print("[LocalPeerConnections] close ignored; endpoint already closed \(endpointId)")
+        }
       }
     default:
       result(FlutterMethodNotImplemented)
@@ -162,7 +240,16 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   }
   public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral,
                              error: Error?) {
+    if let closingGeneration = closingGattGenerations[peripheral.identifier],
+       let replacementGeneration = expectedGattGenerations[peripheral.identifier],
+       replacementGeneration != closingGeneration {
+      closingGattGenerations.removeValue(forKey: peripheral.identifier)
+      print("[LocalPeerConnections] ignore stale connect failure endpoint=\(peripheral.identifier.uuidString) generation=\(closingGeneration) replacement=\(replacementGeneration)")
+      return
+    }
+    closingGattGenerations.removeValue(forKey: peripheral.identifier)
     expectedGattServices.removeValue(forKey: peripheral.identifier)
+    expectedGattGenerations.removeValue(forKey: peripheral.identifier)
     eventSink?(FlutterError(code: "ENDPOINT_LOST", message: error?.localizedDescription, details: nil))
   }
   public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
@@ -201,7 +288,10 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
             let control = characteristics.first(where: { $0.uuid == required[2] }) else {
         rejectGatt(peripheral, message: "LPC GATT characteristics missing"); return
       }
-      gattClients[peripheral.identifier] = GattClient(peripheral: peripheral, rx: rx, tx: tx, control: control)
+      guard let generation = expectedGattGenerations[peripheral.identifier] else {
+        rejectGatt(peripheral, message: "LPC GATT connection generation missing"); return
+      }
+      gattClients[peripheral.identifier] = GattClient(peripheral: peripheral, rx: rx, tx: tx, control: control, generation: generation)
       peripheral.setNotifyValue(true, for: tx)
     } catch {
       rejectGatt(peripheral, message: error.localizedDescription)
@@ -214,13 +304,15 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
       rejectGatt(peripheral, message: error?.localizedDescription ?? "LPC TX subscription failed"); return
     }
     eventSink?(["type": "gattConnected", "endpointId": peripheral.identifier.uuidString,
-                "localRole": "central", "platformSafeWriteSize": peripheral.maximumWriteValueLength(for: .withResponse)])
+                "localRole": "central", "platformSafeWriteSize": peripheral.maximumWriteValueLength(for: .withResponse),
+                "connectionGeneration": client.generation])
   }
   public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic,
                          error: Error?) {
     guard error == nil, let client = gattClients[peripheral.identifier],
           characteristic.uuid == client.tx.uuid, let value = characteristic.value else { return }
     eventSink?(["type": "gattFragment", "endpointId": peripheral.identifier.uuidString,
+                "connectionGeneration": client.generation,
                 "bytes": [UInt8](value)])
   }
   public func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic,
@@ -229,14 +321,32 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     if let error {
       eventSink?(FlutterError(code: "PLATFORM_ERROR", message: error.localizedDescription, details: nil))
     } else {
-      eventSink?(["type": "gattWritable", "endpointId": peripheral.identifier.uuidString])
+      eventSink?(["type": "gattWritable", "endpointId": peripheral.identifier.uuidString,
+                  "connectionGeneration": client.generation])
     }
   }
   public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
                              error: Error?) {
+    let closingGeneration = closingGattGenerations[peripheral.identifier]
+    // CoreBluetooth can deliver the disconnect callback for a cancelled
+    // connection after Dart has already started its replacement. Once a new
+    // generation is expected, the old callback must not erase the new
+    // expected service/client state or report a false disconnect for it.
+    if let closingGeneration,
+       let replacementGeneration = expectedGattGenerations[peripheral.identifier],
+       replacementGeneration != closingGeneration {
+      closingGattGenerations.removeValue(forKey: peripheral.identifier)
+      print("[LocalPeerConnections] ignore stale disconnect endpoint=\(peripheral.identifier.uuidString) generation=\(closingGeneration) replacement=\(replacementGeneration)")
+      return
+    }
+    let generation = closingGattGenerations.removeValue(forKey: peripheral.identifier)
+      ?? gattClients[peripheral.identifier]?.generation
+      ?? expectedGattGenerations[peripheral.identifier]
     expectedGattServices.removeValue(forKey: peripheral.identifier)
+    expectedGattGenerations.removeValue(forKey: peripheral.identifier)
     gattClients.removeValue(forKey: peripheral.identifier)
-    eventSink?(["type": "gattDisconnected", "endpointId": peripheral.identifier.uuidString])
+    eventSink?(["type": "gattDisconnected", "endpointId": peripheral.identifier.uuidString,
+                "connectionGeneration": generation as Any])
   }
   public func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
     if let error {
@@ -251,7 +361,11 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
             request.offset == 0, let value = request.value else {
         peripheral.respond(to: request, withResult: .requestNotSupported); continue
       }
-      eventSink?(["type": "gattFragment", "endpointId": request.central.identifier.uuidString,
+      guard let endpointId = gattServerEndpointByCentral[request.central.identifier] else {
+        peripheral.respond(to: request, withResult: .requestNotSupported); continue
+      }
+      eventSink?(["type": "gattFragment", "endpointId": endpointId,
+                  "connectionGeneration": gattServerGenerations[endpointId] as Any,
                   "bytes": [UInt8](value)])
       peripheral.respond(to: request, withResult: .success)
     }
@@ -260,14 +374,30 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
                                 didSubscribeTo characteristic: CBCharacteristic) {
     guard let service = gattService,
           characteristic.uuid == (try? characteristicUuid(service.uuid, increment: 2)) else { return }
+    if gattServerEndpointByCentral[central.identifier] != nil {
+      print("[LocalPeerConnections] duplicate server subscription central=\(central.identifier.uuidString)")
+      return
+    }
+    let endpointId = "server-\(nextServerEndpointId)"
+    nextServerEndpointId += 1
     gattServerCentrals[central.identifier] = central
-    eventSink?(["type": "gattConnected", "endpointId": central.identifier.uuidString,
-                "localRole": "peripheral", "platformSafeWriteSize": 20])
+    gattServerEndpointByCentral[central.identifier] = endpointId
+    gattServerCentralByEndpoint[endpointId] = central.identifier
+    let generation = nextGattGeneration
+    nextGattGeneration += 1
+    gattServerGenerations[endpointId] = generation
+    eventSink?(["type": "gattConnected", "endpointId": endpointId,
+                "localRole": "peripheral", "platformSafeWriteSize": 20,
+                "connectionGeneration": generation])
   }
   public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral,
                                 didUnsubscribeFrom characteristic: CBCharacteristic) {
+    guard let endpointId = gattServerEndpointByCentral.removeValue(forKey: central.identifier) else { return }
+    gattServerCentralByEndpoint.removeValue(forKey: endpointId)
     gattServerCentrals.removeValue(forKey: central.identifier)
-    eventSink?(["type": "gattDisconnected", "endpointId": central.identifier.uuidString])
+    let generation = gattServerGenerations.removeValue(forKey: endpointId)
+    eventSink?(["type": "gattDisconnected", "endpointId": endpointId,
+                "connectionGeneration": generation as Any])
   }
   public func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
     // Dart owns the bounded fragment queue and will retry only after an
@@ -322,18 +452,29 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
 
   private func submitGattFragment(_ arguments: [String: Any]) throws -> String {
     guard let endpointId = arguments["endpointId"] as? String,
-          let identifier = UUID(uuidString: endpointId),
           let fragment = arguments["fragment"] as? FlutterStandardTypedData,
           let transmission = arguments["transmission"] as? String else {
       throw BackendError("ENDPOINT_LOST", "unknown GATT connection")
     }
-    if let central = gattServerCentrals[identifier], let service = gattService,
+    let requestedGeneration = (arguments["connectionGeneration"] as? NSNumber)?.int64Value
+    if let centralIdentifier = gattServerCentralByEndpoint[endpointId],
+       let central = gattServerCentrals[centralIdentifier], let service = gattService,
        let tx = service.characteristics?.first(where: { $0.uuid == (try? characteristicUuid(service.uuid, increment: 2)) }) as? CBMutableCharacteristic {
+      if let requestedGeneration,
+         gattServerGenerations[endpointId] != requestedGeneration {
+        throw BackendError("ENDPOINT_LOST", "stale GATT connection generation")
+      }
       return peripheral.updateValue(fragment.data, for: tx, onSubscribedCentrals: [central])
         ? "submitted" : "temporarilyUnavailable"
     }
+    guard let identifier = UUID(uuidString: endpointId) else {
+      throw BackendError("ENDPOINT_LOST", "unknown GATT connection")
+    }
     guard let client = gattClients[identifier] else {
       throw BackendError("ENDPOINT_LOST", "unknown GATT connection")
+    }
+    if let requestedGeneration, client.generation != requestedGeneration {
+      throw BackendError("ENDPOINT_LOST", "stale GATT connection generation")
     }
     if transmission == "notify" { return "terminalFailure" }
     client.peripheral.writeValue(fragment.data, for: client.rx,
@@ -356,8 +497,12 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     return CBUUID(data: Data(bytes))
   }
   private func rejectGatt(_ peripheral: CBPeripheral, message: String) {
+    let generation = gattClients[peripheral.identifier]?.generation
+      ?? expectedGattGenerations[peripheral.identifier]
     expectedGattServices.removeValue(forKey: peripheral.identifier)
+    expectedGattGenerations.removeValue(forKey: peripheral.identifier)
     gattClients.removeValue(forKey: peripheral.identifier)
+    if let generation { closingGattGenerations[peripheral.identifier] = generation }
     central.cancelPeripheralConnection(peripheral)
     eventSink?(FlutterError(code: "PLATFORM_ERROR", message: message, details: nil))
   }
@@ -412,5 +557,6 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     let rx: CBCharacteristic
     let tx: CBCharacteristic
     let control: CBCharacteristic
+    let generation: Int64
   }
 }

@@ -38,4 +38,17 @@ void main() {
         throwsA(isA<LpcException>().having(
             (error) => error.code, 'code', LpcErrorCode.messageIdCollision)));
   });
+
+  test('reliable ordered completion does not request an ACK', () {
+    final receiver = ReliableDataReceiver();
+    final result = receiver.add(
+        List<int>.filled(8, 2),
+        chunkData([9],
+                mode: DeliveryMode.reliableOrdered,
+                priority: SendPriority.normal)
+            .single);
+    expect(result.delivered!.bytes, [9]);
+    expect(result.acknowledgmentMessageId, isNull);
+    expect(result.isDuplicate, isFalse);
+  });
 }

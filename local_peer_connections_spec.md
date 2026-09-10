@@ -8297,6 +8297,14 @@ Every mobile release candidate MUST run:
 - [ ] IT-037 During a three-peer checkpoint barrier, one required peer disconnects and resumes within timeout; the same publication may still reach DURABLE after its exact checkpoint operation is ACKed following RESUME.
 - [ ] IT-038 During a three-peer checkpoint barrier, one required peer is terminally removed before ACK; the original publication completes FAILED/PEER_LEFT and a new publication against the new membership can reach DURABLE.
 
+## In-process Runtime Integration Tests
+
+These deterministic tests use the public platform BLE boundary with an
+in-memory three-runtime GATT mesh. They complement, but do not replace, the
+physical Android/iOS release-candidate tests above.
+
+- [x] IT-039 Three runtimes complete authenticated pairwise GATT handshakes, form a compatible staged group, route reliable traffic through the committed coordinator, retain the GroupId while the coordinator links are dropped, and route reliable traffic after the surviving membership/coordinator view is committed.
+
 ## Automatic Coordinator Tests
 
 - [x] COORD-001 Three peers starting simultaneously converge on one coordinator without user host selection.

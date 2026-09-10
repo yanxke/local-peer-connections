@@ -116,11 +116,14 @@ class PlatformBleBackend {
 
   Future<GattFragmentSubmission> submitGattFragment(
       String endpointId, Uint8List fragment,
-      {required GattFragmentTransmission transmission}) async {
+      {required GattFragmentTransmission transmission,
+      int? connectionGeneration}) async {
     final result = await _invoke<String>('submitGattFragment', {
       'endpointId': endpointId,
       'fragment': fragment,
       'transmission': transmission.name,
+      if (connectionGeneration != null)
+        'connectionGeneration': connectionGeneration,
     });
     return switch (result) {
       'submitted' => GattFragmentSubmission.submitted,
@@ -131,8 +134,13 @@ class PlatformBleBackend {
     };
   }
 
-  Future<void> closeGattConnection(String endpointId) =>
-      _invoke<void>('closeGattConnection', {'endpointId': endpointId});
+  Future<void> closeGattConnection(String endpointId,
+          {int? connectionGeneration}) =>
+      _invoke<void>('closeGattConnection', {
+        'endpointId': endpointId,
+        if (connectionGeneration != null)
+          'connectionGeneration': connectionGeneration,
+      });
 
   Uint8List _serviceUuid(List<int> value) {
     if (value.length != 16) {
@@ -142,10 +150,17 @@ class PlatformBleBackend {
   }
 
   Future<T> _invoke<T>(String method, [Map<String, Object?>? arguments]) async {
-    _log('invoke method=$method${_argumentsSummary(arguments)}');
+    // Fragment submission can occur dozens of times per frame and is already
+    // summarized by the owning GATT connection. Logging every native method
+    // call can starve the Flutter isolate and make the integration control
+    // server appear hung on real devices. Keep lifecycle/error calls verbose;
+    // retain the actual transport result for submit failures below.
+    final logInvocation = method != 'submitGattFragment';
+    if (logInvocation)
+      _log('invoke method=$method${_argumentsSummary(arguments)}');
     try {
       final result = (await _methods.invokeMethod<T>(method, arguments)) as T;
-      _log('invoke complete method=$method');
+      if (logInvocation) _log('invoke complete method=$method');
       return result;
     } on PlatformException catch (error) {
       _log(
@@ -197,6 +212,7 @@ class PlatformGattFragmentPlatform implements GattFragmentPlatform {
     required PlatformBleBackend backend,
     required this.endpointId,
     required this.platformSafeWriteSize,
+    this.connectionGeneration,
   }) : _backend = backend {
     if (platformSafeWriteSize <= 7) {
       throw const LpcException(LpcErrorCode.resourceExhausted,
@@ -206,6 +222,7 @@ class PlatformGattFragmentPlatform implements GattFragmentPlatform {
 
   final PlatformBleBackend _backend;
   final String endpointId;
+  final int? connectionGeneration;
   @override
   final int platformSafeWriteSize;
 
@@ -214,10 +231,12 @@ class PlatformGattFragmentPlatform implements GattFragmentPlatform {
           {GattFragmentTransmission transmission =
               GattFragmentTransmission.normal}) =>
       _backend.submitGattFragment(endpointId, fragment,
-          transmission: transmission);
+          transmission: transmission,
+          connectionGeneration: connectionGeneration);
 
   @override
-  Future<void> close() => _backend.closeGattConnection(endpointId);
+  Future<void> close() => _backend.closeGattConnection(endpointId,
+      connectionGeneration: connectionGeneration);
 }
 
 /// Connects native connection-scoped fragment events to one portable GATT
@@ -227,27 +246,47 @@ class PlatformGattConnectionBinding {
     required PlatformBleBackend backend,
     required this.endpointId,
     required this.connection,
-  }) : _subscription = backend.events.listen(
-          (event) {
-            if (event is PlatformGattFragment &&
-                event.endpointId == endpointId) {
-              connection.receiveGattFragment(event.bytes);
-            }
-            if (event is PlatformGattDisconnected &&
-                event.endpointId == endpointId) {
-              connection.terminalFailure();
-            }
-            if (event is PlatformGattWritable &&
-                (event.endpointId == null || event.endpointId == endpointId)) {
-              connection.writable();
-            }
-          },
-          onError: (_, __) => connection.terminalFailure(),
-        );
+    this.connectionGeneration,
+  }) {
+    _subscription = backend.events.listen(
+      (event) {
+        if (event is PlatformGattDisconnected &&
+            event.endpointId == endpointId) {
+          connection.logger?.call(
+              'platform disconnect eventGeneration=${event.connectionGeneration} bindingGeneration=$connectionGeneration');
+        }
+        if (event is PlatformGattFragment &&
+            event.endpointId == endpointId &&
+            _matchesGeneration(event.connectionGeneration)) {
+          connection.receiveGattFragment(event.bytes);
+        }
+        if (event is PlatformGattDisconnected &&
+            event.endpointId == endpointId &&
+            _matchesGeneration(event.connectionGeneration)) {
+          connection.terminalFailure();
+        }
+        if (event is PlatformGattWritable &&
+            (event.endpointId == null || event.endpointId == endpointId) &&
+            _matchesGeneration(event.connectionGeneration)) {
+          connection.writable();
+        }
+      },
+      onError: (_, __) => connection.terminalFailure(),
+    );
+  }
 
   final String endpointId;
   final GattBackendConnection connection;
-  final StreamSubscription<PlatformBleEvent> _subscription;
+  final int? connectionGeneration;
+  late final StreamSubscription<PlatformBleEvent> _subscription;
+
+  bool acceptsGeneration(int? eventGeneration) =>
+      _matchesGeneration(eventGeneration);
+
+  bool _matchesGeneration(int? eventGeneration) =>
+      connectionGeneration == null ||
+      eventGeneration == null ||
+      connectionGeneration == eventGeneration;
 
   Future<void> close() => _subscription.cancel();
 }
@@ -276,7 +315,9 @@ sealed class PlatformBleEvent {
         final safeWriteSize = value['platformSafeWriteSize'];
         return PlatformGattConnected(value['endpointId'] as String, role,
             platformSafeWriteSize:
-                safeWriteSize is int && safeWriteSize > 7 ? safeWriteSize : 20);
+                safeWriteSize is int && safeWriteSize > 7 ? safeWriteSize : 20,
+            connectionGeneration:
+                (value['connectionGeneration'] as num?)?.toInt());
       }
     }
     if (type == 'gattFragment' &&
@@ -287,15 +328,21 @@ sealed class PlatformBleEvent {
       // them here as a defensive compatibility measure.
       if (bytes.every((byte) => byte is int && byte >= -128 && byte <= 255)) {
         return PlatformGattFragment(value['endpointId'] as String,
-            bytes.cast<int>().map((byte) => byte & 0xff).toList());
+            bytes.cast<int>().map((byte) => byte & 0xff).toList(),
+            connectionGeneration:
+                (value['connectionGeneration'] as num?)?.toInt());
       }
     }
     if (type == 'gattDisconnected' && value['endpointId'] is String) {
-      return PlatformGattDisconnected(value['endpointId'] as String);
+      return PlatformGattDisconnected(value['endpointId'] as String,
+          connectionGeneration:
+              (value['connectionGeneration'] as num?)?.toInt());
     }
     if (type == 'gattWritable' &&
         (value['endpointId'] == null || value['endpointId'] is String)) {
-      return PlatformGattWritable(value['endpointId'] as String?);
+      return PlatformGattWritable(value['endpointId'] as String?,
+          connectionGeneration:
+              (value['connectionGeneration'] as num?)?.toInt());
     }
     throw const LpcException(
         LpcErrorCode.platformError, 'unknown native backend event');
@@ -315,27 +362,32 @@ class PlatformEndpointFound extends PlatformBleEvent {
 /// endpoint ID remains platform-local and cannot be used as a protocol PeerId.
 class PlatformGattConnected extends PlatformBleEvent {
   const PlatformGattConnected(this.endpointId, this.localRole,
-      {this.platformSafeWriteSize = 20});
+      {this.platformSafeWriteSize = 20, this.connectionGeneration});
   final String endpointId;
   final String localRole;
   final int platformSafeWriteSize;
+  final int? connectionGeneration;
 }
 
 class PlatformGattFragment extends PlatformBleEvent {
-  PlatformGattFragment(this.endpointId, List<int> bytes)
+  PlatformGattFragment(this.endpointId, List<int> bytes,
+      {this.connectionGeneration})
       : bytes = Uint8List.fromList(bytes);
   final String endpointId;
   final Uint8List bytes;
+  final int? connectionGeneration;
 }
 
 class PlatformGattDisconnected extends PlatformBleEvent {
-  const PlatformGattDisconnected(this.endpointId);
+  const PlatformGattDisconnected(this.endpointId, {this.connectionGeneration});
   final String endpointId;
+  final int? connectionGeneration;
 }
 
 class PlatformGattWritable extends PlatformBleEvent {
-  const PlatformGattWritable(this.endpointId);
+  const PlatformGattWritable(this.endpointId, {this.connectionGeneration});
   final String? endpointId;
+  final int? connectionGeneration;
 }
 
 const _capabilitiesByWireName = <String, LocalRuntimeCapability>{
