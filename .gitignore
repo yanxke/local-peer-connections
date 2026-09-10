@@ -19,3 +19,4 @@ ios/Flutter/Generated.xcconfig
 ios/Flutter/flutter_export_environment.sh
 *.xcworkspace/xcuserdata/
 *.xcuserstate
+integration_device_app/artifacts/

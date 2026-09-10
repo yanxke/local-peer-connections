@@ -45,6 +45,11 @@ class DeviceTestController extends ChangeNotifier {
   GroupSession? group;
   HttpServer? _server;
   int _eventSequence = 0;
+  // Capabilities are current runtime state, not diagnostic history. Keep a
+  // dedicated value because high-rate endpoint updates can evict the
+  // initialization event from the bounded event buffer before a reset or
+  // runner preflight reads the snapshot.
+  int? _capabilities;
   bool _initializing = false;
   bool _disposed = false;
 
@@ -110,8 +115,10 @@ class DeviceTestController extends ChangeNotifier {
       await startPresence();
       try {
         final capabilities = await localRuntime.capabilities();
+        _capabilities = capabilities.value;
         _record('capabilities', {'bitmap': capabilities.value});
       } on Object catch (error) {
+        _capabilities = null;
         _recordError('capabilitiesFailed', error);
       }
     } on Object catch (error) {
@@ -441,7 +448,14 @@ class DeviceTestController extends ChangeNotifier {
     'localPeerId': runtime?.localPeerId.toString(),
     'displayName': displayName,
     'controlApi': _server == null ? 'disabled' : '127.0.0.1:$controlPort',
-    'capabilities': _latestCapabilities(),
+    'capabilities': _capabilities,
+    // Presence is live state. Do not make the host runner infer it from the
+    // bounded event history, because endpoint updates can evict the original
+    // presenceStarted event on a busy physical device.
+    'presenceActive':
+        host?.isAdvertising == true &&
+        discovery != null &&
+        !discovery!.isStopped,
     'endpoints': [
       for (final endpoint in discovery?.currentEndpoints() ?? const [])
         _endpointSnapshot(endpoint),
@@ -489,6 +503,7 @@ class DeviceTestController extends ChangeNotifier {
     host = null;
     await runtime?.close();
     runtime = null;
+    _capabilities = null;
     if (!_disposed) notifyListeners();
   }
 
@@ -896,15 +911,6 @@ class DeviceTestController extends ChangeNotifier {
     'localIsCoordinator': value.isCoordinator,
     'members': [for (final member in value.members) member.peerId.toString()],
   };
-
-  int? _latestCapabilities() {
-    for (var index = events.length - 1; index >= 0; index--) {
-      if (events[index]['type'] == 'capabilities') {
-        return events[index]['bitmap'] as int?;
-      }
-    }
-    return null;
-  }
 
   void _record(String type, Map<String, Object?> data) {
     if (_disposed) return;

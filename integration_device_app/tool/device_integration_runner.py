@@ -165,10 +165,16 @@ class Runner:
 
     def _presence_started(self, api: DeviceApi) -> bool:
         snapshot = api.snapshot()
-        if snapshot.get("capabilities") is not None and snapshot.get("endpoints") is not None:
-            for event in api.events():
-                if event.get("type") == "presenceStarted":
-                    return True
+        if (
+            snapshot.get("capabilities") is not None
+            and snapshot.get("endpoints") is not None
+            and snapshot.get("presenceActive") is True
+        ):
+            # The snapshot owns live presence state; still drain events so a
+            # later assertion starts after the current diagnostic cursor.
+            api.events()
+            return True
+        api.events()
         return False
 
     def endpoint(self, api: DeviceApi, other: DeviceApi) -> str:
@@ -201,7 +207,25 @@ class Runner:
         return endpoint["id"]
 
     def connect(self, source: DeviceApi, target: DeviceApi) -> bool:
-        endpoint_id = self.endpoint(source, target)
+        # resetRuntime restarts the scan asynchronously.  Its presence-ready
+        # barrier can complete before the first endpoint-found callback has
+        # populated the snapshot, so selecting the endpoint immediately makes
+        # an otherwise healthy physical test fail nondeterministically.
+        endpoint_id: str | None = None
+
+        def endpoint_available() -> bool:
+            nonlocal endpoint_id
+            try:
+                endpoint_id = self.endpoint(source, target)
+            except RunnerFailure:
+                return False
+            return True
+
+        self.wait(
+            endpoint_available,
+            f"{source.device.label} endpoint for {target.device.label}",
+        )
+        assert endpoint_id is not None
         source.command("connect", {"endpointId": endpoint_id})
         verified = set()
         sas_by_device: dict[str, str] = {}
@@ -327,8 +351,8 @@ class Runner:
         received = 0
         # Send in bounded batches so this test exercises the public queue rather
         # than turning the fixture into an unbounded host-side producer.
-        for _ in range(20):
-            for _ in range(50):
+        for batch in range(20):
+            for _message_index in range(50):
                 source.command("sendReliable", {
                     "peerId": target_peer,
                     "size": 32,
@@ -343,10 +367,10 @@ class Runner:
                     and event.get("bytes") == 32
                     and event.get("digest") == self.payload_digest(32)
                 )
-                if received >= (_ + 1) * 50:
+                if received >= (batch + 1) * 50:
                     break
                 time.sleep(0.1)
-            if received < (_ + 1) * 50:
+            if received < (batch + 1) * 50:
                 raise RunnerFailure(f"IT-008: only received {received}/{expected} messages")
         print(f"IT-008: received {received} reliable 32-byte messages")
 

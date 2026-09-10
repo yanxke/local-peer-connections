@@ -424,6 +424,10 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     }
     val generation = nextGattGeneration++
     Log.d(logTag, "client connect requested endpoint=$endpointId generation=$generation")
+    // LPC endpoints are BLE GATT advertisements. On older Android stacks the
+    // three-argument overload leaves transport selection implicit and can
+    // stall without a callback when the target is an iOS peripheral; force
+    // LE transport so the physical operation matches the filtered scan.
     val gatt = device.connectGatt(applicationContext, false, object : BluetoothGattCallback() {
       override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
         Log.d(logTag, "client connection endpoint=$endpointId status=$status state=$newState")
@@ -504,7 +508,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
               "bytes" to value.map { it.toInt() and 0xff })) }
         }
       }
-    }) ?: throw BackendError("ENDPOINT_LOST", "GATT connection did not start")
+    }, BluetoothDevice.TRANSPORT_LE) ?: throw BackendError("ENDPOINT_LOST", "GATT connection did not start")
     gattHandles[endpointId] = gatt
     gattHandleGenerations[endpointId] = generation
   }
