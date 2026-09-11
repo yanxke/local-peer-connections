@@ -7,11 +7,13 @@ class ReassembledCheckpoint {
       {required List<int> messageId,
       required this.term,
       required this.sequence,
+      required this.requiresApplicationValidation,
       required List<int> bytes})
       : messageId = Uint8List.fromList(messageId),
         bytes = Uint8List.fromList(bytes);
   final Uint8List messageId, bytes;
   final int term, sequence;
+  final bool requiresApplicationValidation;
 }
 
 class CheckpointReassembler {
@@ -34,6 +36,7 @@ class CheckpointReassembler {
         messageId: messageId,
         term: partial.term,
         sequence: partial.sequence,
+        requiresApplicationValidation: partial.requiresApplicationValidation,
         bytes: partial.join());
   }
 
@@ -48,15 +51,18 @@ class _PartialCheckpoint {
   _PartialCheckpoint(CoordinatorCheckpointChunk first, this.updated)
       : term = first.term,
         sequence = first.sequence,
+        requiresApplicationValidation = first.requiresApplicationValidation,
         totalLength = first.totalLength,
         chunkCount = first.chunkCount,
         chunks = List<Uint8List?>.filled(first.chunkCount, null);
   final int term, sequence, totalLength, chunkCount;
+  final bool requiresApplicationValidation;
   final List<Uint8List?> chunks;
   DateTime updated;
   void add(CoordinatorCheckpointChunk chunk, DateTime now) {
     if (chunk.term != term ||
         chunk.sequence != sequence ||
+        chunk.requiresApplicationValidation != requiresApplicationValidation ||
         chunk.totalLength != totalLength ||
         chunk.chunkCount != chunkCount)
       throw const LpcException(LpcErrorCode.messageIdCollision);

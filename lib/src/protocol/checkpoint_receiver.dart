@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'checkpoint.dart';
 import 'checkpoint_reassembly.dart';
 import 'reliability.dart';
@@ -31,20 +33,28 @@ class CheckpointReceiver {
   final CheckpointReassembler _reassembler;
   final CompletedMessageDedup _dedup;
 
-  CheckpointReceiveResult add(
+  Future<CheckpointReceiveResult> add(
     List<int> messageId,
     CoordinatorCheckpointChunk chunk, {
+    FutureOr<bool> Function(ReassembledCheckpoint checkpoint)? validate,
     required void Function(ReassembledCheckpoint checkpoint) commit,
-  }) {
+  }) async {
     final complete = _reassembler.add(messageId, chunk);
     if (complete == null) return const CheckpointReceiveResult.incomplete();
     final canonical = <int>[
       for (final part in chunkCheckpoint(complete.bytes,
-          term: complete.term, sequence: complete.sequence))
+          term: complete.term,
+          sequence: complete.sequence,
+          requiresApplicationValidation:
+              complete.requiresApplicationValidation))
         ...part.encode()
     ];
     if (_dedup.isDuplicate(messageId, canonical)) {
       return CheckpointReceiveResult.duplicate(messageId);
+    }
+    if (complete.requiresApplicationValidation &&
+        !(await (validate?.call(complete) ?? false))) {
+      return const CheckpointReceiveResult.incomplete();
     }
     commit(complete);
     _dedup.accept(messageId, canonical);

@@ -837,6 +837,13 @@ class NearbyRuntime {
   StreamSubscription<PlatformBleEvent>? _platformSubscription;
   final Map<String, ConnectionAttempt> _attempts = {};
   final Map<String, PlatformGattConnectionBinding> _gattBindings = {};
+  // A logical PeerConnection can finish closing before the native GATT stack
+  // has released its client handle. Keep the endpoint in this short-lived
+  // teardown state so a scan callback cannot immediately start a new known
+  // peer probe on the stale physical link.
+  final Set<String> _closingGattEndpoints = <String>{};
+  final Map<String, Future<void>> _gattCloseOperations =
+      <String, Future<void>>{};
   // Android can deliver more than one readiness callback for a physical GATT
   // link (for example, repeated CCCD writes).  Serialize handshake startup
   // per endpoint so a duplicate platform event cannot replace the first
@@ -1135,11 +1142,26 @@ class NearbyRuntime {
   /// stops Dart from consuming callbacks; it does not release the native GATT
   /// client.  This distinction matters when a reconnect candidate is still
   /// handshaking while the logical reconnect deadline expires.
-  Future<void> _closeGattBinding(String endpointId) async {
+  Future<void> _closeGattBinding(String endpointId) {
+    final existing = _gattCloseOperations[endpointId];
+    if (existing != null) return existing;
+    _closingGattEndpoints.add(endpointId);
+    final cleanup = _performGattBindingClose(endpointId);
+    _gattCloseOperations[endpointId] = cleanup;
+    unawaited(cleanup.then<void>((_) {
+      if (_gattCloseOperations[endpointId] == cleanup) {
+        _gattCloseOperations.remove(endpointId);
+        _closingGattEndpoints.remove(endpointId);
+      }
+    }));
+    return cleanup;
+  }
+
+  Future<void> _performGattBindingClose(String endpointId) async {
     final binding = _gattBindings.remove(endpointId);
     if (binding == null) return;
-    await binding.close();
     try {
+      await binding.close();
       await binding.connection.close();
     } on Object catch (error) {
       _log(
@@ -1376,6 +1398,7 @@ class NearbyRuntime {
   void _scheduleKnownPeerProbe(String endpointId) {
     final existingPeer = _gattPeersByEndpoint[endpointId];
     if (!config.autoConnectKnownPeers ||
+        _closingGattEndpoints.contains(endpointId) ||
         (existingPeer != null &&
             (existingPeer.state == PeerConnectionState.ready ||
                 existingPeer.state == PeerConnectionState.reconnecting)) ||
@@ -2583,15 +2606,18 @@ class _RuntimeGroupRouteTransport
   }
 
   @override
-  void checkpointPublicationAccepted(CoordinatorCheckpointHandle handle,
-      List<int> bytes, int coordinatorTerm) {
+  void checkpointPublicationAccepted(
+      CoordinatorCheckpointHandle handle,
+      List<int> bytes,
+      int coordinatorTerm,
+      CheckpointApplicationValidationRequirement validationRequirement) {
     if (_disposed ||
         !group.isCoordinator ||
         !group.config.coordinatorCheckpointing) {
       return;
     }
-    final value = _CheckpointPublicationData(
-        handle, Uint8List.fromList(bytes), coordinatorTerm);
+    final value = _CheckpointPublicationData(handle, Uint8List.fromList(bytes),
+        coordinatorTerm, validationRequirement);
     _checkpointPublications[handle.publicationId] = value;
     for (final peerId in group.members
         .map((member) => member.peerId)
@@ -2613,7 +2639,10 @@ class _RuntimeGroupRouteTransport
     final latest = group.latestCheckpointForReplication();
     if (latest == null) return;
     final value = _CheckpointPublicationData(
-        latest.publication, latest.bytes, latest.publication.coordinatorTerm);
+        latest.publication,
+        latest.bytes,
+        latest.publication.coordinatorTerm,
+        latest.publication.applicationValidationRequirement);
     _checkpointPublications[latest.publication.publicationId] = value;
     final peer = _readyPeer(peerId);
     if (peer != null && peer.peerId != group.localPeerId) {
@@ -2679,7 +2708,10 @@ class _RuntimeGroupRouteTransport
       _CheckpointPublicationData value) {
     if (_disposed || peer.state != PeerConnectionState.ready) return;
     final chunks = chunkCheckpoint(value.bytes,
-        term: value.coordinatorTerm, sequence: operation.sequence);
+        term: value.coordinatorTerm,
+        sequence: operation.sequence,
+        requiresApplicationValidation: value.validationRequirement ==
+            CheckpointApplicationValidationRequirement.required);
     final messageId = peer._core.messageIdAllocator!.allocate();
     final hop = _LiveCheckpointHop(
         peer: peer,
@@ -3260,13 +3292,17 @@ class _RuntimeGroupRouteTransport
     }
     final chunk = CoordinatorCheckpointChunk.decode(frame.payload);
     final receiver = _checkpointReceivers[peer] ??= CheckpointReceiver();
-    final result = receiver.add(frame.messageId, chunk, commit: (checkpoint) {
-      if (checkpoint.term < group.coordinatorTerm) {
-        throw const LpcException(LpcErrorCode.protocolMismatch);
-      }
-      group.commitCoordinatorCheckpoint(checkpoint.bytes,
-          coordinator: peer.peerId, checkpointSequence: checkpoint.sequence);
-    });
+    final result = await receiver.add(frame.messageId, chunk,
+        validate: (checkpoint) =>
+            group.validateCoordinatorCheckpoint(checkpoint.bytes),
+        commit: (checkpoint) {
+          if (checkpoint.term < group.coordinatorTerm) {
+            throw const LpcException(LpcErrorCode.protocolMismatch);
+          }
+          group.commitCoordinatorCheckpoint(checkpoint.bytes,
+              coordinator: peer.peerId,
+              checkpointSequence: checkpoint.sequence);
+        });
     if (result.acknowledgmentMessageId != null) {
       await peer._core.submitAck(frame.messageId);
     }
@@ -3817,10 +3853,12 @@ class _LiveGroupHop {
 }
 
 class _CheckpointPublicationData {
-  _CheckpointPublicationData(this.handle, this.bytes, this.coordinatorTerm);
+  _CheckpointPublicationData(this.handle, this.bytes, this.coordinatorTerm,
+      this.validationRequirement);
   final CoordinatorCheckpointHandle handle;
   final Uint8List bytes;
   final int coordinatorTerm;
+  final CheckpointApplicationValidationRequirement validationRequirement;
 }
 
 class _LiveCheckpointHop {

@@ -288,4 +288,19 @@ void main() {
           (error) => error.code, 'code', LpcErrorCode.resourceExhausted)),
     );
   });
+
+  test('UT-242 required application validation is retained on the handle', () {
+    final group = GroupSession.internal(checkpointConfig(), publicationPeer(1),
+        GroupId(List<int>.filled(16, 2)));
+    final peer = publicationPeer(2);
+    commitPeers(group, [peer]);
+    final version = group.membershipView().version;
+    final handle = group.publishCoordinatorCheckpoint([1],
+        options: CheckpointPublishOptions(
+            applicationValidationRequirement:
+                CheckpointApplicationValidationRequirement.required));
+    expect(handle.applicationValidationRequirement,
+        CheckpointApplicationValidationRequirement.required);
+    expect(handle.acceptedMembershipVersion, version);
+  });
 }

@@ -12,6 +12,7 @@ class CoordinatorCheckpointChunk {
       required this.chunkIndex,
       required this.chunkCount,
       required this.chunkOffset,
+      this.requiresApplicationValidation = false,
       required List<int> bytes})
       : bytes = Uint8List.fromList(bytes) {
     final expected = totalLength == 0 ? 1 : (totalLength + 3999) ~/ 4000;
@@ -33,6 +34,7 @@ class CoordinatorCheckpointChunk {
       throw const LpcException(LpcErrorCode.protocolMismatch);
   }
   final int term, sequence, totalLength, chunkIndex, chunkCount, chunkOffset;
+  final bool requiresApplicationValidation;
   final Uint8List bytes;
   Uint8List encode() {
     final h = ByteData(32)
@@ -42,7 +44,8 @@ class CoordinatorCheckpointChunk {
       ..setUint16(20, chunkIndex)
       ..setUint16(22, chunkCount)
       ..setUint32(24, chunkOffset)
-      ..setUint16(28, bytes.length);
+      ..setUint16(28, bytes.length)
+      ..setUint16(30, requiresApplicationValidation ? 1 : 0);
     return Uint8List.fromList([...h.buffer.asUint8List(), ...bytes]);
   }
 
@@ -50,7 +53,8 @@ class CoordinatorCheckpointChunk {
     if (input.length < 32)
       throw const LpcException(LpcErrorCode.protocolMismatch);
     final h = ByteData.sublistView(Uint8List.fromList(input));
-    if (h.getUint16(30) != 0 || input.length != 32 + h.getUint16(28))
+    final flags = h.getUint16(30);
+    if ((flags & ~1) != 0 || input.length != 32 + h.getUint16(28))
       throw const LpcException(LpcErrorCode.protocolMismatch);
     return CoordinatorCheckpointChunk(
         term: h.getUint64(0),
@@ -59,12 +63,15 @@ class CoordinatorCheckpointChunk {
         chunkIndex: h.getUint16(20),
         chunkCount: h.getUint16(22),
         chunkOffset: h.getUint32(24),
+        requiresApplicationValidation: (flags & 1) != 0,
         bytes: input.sublist(32));
   }
 }
 
 List<CoordinatorCheckpointChunk> chunkCheckpoint(List<int> bytes,
-    {required int term, required int sequence}) {
+    {required int term,
+    required int sequence,
+    bool requiresApplicationValidation = false}) {
   if (bytes.length > maxCoordinatorCheckpointBytes)
     throw const LpcException(LpcErrorCode.messageTooLarge);
   final count = bytes.isEmpty ? 1 : (bytes.length + 3999) ~/ 4000;
@@ -77,6 +84,7 @@ List<CoordinatorCheckpointChunk> chunkCheckpoint(List<int> bytes,
         chunkIndex: i,
         chunkCount: count,
         chunkOffset: offset,
+        requiresApplicationValidation: requiresApplicationValidation,
         bytes: bytes.sublist(
             offset,
             offset < bytes.length

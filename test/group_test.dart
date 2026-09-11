@@ -113,6 +113,31 @@ void main() {
     await runtime.close();
   });
 
+  test('UT-241 membershipView and committed event share one versioned view',
+      () async {
+    final runtime = await createRuntime(localPeerId: peer(1));
+    final group = runtime.joinOrCreateGroup(GroupConfig(
+        applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
+    final seen = <CommittedMembershipChanged>[];
+    final sub = group.events.listen((event) {
+      if (event is CommittedMembershipChanged) seen.add(event);
+    });
+    group.commitMembership([GroupMember(peer(1), 8), GroupMember(peer(2), 8)],
+        coordinator: peer(1));
+    final first = group.membershipView();
+    group.commitMembership([GroupMember(peer(1), 8), GroupMember(peer(2), 8)],
+        coordinator: peer(1));
+    final second = group.membershipView();
+
+    expect(first.members.map((member) => member.peerId), [peer(1), peer(2)]);
+    expect(second.version, first.version + 1);
+    expect(seen.last.version, second.version);
+    expect(seen.first.joined, {peer(2)});
+    expect(seen.last.joined, isEmpty);
+    await sub.cancel();
+    await runtime.close();
+  });
+
   test('COORD-004/005/010 migration preserves GroupId and committed members',
       () async {
     final runtime = await createRuntime(localPeerId: peer(1));

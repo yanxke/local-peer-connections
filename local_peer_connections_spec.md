@@ -1,7 +1,7 @@
 # Local Peer Connections
 ## Normative Cross-Platform Offline Proximity Networking Specification
 
-**Specification version:** 0.9.14-durable-checkpoint-acknowledgements
+**Specification version:** 0.9.15-application-validated-checkpoints
 **Wire protocol major:** 1  
 **Wire protocol minor:** 0  
 **Working project name:** `local_peer_connections`
@@ -1044,6 +1044,36 @@ knowledge in protocol minor 0.
 
 Applications that do not require coordinator-state migration or a replication
 barrier MAY ignore this facility.
+
+### 10.12.1 Application-validated checkpoints (protocol minor 0 extension)
+
+`GroupSession.membershipView()` returns one immutable coherent committed view:
+
+```text
+MembershipView { version: uint64, members: sorted immutable GroupMember list }
+```
+
+`version` is local application transaction metadata. It increments for every
+authenticated committed-membership publication, including a publication whose
+PeerId set is unchanged. `CommittedMembershipChanged` carries that exact view
+and its joined/left PeerId sets after the getters have been updated. It is not
+a wire-visible match epoch and applications MUST NOT synthesize one.
+
+`CheckpointPublishOptions` additionally has:
+
+```text
+applicationValidationRequirement: NONE | REQUIRED
+```
+
+When `REQUIRED`, every recipient MUST successfully run its registered
+checkpoint-validation callback after complete reassembly and before committing
+the checkpoint or sending the generic ACK. A missing callback or a `false`/
+throwing callback rejects the checkpoint and produces no ACK. The sender's
+handle is `DURABLE` only when every required member has both committed the
+exact bytes and application-accepted them. The requirement is carried in each
+checkpoint chunk's formerly-reserved uint16 field; bit 0 means REQUIRED and
+all other bits remain zero. This is compatible with minor-0 decoders only when
+they implement this 0.9.15 contract.
 
 
 # 11. GATT Service Definition

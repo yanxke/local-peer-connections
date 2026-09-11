@@ -37,7 +37,10 @@ abstract interface class GroupRouteTransport {
 abstract interface class CheckpointGroupRouteTransport
     implements GroupRouteTransport {
   void checkpointPublicationAccepted(
-      CoordinatorCheckpointHandle handle, List<int> bytes, int coordinatorTerm);
+      CoordinatorCheckpointHandle handle,
+      List<int> bytes,
+      int coordinatorTerm,
+      CheckpointApplicationValidationRequirement validationRequirement);
 
   void checkpointPeerReady(PeerId peerId);
 
@@ -73,15 +76,44 @@ class MemberLeft extends GroupEvent {
 
 class CoordinatorChanged extends GroupEvent {
   CoordinatorChanged(super.sequence, super.at, this.previous, this.current,
-      this.localIsCoordinator, [List<int>? latestCoordinatorCheckpoint])
+      this.localIsCoordinator, this.term, this.membershipVersion,
+      [List<int>? latestCoordinatorCheckpoint])
       : latestCoordinatorCheckpoint = latestCoordinatorCheckpoint == null
             ? null
             : Uint8List.fromList(latestCoordinatorCheckpoint);
   final PeerId? previous;
   final PeerId current;
   final bool localIsCoordinator;
+  final int term, membershipVersion;
   final Uint8List? latestCoordinatorCheckpoint;
 }
+
+class MembershipView {
+  MembershipView(this.version, Iterable<GroupMember> members)
+      : members = List.unmodifiable(members.toList()
+          ..sort((a, b) => _comparePeerIds(a.peerId, b.peerId)));
+  final int version;
+  final List<GroupMember> members;
+}
+
+class CommittedMembershipChanged extends GroupEvent {
+  CommittedMembershipChanged(
+      super.sequence,
+      super.at,
+      this.version,
+      Iterable<GroupMember> members,
+      Iterable<PeerId> joined,
+      Iterable<PeerId> left)
+      : members = List.unmodifiable(members.toList()),
+        joined = Set.unmodifiable(joined),
+        left = Set.unmodifiable(left);
+  final int version;
+  final List<GroupMember> members;
+  final Set<PeerId> joined, left;
+}
+
+typedef CoordinatorCheckpointValidator = FutureOr<bool> Function(
+    Uint8List bytes);
 
 class CoordinatorCheckpointUpdated extends GroupEvent {
   CoordinatorCheckpointUpdated(super.sequence, super.at, this.coordinatorPeerId,
@@ -355,6 +387,8 @@ class GroupSession {
   GroupState _state = GroupState.starting;
   PeerId? _coordinator;
   int _coordinatorTerm = 0;
+  int _membershipVersion = 0;
+  CoordinatorCheckpointValidator? _checkpointValidator;
   int _eventSequence = 0;
   bool _running = false;
   GroupRouteTransport? _routeTransport;
@@ -364,6 +398,13 @@ class GroupSession {
   GroupConfig get config => _config;
   PeerId? get coordinatorPeerId => _coordinator;
   int get coordinatorTerm => _coordinatorTerm;
+  MembershipView membershipView() =>
+      MembershipView(_membershipVersion, members);
+  void setCoordinatorCheckpointValidator(
+          CoordinatorCheckpointValidator? validator) =>
+      _checkpointValidator = validator;
+  FutureOr<bool> validateCoordinatorCheckpoint(Uint8List bytes) =>
+      _checkpointValidator?.call(bytes) ?? false;
   bool get isCoordinator => _coordinator == _localPeerId;
   GroupState get state => _state;
   List<GroupMember> get members => List.unmodifiable(_members.values.toList()
@@ -448,7 +489,10 @@ class GroupSession {
     final bytes = _latestCoordinatorCheckpoint;
     if (publication != null && bytes != null) {
       _checkpointTransport(transport)?.checkpointPublicationAccepted(
-          publication, bytes, publication.coordinatorTerm);
+          publication,
+          bytes,
+          publication.coordinatorTerm,
+          publication.applicationValidationRequirement);
     }
   }
 
@@ -610,11 +654,17 @@ class GroupSession {
         publicationId: publicationId,
         coordinatorTerm: _coordinatorTerm,
         requiredPeerIds: required,
+        acceptedMembershipVersion: _membershipVersion,
+        applicationValidationRequirement:
+            selected.applicationValidationRequirement,
         onCompleted: (result) => _emitCheckpointPublicationCompleted(result));
     _latestCheckpointPublication = publication;
     if (required.isEmpty) publication.completeImmediately();
     _checkpointTransport(_routeTransport)?.checkpointPublicationAccepted(
-        publication, _latestCoordinatorCheckpoint!, _coordinatorTerm);
+        publication,
+        _latestCoordinatorCheckpoint!,
+        _coordinatorTerm,
+        selected.applicationValidationRequirement);
     return publication;
   }
 
@@ -812,12 +862,14 @@ class GroupSession {
             coordinatorTerm < _coordinatorTerm) {
           throw const LpcException(LpcErrorCode.protocolMismatch);
         }
-        for (final id in next.keys.where((id) => !_members.containsKey(id))) {
+        final joined =
+            next.keys.where((id) => !_members.containsKey(id)).toSet();
+        final left = _members.keys.where((id) => !next.containsKey(id)).toSet();
+        for (final id in joined) {
           _members[id] = next[id]!;
           _emit((s, a) => MemberJoined(s, a, next[id]!));
         }
-        for (final id
-            in _members.keys.where((id) => !next.containsKey(id)).toList()) {
+        for (final id in left) {
           _members.remove(id);
           checkpointPeerLeft(id);
           _emit((s, a) => MemberLeft(s, a, id));
@@ -825,14 +877,24 @@ class GroupSession {
         final previous = _coordinator;
         _coordinator = coordinator;
         _coordinatorTerm = coordinatorTerm;
+        _membershipVersion++;
         if (previous != coordinator) {
           if (previous == _localPeerId && coordinator != _localPeerId) {
             checkpointAuthorityLost();
             _checkpointTransport(_routeTransport)?.checkpointAuthorityLost();
           }
-          _emit((s, a) => CoordinatorChanged(s, a, previous, coordinator,
-              isCoordinator, _latestCoordinatorCheckpoint));
+          _emit((s, a) => CoordinatorChanged(
+              s,
+              a,
+              previous,
+              coordinator,
+              isCoordinator,
+              _coordinatorTerm,
+              _membershipVersion,
+              _latestCoordinatorCheckpoint));
         }
+        _emit((s, a) => CommittedMembershipChanged(
+            s, a, _membershipVersion, members, joined, left));
         _onMembershipCommitted?.call(this, Set.unmodifiable(next.keys));
       });
 
@@ -863,12 +925,14 @@ class GroupSession {
         if (!next.containsKey(_localPeerId) || !next.containsKey(coordinator)) {
           throw const LpcException(LpcErrorCode.protocolMismatch);
         }
-        for (final id in next.keys.where((id) => !_members.containsKey(id))) {
+        final joined =
+            next.keys.where((id) => !_members.containsKey(id)).toSet();
+        final left = _members.keys.where((id) => !next.containsKey(id)).toSet();
+        for (final id in joined) {
           _members[id] = next[id]!;
           _emit((s, a) => MemberJoined(s, a, next[id]!));
         }
-        for (final id
-            in _members.keys.where((id) => !next.containsKey(id)).toList()) {
+        for (final id in left) {
           _members.remove(id);
           checkpointPeerLeft(id);
           _emit((s, a) => MemberLeft(s, a, id));
@@ -879,6 +943,7 @@ class GroupSession {
         final previous = _coordinator;
         _coordinator = coordinator;
         _coordinatorTerm = coordinatorTerm;
+        _membershipVersion++;
         if (_state == GroupState.ready) {
           _transition(GroupState.migratingCoordinator);
           _transition(GroupState.electing);
@@ -893,9 +958,18 @@ class GroupSession {
             checkpointAuthorityLost();
             _checkpointTransport(_routeTransport)?.checkpointAuthorityLost();
           }
-          _emit((s, a) => CoordinatorChanged(s, a, previous, coordinator,
-              isCoordinator, _latestCoordinatorCheckpoint));
+          _emit((s, a) => CoordinatorChanged(
+              s,
+              a,
+              previous,
+              coordinator,
+              isCoordinator,
+              _coordinatorTerm,
+              _membershipVersion,
+              _latestCoordinatorCheckpoint));
         }
+        _emit((s, a) => CommittedMembershipChanged(
+            s, a, _membershipVersion, members, joined, left));
         _onMembershipCommitted?.call(this, Set.unmodifiable(next.keys));
       });
   void receiveReliable(

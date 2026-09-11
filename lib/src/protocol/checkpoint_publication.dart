@@ -8,6 +8,8 @@ enum CheckpointAcknowledgementRequirement {
   explicitPeers,
 }
 
+enum CheckpointApplicationValidationRequirement { none, required }
+
 enum CheckpointPeerResult {
   pending,
   acknowledged,
@@ -26,21 +28,29 @@ class CheckpointPublishOptions {
     CheckpointAcknowledgementRequirement acknowledgementRequirement =
         CheckpointAcknowledgementRequirement.allCommittedMembers,
     Iterable<PeerId> explicitPeerIds = const [],
+    CheckpointApplicationValidationRequirement applicationValidationRequirement =
+        CheckpointApplicationValidationRequirement.none,
   }) {
     final values = explicitPeerIds.toList(growable: false);
     return CheckpointPublishOptions._(
       acknowledgementRequirement,
       values,
       Set.unmodifiable(values),
+      applicationValidationRequirement,
     );
   }
 
-  CheckpointPublishOptions._(this.acknowledgementRequirement,
-      this._explicitPeerValues, this.explicitPeerIds);
+  CheckpointPublishOptions._(
+      this.acknowledgementRequirement,
+      this._explicitPeerValues,
+      this.explicitPeerIds,
+      this.applicationValidationRequirement);
 
   final CheckpointAcknowledgementRequirement acknowledgementRequirement;
   final List<PeerId> _explicitPeerValues;
   final Set<PeerId> explicitPeerIds;
+  final CheckpointApplicationValidationRequirement
+      applicationValidationRequirement;
 
   bool get hasDuplicateExplicitPeerIds =>
       _explicitPeerValues.length != explicitPeerIds.length;
@@ -51,6 +61,7 @@ class CheckpointPublicationResult {
     required this.publicationId,
     required this.coordinatorTerm,
     required Set<PeerId> requiredPeerIds,
+    required this.acceptedMembershipVersion,
     required Map<PeerId, CheckpointPeerResult> perPeerResults,
     required this.status,
   })  : requiredPeerIds = Set.unmodifiable(requiredPeerIds),
@@ -59,6 +70,7 @@ class CheckpointPublicationResult {
   final int publicationId;
   final int coordinatorTerm;
   final Set<PeerId> requiredPeerIds;
+  final int acceptedMembershipVersion;
   final Map<PeerId, CheckpointPeerResult> perPeerResults;
   final CheckpointPublicationStatus status;
 }
@@ -68,6 +80,8 @@ class CoordinatorCheckpointHandle {
     required this.publicationId,
     required this.coordinatorTerm,
     required Set<PeerId> requiredPeerIds,
+    required this.acceptedMembershipVersion,
+    required this.applicationValidationRequirement,
     this.onCompleted,
   }) : requiredPeerIds = Set.unmodifiable(requiredPeerIds) {
     _results = {
@@ -79,6 +93,9 @@ class CoordinatorCheckpointHandle {
   final int publicationId;
   final int coordinatorTerm;
   final Set<PeerId> requiredPeerIds;
+  final int acceptedMembershipVersion;
+  final CheckpointApplicationValidationRequirement
+      applicationValidationRequirement;
   final void Function(CheckpointPublicationResult result)? onCompleted;
   late final Map<PeerId, CheckpointPeerResult> _results;
   final Completer<CheckpointPublicationResult> _completion =
@@ -130,6 +147,7 @@ class CoordinatorCheckpointHandle {
         publicationId: publicationId,
         coordinatorTerm: coordinatorTerm,
         requiredPeerIds: requiredPeerIds,
+        acceptedMembershipVersion: acceptedMembershipVersion,
         perPeerResults: _results,
         status: _status,
       );
