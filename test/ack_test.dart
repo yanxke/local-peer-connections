@@ -37,6 +37,24 @@ void main() {
         AckTimeoutResult.retransmitWholeOperation);
   });
 
+  test('stale ACK timer after acknowledgement is ignored', () {
+    final retained = AckRetentionSet();
+    final id = List.filled(8, 9);
+    retained.retain(messageId: id, logicalContent: [2]);
+    retained.finalFrameSubmitted(id, nowMs: 0);
+    expect(retained.acknowledge(id), isTrue);
+    expect(retained.onTimer(id, nowMs: 3000), AckTimeoutResult.ignored);
+  });
+
+  test('stale final submission after acknowledgement is ignored', () {
+    final retained = AckRetentionSet();
+    final id = List.filled(8, 10);
+    retained.retain(messageId: id, logicalContent: [2]);
+    expect(retained.acknowledge(id), isTrue);
+    retained.finalFrameSubmitted(id, nowMs: 3000);
+    expect(retained.length, 0);
+  });
+
   test('UT-056 long transmission starts no ACK timeout before final submission',
       () {
     final retained = AckRetentionSet();

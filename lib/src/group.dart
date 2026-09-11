@@ -392,6 +392,7 @@ class GroupSession {
   int _eventSequence = 0;
   bool _running = false;
   GroupRouteTransport? _routeTransport;
+  int _debugReliableSendsToDrop = 0;
   Stream<GroupEvent> get events => _events.stream;
   GroupId get groupId => _groupId;
   PeerId get localPeerId => _localPeerId;
@@ -500,6 +501,14 @@ class GroupSession {
   /// for this session. This is an integration-state query, not protocol state.
   bool get hasRouteTransport => _routeTransport != null;
 
+  /// Test-only fault injection for embedders and integration harnesses.
+  /// Drops the next [count] reliable group sends before they reach the route
+  /// transport. This does not alter committed membership or checkpoint state.
+  void debugDropNextReliableSend({int count = 1}) {
+    if (count < 1) throw ArgumentError.value(count, 'count');
+    _debugReliableSendsToDrop += count;
+  }
+
   SendHandle send(PeerId destination, List<int> bytes,
       {SendOptions options = const SendOptions()}) {
     GroupMessageId? id;
@@ -518,6 +527,10 @@ class GroupSession {
       }
       if (options.deliveryMode == DeliveryMode.realtimeLatest ||
           bytes.length > 1048576) {
+        return controller.complete(SendState.failed);
+      }
+      if (_debugReliableSendsToDrop > 0) {
+        _debugReliableSendsToDrop--;
         return controller.complete(SendState.failed);
       }
       final transport = _routeTransport;

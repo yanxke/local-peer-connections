@@ -112,7 +112,11 @@ class AckRetentionSet {
   }
 
   void finalFrameSubmitted(List<int> messageId, {required int nowMs}) {
-    final entry = _required(messageId);
+    // An ACK can arrive while a retry's final chunk is awaiting transport
+    // submission. In that case the ACK has already removed the retention
+    // entry; completing the stale submission is harmless and must be a no-op.
+    final entry = _entries[_key(messageId)];
+    if (entry == null) return;
     entry.operation.finalFrameSubmitted();
     if (entry.operation.state == AckOperationState.awaitingAck) {
       entry.deadlineMs = nowMs + timeoutMs;
@@ -133,7 +137,12 @@ class AckRetentionSet {
   bool cancel(List<int> messageId) => _entries.remove(_key(messageId)) != null;
 
   AckTimeoutResult onTimer(List<int> messageId, {required int nowMs}) {
-    final entry = _required(messageId);
+    // A timer poll can race with an ACK (or local cancellation) removing the
+    // operation between dueMessageIds() and this call.  That is a normal
+    // terminal condition, not a protocol/state error; the stale timer entry
+    // must simply be ignored.
+    final entry = _entries[_key(messageId)];
+    if (entry == null) return AckTimeoutResult.ignored;
     if (entry.deadlineMs == null || nowMs < entry.deadlineMs!) {
       return AckTimeoutResult.ignored;
     }
@@ -191,15 +200,6 @@ class AckRetentionSet {
     final result = entry.operation.retransmitAfterResume();
     if (result == AckTimeoutResult.terminalAckTimeout) _entries.remove(key);
     return result;
-  }
-
-  _RetainedEntry _required(List<int> messageId) {
-    final entry = _entries[_key(messageId)];
-    if (entry == null) {
-      throw const LpcException(
-          LpcErrorCode.invalidState, 'ACK-required operation is not retained');
-    }
-    return entry;
   }
 
   String _key(List<int> messageId) {

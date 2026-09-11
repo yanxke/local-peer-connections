@@ -230,3 +230,7 @@ If the rule is missing, document the ambiguity and fix the specification first.
 
 If there is something in AGENTS.md that is wrong and conflicts
 with the spec, you can fix AGENTS.md.
+
+Do not perform userspace reboots (or other device reboots) on connected test
+devices. If an iOS deployment is stuck or a device becomes unavailable, wait
+for it to recover or ask the user to reconnect/unlock it.

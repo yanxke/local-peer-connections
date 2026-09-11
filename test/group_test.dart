@@ -407,6 +407,28 @@ void main() {
     await runtime.close();
   });
 
+  test('debug fault injection drops only the requested reliable sends',
+      () async {
+    final runtime = await createRuntime(localPeerId: peer(1));
+    final group = runtime.joinOrCreateGroup(GroupConfig(
+        applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
+    group.commitMembership([GroupMember(peer(1), 8), GroupMember(peer(2), 8)],
+        coordinator: peer(1));
+    final transport = _RecordingGroupTransport();
+    group.attachRouteTransport(transport);
+
+    group.debugDropNextReliableSend();
+    final dropped = group.send(peer(2), [1]);
+    expect(await dropped.completed, SendState.failed);
+    expect(transport.reliable, isEmpty);
+
+    final delivered = group.send(peer(2), [2]);
+    expect(transport.reliable, hasLength(1));
+    transport.reliableController!.complete(SendState.remoteAcknowledged);
+    expect(await delivered.completed, SendState.remoteAcknowledged);
+    await runtime.close();
+  });
+
   test('realtime API rejects reserved channels and oversized payloads',
       () async {
     final runtime = await createRuntime(localPeerId: peer(1));
