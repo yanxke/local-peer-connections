@@ -73,6 +73,11 @@ class DeviceTestController extends ChangeNotifier {
   }
 
   Future<bool> _requestPlatformPermissions() async {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+      // Windows grants BLE access through the desktop Bluetooth capability;
+      // there is no mobile-style runtime permission prompt to request here.
+      return true;
+    }
     try {
       return await const MethodChannel(
             'lpc_integration_device_app/permissions',
@@ -640,6 +645,21 @@ class DeviceTestController extends ChangeNotifier {
         });
       case MemberLeft(:final peerId):
         _record('groupMemberLeft', {...values, 'peerId': peerId.toString()});
+      case CommittedMembershipChanged(
+        :final version,
+        :final members,
+        :final joined,
+        :final left,
+      ):
+        _record('committedMembershipChanged', {
+          ...values,
+          'version': version,
+          'memberPeerIds': [
+            for (final member in members) member.peerId.toString(),
+          ],
+          'joinedPeerIds': [for (final peerId in joined) peerId.toString()],
+          'leftPeerIds': [for (final peerId in left) peerId.toString()],
+        });
       case CoordinatorChanged(
         :final previous,
         :final current,

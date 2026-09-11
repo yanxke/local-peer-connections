@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the executable LPC physical-integration scenarios over USB forwards.
+"""Run the executable LPC physical-integration scenarios over device endpoints.
 
 The fixture stays deliberately small: this runner owns orchestration and
 assertions, while each device owns LPC state.  It never records payload bytes
@@ -12,9 +12,10 @@ Example:
       --device device-a=18765 --device device-b=18766 \
       --scenario IT-001 --scenario IT-003 --scenario IT-032
 
-The device names are labels only.  They do not need to match hardware model
-names.  The app must already be running on each device and its loopback
-control port must be forwarded to the host.
+The device names are labels only. They do not need to match hardware model
+names. Android and iOS fixtures expose their loopback control ports through
+USB forwarding; Windows fixtures expose the same API directly on the host.
+The app must already be running on each device.
 """
 
 from __future__ import annotations

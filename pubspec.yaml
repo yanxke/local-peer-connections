@@ -3,12 +3,14 @@ description: Offline, coordinator-routed proximity networking for Flutter.
 version: 0.1.0
 homepage: https://example.invalid/local_peer_connections
 environment:
-  sdk: '>=3.3.0 <4.0.0'
+  sdk: '>=3.9.2 <4.0.0'
   flutter: '>=3.19.0'
 dependencies:
   flutter:
     sdk: flutter
+  bluetooth_low_energy: ^6.2.1
   cryptography: ^2.7.0
+  flutter_secure_storage: ^9.2.4
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -21,3 +23,5 @@ flutter:
         pluginClass: LocalPeerConnectionsPlugin
       ios:
         pluginClass: LocalPeerConnectionsPlugin
+      windows:
+        dartPluginClass: LocalPeerConnectionsWindowsPlugin

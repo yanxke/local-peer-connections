@@ -2,7 +2,7 @@
 
 `local_peer_connections` is an open-source, cross-platform proximity networking library for offline local multiplayer, collaboration, messaging, and nearby device-to-device applications.
 
-It targets Android and iOS first, uses BLE as the baseline transport, and is designed so applications do not manually choose host/client roles.
+It targets Android, iOS, and Windows, uses BLE as the baseline transport, and is designed so applications do not manually choose host/client roles.
 
 ## Status
 
@@ -20,7 +20,7 @@ full conformance suite are still required before that claim can be made.
 
 Implemented:
 
-- [x] Flutter package metadata and Android/iOS plugin registration shells
+- [x] Flutter package metadata and Android/iOS/Windows plugin registration shells
 - [x] Protocol constants, fixed frame header, frame-type registry, and bounds checks
 - [x] PeerId derivation from an Ed25519 public key
 - [x] GATT fragment envelope parsing/serialization with START/END flags, per-frame uint32 sequences, bounded payloads, and expiry-aware reassembly
@@ -36,13 +36,13 @@ Implemented:
 - [x] Serialized HELLO/AUTH handshake controller with version-mismatch close and explicit SAS confirmation gate
 - [x] Runtime/HostSession SAS verification events and explicit confirmation APIs, with the required 30-second authentication timeout and runtime-scoped TOFU continuity
 - [x] X25519 shared-secret, Ed25519 AUTH signing/verification, and in-memory TOFU continuity helper
-- [x] Android/iOS protected persistent Ed25519 key-storage adapter (Android Keystore-encrypted seed; iOS device-only Keychain seed)
+- [x] Android/iOS/Windows protected persistent Ed25519 key-storage adapter (Android Keystore-encrypted seed; iOS device-only Keychain seed; Windows protected storage)
 - [x] READY agreement validation, exact pre-key `ERROR(PROTOCOL_MISMATCH)` codec, and encrypted-generation receive-sequence window
 - [x] Backend-driven portable HELLO/AUTH/READY PeerConnection lifecycle with encrypted READY gating and sequence-2 handoff to the authenticated core
 - [x] Fresh candidate-only HELLO/AUTH mode for Section 26 reconnects; it exposes the authenticated candidate transcript/secrets without emitting normal READY
-- [x] Android/iOS service-UUID-only BLE advertising/scanning bridge with platform endpoint events and stable error mapping
-- [x] Android/iOS Section 11 GATT service host with canonical RX/TX/CONTROL UUID derivation
-- [x] Android/iOS GATT client connection and Section 11 service/characteristic discovery validation
+- [x] Android/iOS/Windows service-UUID-only BLE advertising/scanning bridge with platform endpoint events and stable error mapping
+- [x] Android/iOS/Windows Section 11 GATT service host with canonical RX/TX/CONTROL UUID derivation
+- [x] Android/iOS/Windows GATT client connection and Section 11 service/characteristic discovery validation
 - [x] Portable GATT BackendConnection adapter with bounded fragmentation queues, backpressure retention, final-fragment completion, and terminal-failure fanout
 - [x] Generic ACK payload, bounded ACK-required retention/deadlines, ACK correlation, and RESUME retry eligibility
 - [x] Deterministic coordinator rank and canonical committed-membership snapshot codec
@@ -134,7 +134,9 @@ The Android manifest declares `BLUETOOTH_SCAN` and `BLUETOOTH_ADVERTISE` on
 Android 12+; the host application must request them at runtime before starting
 discovery or advertising. On Android 6–11, scanning additionally requires
 runtime location permission. iOS hosts must provide an appropriate Bluetooth
-usage-description string in their application `Info.plist`. A denied or
+usage-description string in their application `Info.plist`. Windows uses the
+WinRT Bluetooth capability through the `bluetooth_low_energy` federated plugin
+and has no mobile-style runtime permission prompt. A denied or
 powered-off Bluetooth state is returned as the matching stable LPC error.
 
 The current native bridge advertises and scans by service UUID only. Its

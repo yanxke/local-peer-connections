@@ -1,7 +1,7 @@
 # LPC integration device app
 
 This is a small debug-only Flutter application for exercising the public LPC
-API on real Android and iOS devices. It contains no messenger concepts such as
+API on real Android, iOS, and Windows devices. It contains no messenger concepts such as
 friends, conversations, or application envelopes.
 
 ## Run on a device
@@ -26,7 +26,10 @@ fixture.
 
 On Android the fixture requests the Bluetooth permissions required by the
 platform before starting LPC. On iOS the Bluetooth usage descriptions are
-included in the app and CoreBluetooth presents authorization as needed.
+included in the app and CoreBluetooth presents authorization as needed. On
+Windows, `bluetooth_low_energy` supplies the WinRT central/peripheral backend;
+the app uses the desktop Bluetooth capability and does not show a runtime
+permission prompt.
 
 ## Control API
 
@@ -53,8 +56,11 @@ Useful commands include:
 ```
 
 For a USB-forwarded port, use `adb forward tcp:18765 tcp:8765` on Android or
-`iproxy 18766 8765 <udid>` on iOS. The host-side runner can then use the same
-HTTP API against each forwarded port.
+`iproxy 18766 8765 <udid>` on iOS. A Windows fixture can be addressed directly
+on the host at `http://127.0.0.1:8765`; use a different
+`--dart-define=LPC_TEST_PORT=...` value when running multiple Windows fixtures
+on the same machine. The host-side runner uses the same HTTP API for all three
+platforms.
 
 ## Automated physical scenarios
 

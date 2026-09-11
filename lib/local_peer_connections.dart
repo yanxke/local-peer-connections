@@ -65,3 +65,11 @@ export 'src/protocol/udp_packet.dart';
 export 'src/protocol/udp_probe.dart';
 export 'src/protocol/connection_rank.dart';
 export 'src/protocol/handshake_orchestrator.dart';
+
+/// Windows registration is intentionally a no-op. The Windows BLE and
+/// protected-storage implementations are supplied by the federated package
+/// dependencies; this class marks the app-facing LPC package as Windows
+/// compatible for Flutter's plugin registrant.
+class LocalPeerConnectionsWindowsPlugin {
+  static void registerWith() {}
+}

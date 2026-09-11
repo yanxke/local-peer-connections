@@ -1,4 +1,7 @@
+import 'dart:convert';
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/services.dart';
 import 'identity.dart';
 import 'types.dart';
@@ -17,8 +20,11 @@ class LocalIdentity {
   static Future<LocalIdentity> load(IdentityStore store) async {
     final keyPair = await store.loadOrCreateEd25519KeyPair();
     final publicKey = await keyPair.extractPublicKey();
-    return LocalIdentity(keyPair, publicKey,
-        await PeerIdentity.peerIdForPublicKey(publicKey.bytes));
+    return LocalIdentity(
+      keyPair,
+      publicKey,
+      await PeerIdentity.peerIdForPublicKey(publicKey.bytes),
+    );
   }
 }
 
@@ -37,19 +43,48 @@ class InMemoryIdentityStore implements IdentityStore {
 /// the same Ed25519 implementation as the portable handshake code; it is
 /// never persisted by Dart or emitted in diagnostics.
 class PlatformIdentityStore implements IdentityStore {
-  PlatformIdentityStore({MethodChannel? channel})
-      : _channel = channel ??
-            const MethodChannel(
-                'dev.localpeerconnections.local_peer_connections/identity');
+  PlatformIdentityStore({MethodChannel? channel, FlutterSecureStorage? storage})
+    : _channel =
+          channel ??
+          const MethodChannel(
+            'dev.localpeerconnections.local_peer_connections/identity',
+          ),
+      _storage = storage;
   final MethodChannel _channel;
+  final FlutterSecureStorage? _storage;
+  static const _windowsSeedKey =
+      'dev.localpeerconnections.local_peer_connections.ed25519_seed_v1';
+  static final FlutterSecureStorage _defaultWindowsStorage =
+      FlutterSecureStorage();
 
   @override
   Future<SimpleKeyPair> loadOrCreateEd25519KeyPair() async {
-    final seed =
-        await _channel.invokeMethod<Uint8List>('loadOrCreateEd25519Seed');
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+      final storage = _storage ?? _defaultWindowsStorage;
+      final encoded = await storage.read(key: _windowsSeedKey);
+      if (encoded != null) {
+        final seed = base64Url.decode(encoded);
+        if (seed.length != 32) {
+          throw const LpcException(
+            LpcErrorCode.platformError,
+            'protected identity storage returned an invalid seed',
+          );
+        }
+        return Ed25519().newKeyPairFromSeed(seed);
+      }
+      final keyPair = await Ed25519().newKeyPair();
+      final seed = await keyPair.extractPrivateKeyBytes();
+      await storage.write(key: _windowsSeedKey, value: base64UrlEncode(seed));
+      return keyPair;
+    }
+    final seed = await _channel.invokeMethod<Uint8List>(
+      'loadOrCreateEd25519Seed',
+    );
     if (seed == null || seed.length != 32) {
-      throw const LpcException(LpcErrorCode.platformError,
-          'protected identity storage returned an invalid seed');
+      throw const LpcException(
+        LpcErrorCode.platformError,
+        'protected identity storage returned an invalid seed',
+      );
     }
     return Ed25519().newKeyPairFromSeed(seed);
   }
