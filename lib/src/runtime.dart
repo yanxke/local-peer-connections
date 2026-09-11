@@ -2996,6 +2996,14 @@ class _RuntimeGroupRouteTransport
       await _publishGroupInfo();
       return;
     }
+    if (evaluation.decision == GroupMergeDecision.merge &&
+        evaluation.winner?.groupId != local.groupId) {
+      // The losing side can receive GROUP_INFO before the winning side has
+      // observed this group's creation (the normal application invite race).
+      // Echo the current local view so the deterministic winner has the
+      // authenticated GROUP_INFO pair required to authorize GROUP_MERGE.
+      await _sendGroupInfo(peer);
+    }
     if (evaluation.decision != GroupMergeDecision.merge ||
         evaluation.winner?.groupId != local.groupId ||
         !group.isCoordinator) {
