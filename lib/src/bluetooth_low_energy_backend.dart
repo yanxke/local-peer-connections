@@ -117,12 +117,19 @@ class BluetoothLowEnergyBackend {
 
   Future<void> listenGatt(List<int> serviceUuid) async {
     final uuid = _uuid(serviceUuid);
+    // Keep both write properties on every platform. Windows GATT server does
+    // not reliably raise WriteRequested for a characteristic advertised only
+    // with WriteWithoutResponse, even though its central accepts that mode.
+    // Normal/control writes use the response-bearing path for ordering, while
+    // realtime central writes may select response-free mode explicitly. The
+    // characteristic remains discoverable by Android, iOS, and Windows.
+    final rxProperties = <GATTCharacteristicProperty>[
+      GATTCharacteristicProperty.write,
+      GATTCharacteristicProperty.writeWithoutResponse,
+    ];
     final rx = GATTCharacteristic.mutable(
       uuid: UUID(_derivedUuid(serviceUuid, 1)),
-      properties: <GATTCharacteristicProperty>[
-        GATTCharacteristicProperty.write,
-        GATTCharacteristicProperty.writeWithoutResponse,
-      ],
+      properties: rxProperties,
       permissions: <GATTCharacteristicPermission>[
         GATTCharacteristicPermission.write,
       ],
@@ -406,16 +413,24 @@ class BluetoothLowEnergyBackend {
     // fragment, so emitting after an unawaited response races that lifetime.
     final value = Uint8List.fromList(event.request.value);
     final characteristicUuid = event.characteristic.uuid;
-    await _respondWrite(event.request);
-    if (characteristicUuid != service.rx.uuid) return;
-    final link = _ensurePeripheralLink(event.central);
-    _events.add(
-      PlatformGattFragment(
-        link.endpointId,
-        value,
-        connectionGeneration: link.generation,
-      ),
-    );
+    // Start the native response before handing the fragment to the protocol.
+    // The value has already been copied, so the protocol can consume it while
+    // the Windows GATT request is being completed. Waiting for the response
+    // before emitting made the Android write-with-response path hold each
+    // request across a Flutter round trip and eventually return GATT_ERROR
+    // under sustained traffic.
+    final response = _respondWrite(event.request);
+    if (characteristicUuid == service.rx.uuid) {
+      final link = _ensurePeripheralLink(event.central);
+      _events.add(
+        PlatformGattFragment(
+          link.endpointId,
+          value,
+          connectionGeneration: link.generation,
+        ),
+      );
+    }
+    await response;
   }
 
   Future<void> _respondWrite(GATTWriteRequest request) async {

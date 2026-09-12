@@ -63,6 +63,8 @@ class DeviceTestHome extends StatelessWidget {
           children: [
             _StatusCard(snapshot: snapshot),
             const SizedBox(height: 8),
+            _GattTrafficCard(snapshot: snapshot),
+            const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(
@@ -168,6 +170,43 @@ class _StatusCard extends StatelessWidget {
       ),
     ),
   );
+}
+
+class _GattTrafficCard extends StatelessWidget {
+  const _GattTrafficCard({required this.snapshot});
+
+  final Map<String, Object?> snapshot;
+
+  @override
+  Widget build(BuildContext context) {
+    final traffic =
+        snapshot['gattTraffic'] as Map<String, Object?>? ??
+        const <String, Object?>{};
+    final sent =
+        traffic['sent'] as Map<String, Object?>? ?? const <String, Object?>{};
+    final received =
+        traffic['received'] as Map<String, Object?>? ??
+        const <String, Object?>{};
+    return _Section(
+      title: 'GATT traffic (physical fragments)',
+      child: SelectableText(
+        '${_direction('Sent', sent)}\n${_direction('Received', received)}',
+        style: const TextStyle(fontFamily: 'monospace'),
+      ),
+    );
+  }
+
+  String _direction(String label, Map<String, Object?> value) {
+    final packets = value['packets'] ?? 0;
+    final bytes = value['bytes'] ?? 0;
+    final packetsPerSecond = _formatRate(value['packetsPerSecond']);
+    final bytesPerSecond = _formatRate(value['bytesPerSecond']);
+    return '$label: $packets packets / $bytes B '
+        '($packetsPerSecond pkt/s, $bytesPerSecond B/s)';
+  }
+
+  String _formatRate(Object? value) =>
+      value is num ? value.toStringAsFixed(value >= 100 ? 0 : 1) : '0.0';
 }
 
 class _Section extends StatelessWidget {

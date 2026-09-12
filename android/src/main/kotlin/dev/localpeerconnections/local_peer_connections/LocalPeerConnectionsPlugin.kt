@@ -489,11 +489,28 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         Log.d(logTag, "client fragment written endpoint=$endpointId uuid=${characteristic.uuid} status=$status")
         if (gattHandles[endpointId] != null && gattHandles[endpointId] !== gatt) return
         if (characteristic.uuid == rxUuid) {
-          gattClients[endpointId]?.writeInFlight = false
           if (status == BluetoothGatt.GATT_SUCCESS) {
-            emitSuccess(mapOf("type" to "gattWritable", "endpointId" to endpointId,
-              "connectionGeneration" to generation))
+            val client = gattClients[endpointId] ?: return
+            if (characteristic.writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
+              // Some Android stacks report local completion before a
+              // response-free packet has reached the controller. Release the
+              // gate after one connection interval so ordered LPC fragments
+              // are not reordered over the air on Windows peers.
+              bluetoothStateHandler.postDelayed({
+                if (gattHandles[endpointId] === gatt &&
+                    gattClients[endpointId] === client && client.writeInFlight) {
+                  client.writeInFlight = false
+                  emitSuccess(mapOf("type" to "gattWritable", "endpointId" to endpointId,
+                    "connectionGeneration" to generation))
+                }
+              }, NO_RESPONSE_PACING_MS)
+            } else {
+              client.writeInFlight = false
+              emitSuccess(mapOf("type" to "gattWritable", "endpointId" to endpointId,
+                "connectionGeneration" to generation))
+            }
           } else {
+            gattClients[endpointId]?.writeInFlight = false
             failGatt(endpointId, gatt)
           }
         }
@@ -564,13 +581,25 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
       Log.d(logTag, "client write temporarily unavailable endpoint=$endpointId reason=in-flight")
       return "temporarilyUnavailable"
     }
+    // Normal/control traffic uses a response-bearing ATT write. The Windows
+    // peripheral caches the central identity and reaches the Flutter response
+    // callback without a per-fragment WinRT lookup, avoiding the committed
+    // request failure that otherwise appears as Android GATT status 14. Only
+    // the explicitly realtime path is response-free.
+    val withoutResponse = transmission == "writeWithoutResponse"
     client.rx.value = fragment
-    client.rx.writeType = if (transmission == "writeWithoutResponse")
+    client.rx.writeType = if (withoutResponse)
       BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
     // `true` is the Android API submission boundary. A `false` result is a
     // transient local queue condition; it must not be treated as transport loss.
+    // Keep one native write in flight even for WRITE_TYPE_NO_RESPONSE. Android
+    // reports completion of the local GATT operation through
+    // onCharacteristicWrite on the devices supported by this backend, and the
+    // gate preserves fragment order instead of flooding the controller.
     client.writeInFlight = true
-    return if (client.gatt.writeCharacteristic(client.rx)) "submitted" else {
+    return if (client.gatt.writeCharacteristic(client.rx)) {
+      "submitted"
+    } else {
       Log.w(logTag, "client write submission rejected endpoint=$endpointId")
       client.writeInFlight = false
       "temporarilyUnavailable"
@@ -876,6 +905,12 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     const val GCM_IV_BYTES = 12
     const val GCM_TAG_BITS = 128
     const val MAX_SERVER_NOTIFICATION_QUEUE = 64
+    // The integration devices negotiate a 39 ms connection interval. Keep
+    // response-free writes serialized for one interval because the Android
+    // callback can precede controller transmission. The Windows server
+    // completes the native no-response request before resolving Flutter-side
+    // identity data, so this gate does not add application-level latency.
+    const val NO_RESPONSE_PACING_MS = 40L
     val CLIENT_CONFIGURATION_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
   }
 }

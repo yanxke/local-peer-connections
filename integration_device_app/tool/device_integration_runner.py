@@ -109,6 +109,31 @@ class Runner:
         self.timeout = timeout
         self.soak_seconds = soak_seconds
 
+    @staticmethod
+    def gatt_traffic_status(api: DeviceApi) -> str:
+        """Format payload-free physical GATT counters from a fixture snapshot."""
+        traffic = api.snapshot().get("gattTraffic")
+        if not isinstance(traffic, dict):
+            return f"{api.device.label}: GATT metrics unavailable"
+
+        def direction(name: str) -> str:
+            value = traffic.get(name)
+            if not isinstance(value, dict):
+                return f"{name} unavailable"
+            packets = value.get("packets", 0)
+            bytes_sent = value.get("bytes", 0)
+            packets_per_second = value.get("packetsPerSecond", 0.0)
+            bytes_per_second = value.get("bytesPerSecond", 0.0)
+            return (
+                f"{name}={packets} pkt/{bytes_sent} B "
+                f"({packets_per_second:.1f} pkt/s, {bytes_per_second:.0f} B/s)"
+            )
+
+        return f"{api.device.label}: {direction('sent')}; {direction('received')}"
+
+    def transfer_status(self, *apis: DeviceApi) -> str:
+        return " | ".join(self.gatt_traffic_status(api) for api in apis)
+
     def wait(self, predicate: Callable[[], bool], description: str, timeout: float | None = None) -> None:
         deadline = time.monotonic() + (timeout if timeout is not None else self.timeout)
         while time.monotonic() < deadline:
@@ -350,6 +375,7 @@ class Runner:
         target_peer = self.peer_id(source, target)
         expected = 1000
         received = 0
+        last_progress_at = 0.0
         # Send in bounded batches so this test exercises the public queue rather
         # than turning the fixture into an unbounded host-side producer.
         for batch in range(20):
@@ -370,10 +396,21 @@ class Runner:
                 )
                 if received >= (batch + 1) * 50:
                     break
+                now = time.monotonic()
+                if now - last_progress_at >= 1.0:
+                    print(
+                        f"IT-008 progress: {received}/{expected} application messages; "
+                        f"{self.transfer_status(source, target)}",
+                        flush=True,
+                    )
+                    last_progress_at = now
                 time.sleep(0.1)
             if received < (batch + 1) * 50:
                 raise RunnerFailure(f"IT-008: only received {received}/{expected} messages")
-        print(f"IT-008: received {received} reliable 32-byte messages")
+        print(
+            f"IT-008: received {received} reliable 32-byte messages; "
+            f"{self.transfer_status(source, target)}"
+        )
 
     def scenario_large_message(self) -> None:
         self.reset_all()
@@ -387,6 +424,7 @@ class Runner:
         deadline = time.monotonic() + max(self.timeout, 120)
         received = False
         expected_digest = self.payload_digest(1048576)
+        last_progress_at = 0.0
         while time.monotonic() < deadline:
             for event in target.events():
                 if (
@@ -404,10 +442,21 @@ class Runner:
                         )
             if received:
                 break
+            now = time.monotonic()
+            if now - last_progress_at >= 1.0:
+                print(
+                    "IT-009 progress: awaiting 1 MiB application message; "
+                    f"{self.transfer_status(source, target)}",
+                    flush=True,
+                )
+                last_progress_at = now
             time.sleep(0.1)
         if not received:
             raise RunnerFailure("timeout waiting for 1 MiB reliable message")
-        print("IT-009: received a 1 MiB reliable message")
+        print(
+            "IT-009: received a 1 MiB reliable message; "
+            f"{self.transfer_status(source, target)}"
+        )
         print("IT-010: connection remained ready during the 1 MiB transfer")
 
     def scenario_symmetric_connect(self) -> None:

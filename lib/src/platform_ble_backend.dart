@@ -10,6 +10,31 @@ import 'types.dart';
 
 export 'platform_ble_events.dart';
 
+/// Direction of a physical GATT fragment at the platform boundary.
+///
+/// A sent fragment has been accepted by the platform backend for submission;
+/// it is not an acknowledgement that the remote application received it.
+enum GattPacketDirection { sent, received }
+
+/// Payload-free diagnostic information about a physical GATT fragment.
+///
+/// This deliberately reports fragment counts and lengths rather than message
+/// payloads. It is intended for progress reporting and must not affect the
+/// protocol transport or its delivery semantics.
+class GattPacketDiagnostic {
+  const GattPacketDiagnostic({
+    required this.direction,
+    required this.endpointId,
+    required this.byteCount,
+    this.connectionGeneration,
+  });
+
+  final GattPacketDirection direction;
+  final String endpointId;
+  final int byteCount;
+  final int? connectionGeneration;
+}
+
 /// Native BLE discovery/advertising bridge for the Section 44 backend
 /// operations. It deliberately exposes no protocol service data: the only
 /// discovery filter and advertisement value is the supplied service UUID.
@@ -22,6 +47,7 @@ class PlatformBleBackend {
     EventChannel? events,
     Stream<PlatformBleEvent>? eventStream,
     this.logger,
+    this.gattPacketDiagnostic,
   }) : _methods = methods ?? const MethodChannel(_methodChannelName),
        _events = events ?? const EventChannel(_eventChannelName),
        _eventStream = eventStream,
@@ -46,6 +72,13 @@ class PlatformBleBackend {
   /// Optional diagnostic sink. Raw GATT fragment bytes are summarized and
   /// never included in log output.
   final void Function(String message)? logger;
+
+  /// Optional payload-free GATT fragment diagnostic sink.
+  ///
+  /// It is invoked only after an outgoing fragment is accepted for platform
+  /// submission and when an incoming platform fragment is observed. Failures
+  /// in the sink are ignored so diagnostics cannot affect connectivity.
+  final void Function(GattPacketDiagnostic diagnostic)? gattPacketDiagnostic;
   late final Stream<PlatformBleEvent> _sharedEvents =
       (_eventStream ??
               _events.receiveBroadcastStream().map((Object? value) {
@@ -65,6 +98,20 @@ class PlatformBleBackend {
               }))
           .asBroadcastStream();
   final Map<String, DateTime> _lastEventLog = <String, DateTime>{};
+  late final Stream<PlatformBleEvent> _eventsWithPacketDiagnostics =
+      (_bluetoothLowEnergy?.events ?? _sharedEvents).map((event) {
+        if (event is PlatformGattFragment) {
+          _reportGattPacket(
+            GattPacketDiagnostic(
+              direction: GattPacketDirection.received,
+              endpointId: event.endpointId,
+              byteCount: event.bytes.length,
+              connectionGeneration: event.connectionGeneration,
+            ),
+          );
+        }
+        return event;
+      }).asBroadcastStream();
 
   void _log(String message) {
     try {
@@ -78,10 +125,17 @@ class PlatformBleBackend {
     }
   }
 
+  void _reportGattPacket(GattPacketDiagnostic diagnostic) {
+    try {
+      gattPacketDiagnostic?.call(diagnostic);
+    } on Object {
+      // Diagnostics must never affect the platform transport.
+    }
+  }
+
   /// A single shared stream is important: EventChannel has one native sink,
   /// while discovery, GATT bindings, and apps may all listen concurrently.
-  Stream<PlatformBleEvent> get events =>
-      _bluetoothLowEnergy?.events ?? _sharedEvents;
+  Stream<PlatformBleEvent> get events => _eventsWithPacketDiagnostics;
 
   Future<LocalRuntimeCapabilityBitmap> queryCapabilities() async {
     final lowEnergy = _bluetoothLowEnergy;
@@ -176,30 +230,44 @@ class PlatformBleBackend {
     int? connectionGeneration,
   }) async {
     final lowEnergy = _bluetoothLowEnergy;
+    final GattFragmentSubmission submission;
     if (lowEnergy != null) {
-      return lowEnergy.submitGattFragment(
+      submission = await lowEnergy.submitGattFragment(
         endpointId,
         fragment,
         transmission: transmission,
         connectionGeneration: connectionGeneration,
       );
+    } else {
+      final result = await _invoke<String>('submitGattFragment', {
+        'endpointId': endpointId,
+        'fragment': fragment,
+        'transmission': transmission.name,
+        if (connectionGeneration != null)
+          'connectionGeneration': connectionGeneration,
+      });
+      submission = switch (result) {
+        'submitted' => GattFragmentSubmission.submitted,
+        'temporarilyUnavailable' =>
+          GattFragmentSubmission.temporarilyUnavailable,
+        'terminalFailure' => GattFragmentSubmission.terminalFailure,
+        _ => throw const LpcException(
+          LpcErrorCode.platformError,
+          'invalid GATT submission response',
+        ),
+      };
     }
-    final result = await _invoke<String>('submitGattFragment', {
-      'endpointId': endpointId,
-      'fragment': fragment,
-      'transmission': transmission.name,
-      if (connectionGeneration != null)
-        'connectionGeneration': connectionGeneration,
-    });
-    return switch (result) {
-      'submitted' => GattFragmentSubmission.submitted,
-      'temporarilyUnavailable' => GattFragmentSubmission.temporarilyUnavailable,
-      'terminalFailure' => GattFragmentSubmission.terminalFailure,
-      _ => throw const LpcException(
-        LpcErrorCode.platformError,
-        'invalid GATT submission response',
-      ),
-    };
+    if (submission == GattFragmentSubmission.submitted) {
+      _reportGattPacket(
+        GattPacketDiagnostic(
+          direction: GattPacketDirection.sent,
+          endpointId: endpointId,
+          byteCount: fragment.length,
+          connectionGeneration: connectionGeneration,
+        ),
+      );
+    }
+    return submission;
   }
 
   Future<void> closeGattConnection(

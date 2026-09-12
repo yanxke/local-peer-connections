@@ -51,6 +51,7 @@ class DeviceTestController extends ChangeNotifier {
   // initialization event from the bounded event buffer before a reset or
   // runner preflight reads the snapshot.
   int? _capabilities;
+  _GattTrafficTracker _gattTraffic = _GattTrafficTracker();
   bool _initializing = false;
   bool _disposed = false;
 
@@ -97,8 +98,10 @@ class DeviceTestController extends ChangeNotifier {
     if (_initializing || runtime != null || _disposed) return;
     _initializing = true;
     try {
+      _gattTraffic = _GattTrafficTracker();
       final backend = PlatformBleBackend(
         logger: (message) => _record('lpcBackendLog', {'message': message}),
+        gattPacketDiagnostic: _recordGattPacket,
       );
       final localRuntime = await createRuntime(
         config: RuntimeConfig(
@@ -473,6 +476,10 @@ class DeviceTestController extends ChangeNotifier {
         {'peerId': value.peerId.toString(), 'sas': value.sas},
     ],
     'group': group == null ? null : _groupSnapshot(group!),
+    // These are physical GATT fragments, not application messages. A sent
+    // count means the platform accepted a fragment for submission; it does
+    // not alter or claim any additional protocol delivery guarantee.
+    'gattTraffic': _gattTraffic.snapshot(),
     'eventSequence': _eventSequence,
   };
 
@@ -950,6 +957,14 @@ class DeviceTestController extends ChangeNotifier {
     _scheduleNotify();
   }
 
+  void _recordGattPacket(GattPacketDiagnostic diagnostic) {
+    _gattTraffic.record(diagnostic);
+    // Do not put every physical fragment in the bounded event history. The
+    // status card reads the aggregate counters, and this coalesced repaint
+    // keeps that card live during high-rate transfers.
+    _scheduleNotify();
+  }
+
   void _scheduleNotify() {
     if (_disposed || _notifyTimer != null) return;
     _notifyTimer = Timer(const Duration(milliseconds: 100), () {
@@ -982,6 +997,50 @@ class DeviceTestController extends ChangeNotifier {
       throw FormatException('$key is required');
     }
     return value;
+  }
+}
+
+/// Payload-free physical GATT traffic counters for the device-test status
+/// endpoint. A fresh tracker is created for every runtime so a runner can
+/// compare one integration scenario without inheriting prior test traffic.
+class _GattTrafficTracker {
+  final Stopwatch _elapsed = Stopwatch()..start();
+  int _sentPackets = 0;
+  int _sentBytes = 0;
+  int _receivedPackets = 0;
+  int _receivedBytes = 0;
+
+  void record(GattPacketDiagnostic diagnostic) {
+    switch (diagnostic.direction) {
+      case GattPacketDirection.sent:
+        _sentPackets++;
+        _sentBytes += diagnostic.byteCount;
+      case GattPacketDirection.received:
+        _receivedPackets++;
+        _receivedBytes += diagnostic.byteCount;
+    }
+  }
+
+  Map<String, Object> snapshot() {
+    final elapsedMilliseconds = _elapsed.elapsedMilliseconds;
+    final elapsedSeconds = elapsedMilliseconds <= 0
+        ? 0.001
+        : elapsedMilliseconds / Duration.millisecondsPerSecond;
+    return {
+      'elapsedMilliseconds': elapsedMilliseconds,
+      'sent': {
+        'packets': _sentPackets,
+        'bytes': _sentBytes,
+        'packetsPerSecond': _sentPackets / elapsedSeconds,
+        'bytesPerSecond': _sentBytes / elapsedSeconds,
+      },
+      'received': {
+        'packets': _receivedPackets,
+        'bytes': _receivedBytes,
+        'packetsPerSecond': _receivedPackets / elapsedSeconds,
+        'bytesPerSecond': _receivedBytes / elapsedSeconds,
+      },
+    };
   }
 }
 
