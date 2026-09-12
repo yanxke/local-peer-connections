@@ -163,6 +163,13 @@ void main() {
     });
     expect(disconnected, isA<PlatformGattDisconnected>());
     expect((disconnected as PlatformGattDisconnected).connectionGeneration, 7);
+    final failed = PlatformBleEvent.fromPlatform({
+      'type': 'gattDisconnected',
+      'endpointId': 'native-id',
+      'connectionGeneration': 8,
+      'status': 133,
+    }) as PlatformGattDisconnected;
+    expect(failed.status, 133);
     expect(PlatformBleEvent.fromPlatform({'type': 'gattWritable'}),
         isA<PlatformGattWritable>());
   });

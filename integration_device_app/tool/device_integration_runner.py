@@ -56,7 +56,13 @@ class DeviceApi:
         self.timeout = timeout
         self.cursor = 0
 
-    def request(self, method: str, path: str, body: object | None = None) -> Any:
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: object | None = None,
+        timeout: float | None = None,
+    ) -> Any:
         data = None if body is None else json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             f"{self.device.base}{path}",
@@ -65,7 +71,9 @@ class DeviceApi:
             headers={"content-type": "application/json"} if data else {},
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout if timeout is None else timeout
+            ) as response:
                 return json.load(response)
         except (urllib.error.URLError, TimeoutError, ConnectionResetError) as error:
             raise RunnerFailure(f"{self.device.label}: control API unavailable: {error}") from error
@@ -87,11 +95,17 @@ class DeviceApi:
                 self.cursor = max(self.cursor, event["sequence"])
         return [event for event in events if isinstance(event, dict)]
 
-    def command(self, action: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    def command(
+        self,
+        action: str,
+        arguments: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         value = self.request(
             "POST",
             "/command",
             {"action": action, "arguments": arguments or {}},
+            timeout=timeout,
         )
         if not isinstance(value, dict) or value.get("ok") is not True:
             raise RunnerFailure(f"{self.device.label}: command {action} failed: {value}")
@@ -235,6 +249,11 @@ class Runner:
             nonlocal saw_verification
             for api in (source, target):
                 for event in api.events():
+                    if event.get("type") == "connectFailed":
+                        error = event.get("error", "unknown connection failure")
+                        raise RunnerFailure(
+                            f"{api.device.label}: connection attempt failed: {error}"
+                        )
                     if event.get("type") != "verificationRequired":
                         continue
                     peer_id = event.get("peerId")
@@ -258,7 +277,21 @@ class Runner:
             target_snapshot = target.snapshot()
             return bool(source_snapshot.get("connections")) and bool(target_snapshot.get("connections"))
 
-        self.wait(both_ready, f"authenticated connection {source.device.label}->{target.device.label}")
+        try:
+            # LPC's connection-request timeout is 10 seconds. Keep the host
+            # runner bounded slightly above that and explicitly cancel a
+            # platform attempt if no terminal event reaches the fixture.
+            self.wait(
+                both_ready,
+                f"authenticated connection {source.device.label}->{target.device.label}",
+                timeout=min(self.timeout, 15),
+            )
+        except RunnerFailure:
+            try:
+                source.command("cancelConnect", {"endpointId": endpoint_id})
+            except RunnerFailure:
+                pass
+            raise
         if saw_verification and len(sas_by_device) < 2:
             raise RunnerFailure(
                 "IT-006: SAS was not observed on both sides of the connection"
@@ -290,6 +323,36 @@ class Runner:
         for api in self.apis:
             api.command("resetRuntime")
         self.preflight()
+
+    def provision_known_peers(self) -> None:
+        """Exchange current stable PeerIds through the trusted host channel.
+
+        BLE endpoint IDs are intentionally never copied between devices. Each
+        fixture persists the other fixture's authenticated identity and LPC
+        then discovers the current endpoint and probes it automatically.
+        """
+        snapshots = [api.snapshot() for api in self.apis]
+        peer_ids = [snapshot.get("localPeerId") for snapshot in snapshots]
+        if any(not isinstance(peer_id, str) for peer_id in peer_ids):
+            raise RunnerFailure("cannot provision friends before PeerIds are ready")
+        for index, api in enumerate(self.apis):
+            for peer_index, peer_id in enumerate(peer_ids):
+                if index == peer_index:
+                    continue
+                api.command("provisionKnownPeer", {"peerId": peer_id})
+        self.wait(
+            lambda: all(
+                all(
+                    isinstance(peer_id, str)
+                    and peer_id in api.snapshot().get("knownPeerIds", [])
+                    for peer_index, peer_id in enumerate(peer_ids)
+                    if peer_index != index
+                )
+                for index, api in enumerate(self.apis)
+            ),
+            "known-peer provisioning",
+        )
+        print("Provisioned each device with the other devices' PeerIds")
 
     def assert_discovery(self) -> None:
         def discovered() -> bool:
@@ -408,6 +471,168 @@ class Runner:
             raise RunnerFailure("timeout waiting for 1 MiB reliable message")
         print("IT-009: received a 1 MiB reliable message")
         print("IT-010: connection remained ready during the 1 MiB transfer")
+
+    def scenario_bidirectional_mixed(self) -> None:
+        """Exercise reliable delivery in both directions with two payload sizes.
+
+        The physical run is deliberately capped at five minutes so a broken
+        reconnect/ACK path produces a bounded failure artifact rather than an
+        indefinitely hanging harness.
+        """
+        self.reset_all()
+        first, second = self.apis[:2]
+        self.connect(first, second)
+        first_peer = self.peer_id(second, first)
+        second_peer = self.peer_id(first, second)
+        payloads = (32, 262144, 32, 262144)
+        deadline = time.monotonic() + 300
+        for index, size in enumerate(payloads):
+            if time.monotonic() >= deadline:
+                raise RunnerFailure("IT-040: five-minute mixed-direction bound exceeded")
+            source, target, peer = (
+                (first, second, second_peer)
+                if index % 2 == 0
+                else (second, first, first_peer)
+            )
+            source.command("sendReliable", {
+                "peerId": peer,
+                "size": size,
+                "deliveryMode": "reliableAcked",
+            }, timeout=min(30, max(10, int(deadline - time.monotonic()))))
+            self.wait_for_event(
+                target,
+                "directMessageReceived",
+                lambda event, size=size: event.get("bytes") == size
+                and event.get("digest") == self.payload_digest(size),
+                timeout=min(60, max(1, int(deadline - time.monotonic()))),
+            )
+        if time.monotonic() >= deadline:
+            raise RunnerFailure("IT-040: five-minute mixed-direction bound exceeded")
+        for api in (first, second):
+            if any(c.get("state") != "ready" for c in api.snapshot().get("connections", [])):
+                raise RunnerFailure(f"IT-040: {api.device.label} connection did not remain ready")
+        print("IT-040: bidirectional 32-byte and 256 KiB reliable messages delivered")
+
+    def scenario_bidirectional_fixed_rate(self) -> None:
+        """Run a symmetric 64-byte reliable traffic test for one minute."""
+        self.reset_all()
+        first, second = self.apis[:2]
+        # With persisted friends, resetRuntime already starts automatic
+        # known-peer probing. Do not issue a second explicit connect while
+        # that probe is in flight: two simultaneous central attempts create
+        # duplicate GATT generations and make the physical run look like a
+        # throughput failure. Only fall back to an explicit direction when
+        # the automatic path does not produce a ready connection.
+        try:
+            self.wait(
+                lambda: all(
+                    len(api.snapshot().get("connections", [])) == 1
+                    and api.snapshot()["connections"][0].get("state") == "ready"
+                    for api in (first, second)
+                ),
+                "known-peer connection ready on both devices",
+                timeout=min(self.timeout, 30),
+            )
+            connection_direction = "known-peer auto-connect"
+        except RunnerFailure as auto_error:
+            try:
+                self.connect(first, second)
+                connection_direction = f"{first.device.label}->{second.device.label}"
+            except RunnerFailure as first_error:
+                # A mobile OS can temporarily omit its peripheral advertisement
+                # from the other side's scan. Try the reciprocal central direction
+                # before declaring the physical run unavailable.
+                try:
+                    self.connect(second, first)
+                    connection_direction = f"{second.device.label}->{first.device.label}"
+                except RunnerFailure as second_error:
+                    raise RunnerFailure(
+                        f"IT-041: automatic connection failed ({auto_error}); "
+                        f"neither explicit direction succeeded: {first_error}; {second_error}"
+                    ) from second_error
+        # peer_id(api, other) returns the peer visible from ``api``.  Each
+        # producer must therefore use the destination reported by its own
+        # device: ``first`` sends to ``second_peer`` and vice versa.
+        first_target_peer = self.peer_id(first, second)
+        second_target_peer = self.peer_id(second, first)
+        arguments = [
+            {
+                "peerId": first_target_peer,
+                "messageSize": 64,
+                "messagesPerSecond": 5,
+                "deliveryMode": "reliableAcked",
+            },
+            {
+                "peerId": second_target_peer,
+                "messageSize": 64,
+                "messagesPerSecond": 5,
+                "deliveryMode": "reliableAcked",
+            },
+        ]
+        # Start both producers together so this exercises bidirectional load,
+        # rather than a one-way transfer followed by a second transfer.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(api.command, "startSendTest", args)
+                for api, args in zip((first, second), arguments)
+            ]
+            for future in futures:
+                future.result()
+
+        duration_seconds = 60
+        expected_messages = duration_seconds * 5
+        # The fixture sends one packet immediately, then once per 200 ms. Allow
+        # a small scheduling margin but reject meaningful producer starvation.
+        minimum_messages = expected_messages - 5
+        deadline = time.monotonic() + duration_seconds
+        while time.monotonic() < deadline:
+            for api in (first, second):
+                connections = api.snapshot().get("connections", [])
+                if any(connection.get("state") != "ready" for connection in connections):
+                    raise RunnerFailure(
+                        f"IT-041: connection left ready state on {api.device.label}"
+                    )
+                if len(connections) != 1:
+                    raise RunnerFailure(
+                        f"IT-041: expected one logical connection on {api.device.label}"
+                    )
+            time.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
+
+        # Stop concurrently and let each fixture's bounded ACK-drain grace
+        # period account for packets already in flight.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(api.command, "stopSendTest") for api in (first, second)]
+            final_snapshots = [future.result() for future in futures]
+
+        for api, snapshot in zip((first, second), final_snapshots):
+            traffic = snapshot.get("trafficTests", {}).get("direct", {})
+            sent = traffic.get("sent", 0)
+            acked = traffic.get("acked", 0)
+            timed_out = traffic.get("timedOut", 0)
+            if traffic.get("running") is not False:
+                raise RunnerFailure(f"IT-041: traffic did not stop on {api.device.label}")
+            if traffic.get("messageSize") != 64 or traffic.get("messagesPerSecond") != 5:
+                raise RunnerFailure(
+                    f"IT-041: wrong traffic configuration on {api.device.label}: {traffic}"
+                )
+            if sent < minimum_messages:
+                raise RunnerFailure(
+                    f"IT-041: {api.device.label} sent only {sent}/{expected_messages} packets"
+                )
+            if acked != sent or timed_out != 0:
+                raise RunnerFailure(
+                    f"IT-041: {api.device.label} ACK/loss mismatch: "
+                    f"sent={sent}, acked={acked}, timedOut={timed_out}"
+                )
+            if any(connection.get("state") != "ready" for connection in api.snapshot().get("connections", [])):
+                raise RunnerFailure(
+                    f"IT-041: connection was not ready after traffic on {api.device.label}"
+                )
+        print(
+            "IT-041: bidirectional 64-byte reliable traffic at 5 packets/s "
+            f"for {duration_seconds}s delivered with zero application-level loss "
+            f"({connection_direction})"
+        )
 
     def scenario_symmetric_connect(self) -> None:
         self.reset_all()
@@ -662,6 +887,10 @@ class Runner:
             self.scenario_messages()
         elif scenario == "IT-009":
             self.scenario_large_message()
+        elif scenario == "IT-040":
+            self.scenario_bidirectional_mixed()
+        elif scenario == "IT-041":
+            self.scenario_bidirectional_fixed_rate()
         elif scenario == "IT-017":
             self.scenario_soak()
         elif scenario == "IT-018":
@@ -694,12 +923,41 @@ def parse_device(value: str) -> Device:
         raise argparse.ArgumentTypeError("device must be LABEL=HOST_PORT") from error
 
 
+def telemetry_line(label: str, telemetry: dict[str, Any]) -> str:
+    """Format the fixture's counters/rates/state percentages for humans."""
+    def number(value: Any) -> float:
+        return float(value) if isinstance(value, (int, float)) else 0.0
+
+    sent = telemetry.get("messagesSent", 0)
+    received = telemetry.get("messagesReceived", 0)
+    sent_bytes = telemetry.get("bytesSent", 0)
+    received_bytes = telemetry.get("bytesReceived", 0)
+    sent_rate = telemetry.get("messagesSentPerSecond", 0)
+    received_rate = telemetry.get("messagesReceivedPerSecond", 0)
+    sent_byte_rate = telemetry.get("bytesSentPerSecond", 0)
+    received_byte_rate = telemetry.get("bytesReceivedPerSecond", 0)
+    percentages = telemetry.get("connectionStatePercent", {})
+    if not isinstance(percentages, dict):
+        percentages = {}
+    return (
+        f"{label}: messages sent/received {sent}/{received}, "
+        f"bytes sent/received {sent_bytes}/{received_bytes}; "
+        f"speed send {number(sent_rate):.2f} msg/s ({number(sent_byte_rate):.2f} B/s), "
+        f"receive {number(received_rate):.2f} msg/s ({number(received_byte_rate):.2f} B/s); "
+        f"connection {number(percentages.get('connecting', 0)):.2f}% connecting, "
+        f"{number(percentages.get('reconnecting', 0)):.2f}% reconnecting, "
+        f"{number(percentages.get('connected', 0)):.2f}% connected"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", action="append", type=parse_device, required=True,
                         help="generic device label and forwarded host port, e.g. device-a=18765")
     parser.add_argument("--scenario", action="append", required=True,
-                        help="IT-001 through IT-038; repeat for multiple scenarios")
+                        help="IT-001 through IT-040; repeat for multiple scenarios")
+    parser.add_argument("--provision-known-peers", action="store_true",
+                        help="exchange current device PeerIds over the trusted control channel before scenarios")
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--soak-seconds", type=int, default=1800)
     parser.add_argument("--json-output", type=Path)
@@ -707,12 +965,16 @@ def main() -> int:
     if len(args.device) < 2:
         parser.error("at least two --device values are required")
 
-    results: list[dict[str, str]] = []
+    results: list[dict[str, Any]] = []
     for scenario in args.scenario:
         started = time.monotonic()
+        runner: Runner | None = None
+        telemetry: dict[str, dict[str, Any]] = {}
         try:
             runner = Runner(args.device, args.timeout, args.soak_seconds)
             runner.preflight()
+            if args.provision_known_peers:
+                runner.provision_known_peers()
             runner.run(scenario.upper())
             status = "passed"
             detail = ""
@@ -722,13 +984,28 @@ def main() -> int:
         except RunnerFailure as error:
             status = "failed"
             detail = str(error)
+        if runner is not None:
+            for api in runner.apis:
+                try:
+                    snapshot = api.snapshot()
+                    value = snapshot.get("telemetry", {})
+                    if isinstance(value, dict):
+                        telemetry[api.device.label] = value
+                except RunnerFailure as error:
+                    # Preserve the scenario result if a failing device is no
+                    # longer reachable, while making the omission explicit.
+                    telemetry[api.device.label] = {"error": str(error)}
         results.append({
             "scenario": scenario.upper(),
             "status": status,
             "detail": detail,
             "durationSeconds": f"{time.monotonic() - started:.3f}",
+            "telemetry": telemetry,
         })
         print(f"{scenario.upper()}: {status}{': ' + detail if detail else ''}", file=sys.stderr if status != "passed" else sys.stdout)
+        for label, value in telemetry.items():
+            if "error" not in value:
+                print(telemetry_line(label, value))
         if status == "failed":
             break
 

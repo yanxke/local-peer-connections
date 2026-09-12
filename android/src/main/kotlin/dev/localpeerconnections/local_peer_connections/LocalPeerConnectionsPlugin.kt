@@ -67,6 +67,9 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
   // be mistaken for a disconnect or fragment from the replacement link.
   private var nextGattGeneration = 1L
   private val gattHandleGenerations = mutableMapOf<String, Long>()
+  // The Android BluetoothGatt API exposes the negotiated MTU only through
+  // onMtuChanged; retain it until the matching service-bound event is emitted.
+  private val gattClientMtuByEndpoint = mutableMapOf<String, Int>()
   // A Bluetooth address identifies a device, not a physical GATT link.  A
   // phone can have an outbound central link and an inbound server link to the
   // same address at the same time.  Server links therefore use an opaque,
@@ -74,6 +77,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
   // central-side endpoint ID.
   private val gattServerPeers = mutableMapOf<String, BluetoothDevice>()
   private val gattServerEndpointByAddress = mutableMapOf<String, String>()
+  private val gattServerMtuByAddress = mutableMapOf<String, Int>()
   private val gattServerGenerations = mutableMapOf<String, Long>()
   private var nextServerEndpointId = 1L
   // A central normally writes the TX CCCD once per physical link, but some
@@ -278,6 +282,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
           // authenticated PeerId after the handshake completes.
           val endpointId = "server-${nextServerEndpointId++}"
           gattServerEndpointByAddress[device.address] = endpointId
+          gattServerMtuByAddress.remove(device.address)
           val generation = nextGattGeneration++
           gattServerGenerations[endpointId] = generation
           gattServerPeers[endpointId] = device
@@ -286,6 +291,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
           if (endpointId != null) {
             gattServerPeers.remove(endpointId)
             gattServerReady.remove(endpointId)
+            gattServerMtuByAddress.remove(device.address)
             clearServerNotifications(endpointId)
             val generation = gattServerGenerations.remove(endpointId)
             emitSuccess(mapOf("type" to "gattDisconnected", "endpointId" to endpointId,
@@ -307,6 +313,12 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
           sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
         }
       }
+      override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+        if (gattServerEndpointByAddress.containsKey(device.address)) {
+          gattServerMtuByAddress[device.address] = mtu.coerceAtLeast(23)
+          Log.d(logTag, "server MTU changed endpoint=${device.address} mtu=$mtu")
+        }
+      }
       override fun onDescriptorWriteRequest(device: BluetoothDevice, requestId: Int,
           descriptor: BluetoothGattDescriptor, preparedWrite: Boolean,
           responseNeeded: Boolean, offset: Int, value: ByteArray) {
@@ -320,8 +332,10 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
           if (responseNeeded) sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
           if (gattServerReady.add(endpointId)) {
             Log.d(logTag, "server notifications ready endpoint=$endpointId address=${device.address}")
+            val platformSafeWriteSize =
+              ((gattServerMtuByAddress[device.address] ?: 23) - 3).coerceAtLeast(20)
             emitSuccess(mapOf("type" to "gattConnected", "endpointId" to endpointId,
-                "localRole" to "peripheral", "platformSafeWriteSize" to 20,
+                "localRole" to "peripheral", "platformSafeWriteSize" to platformSafeWriteSize,
                 "connectionGeneration" to gattServerGenerations[endpointId]))
           }
         } else if (responseNeeded) {
@@ -390,19 +404,29 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
   }
 
   private fun stopGatt(clearRequest: Boolean = true) {
+    // Explicitly cancel every server-side link before closing the server.
+    // BluetoothGattServer.close() alone is not sufficient on several Android
+    // 8 vendor stacks; the controller can retain a TCB and later reject a
+    // new central link with status=133 ("Max TCB"/"CCB max out").
+    val server = gattServer
+    for (device in gattServerPeers.values.toList()) {
+      try { server?.cancelConnection(device) } catch (_: Exception) { }
+    }
     gattServer?.close()
     gattServer = null
     gattServerPeers.clear()
     gattServerEndpointByAddress.clear()
+    gattServerMtuByAddress.clear()
     gattServerGenerations.clear()
     gattServerReady.clear()
     synchronized(gattServerNotificationLock) {
       gattServerNotificationQueues.clear()
       gattServerNotificationInFlight.clear()
     }
-    for (gatt in gattHandles.values) gatt.close()
+    for (gatt in gattHandles.values) closeGattSafely(gatt)
     gattHandles.clear()
     gattHandleGenerations.clear()
+    gattClientMtuByEndpoint.clear()
     gattClients.clear()
     if (clearRequest) {
       requestedGattService = null
@@ -433,18 +457,41 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         Log.d(logTag, "client connection endpoint=$endpointId status=$status state=$newState")
         val currentGatt = gattHandles[endpointId]
         if (currentGatt != null && currentGatt !== gatt) {
-          gatt.close()
+          closeGattSafely(gatt)
           return
         }
         if (status != BluetoothGatt.GATT_SUCCESS || newState != BluetoothProfile.STATE_CONNECTED) {
           removeGattHandle(endpointId, gatt)
-          gatt.close()
+          // Cancel before close. Older Android stacks otherwise retain a
+          // native TCB after status=133 and eventually reject all connects
+          // with "Max TCB"/"CCB max out".
+          closeGattSafely(gatt)
           emitSuccess(mapOf("type" to "gattDisconnected", "endpointId" to endpointId,
-            "connectionGeneration" to generation))
+            "connectionGeneration" to generation, "status" to status))
+          return
+        }
+        // Negotiate a larger ATT MTU before service discovery when supported.
+        // The old fixed 20-byte payload forced every encrypted LPC frame into
+        // many serialized write-response transactions, severely limiting
+        // throughput on otherwise healthy links. If negotiation is rejected,
+        // retain the 20-byte minimum and continue normally.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && gatt.requestMtu(517)) {
+          Log.d(logTag, "client MTU request endpoint=$endpointId size=517")
           return
         }
         if (!gatt.discoverServices()) {
           Log.w(logTag, "client service discovery could not start endpoint=$endpointId")
+          failGatt(endpointId, gatt)
+        }
+      }
+      override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+        Log.d(logTag, "client MTU changed endpoint=$endpointId mtu=$mtu status=$status")
+        if (gattHandles[endpointId] != null && gattHandles[endpointId] !== gatt) return
+        if (status == BluetoothGatt.GATT_SUCCESS) {
+          gattClientMtuByEndpoint[endpointId] = mtu.coerceAtLeast(23)
+        }
+        if (!gatt.discoverServices()) {
+          Log.w(logTag, "client service discovery could not start after MTU endpoint=$endpointId")
           failGatt(endpointId, gatt)
         }
       }
@@ -480,8 +527,10 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         if (status != BluetoothGatt.GATT_SUCCESS) {
           rejectGatt(endpointId, gatt, "LPC TX subscription failed"); return
         }
+          val platformSafeWriteSize =
+            ((gattClientMtuByEndpoint[endpointId] ?: 23) - 3).coerceAtLeast(20)
           emitSuccess(mapOf("type" to "gattConnected", "endpointId" to endpointId,
-            "localRole" to "central", "platformSafeWriteSize" to 20,
+            "localRole" to "central", "platformSafeWriteSize" to platformSafeWriteSize,
             "connectionGeneration" to generation))
       }
       override fun onCharacteristicWrite(gatt: BluetoothGatt,
@@ -588,7 +637,8 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     val client = gattClients.remove(endpointId)
     val gatt = gattHandles.remove(endpointId) ?: client?.gatt
     gattHandleGenerations.remove(endpointId)
-    gatt?.let { it.disconnect(); it.close() }
+    gattClientMtuByEndpoint.remove(endpointId)
+    gatt?.let { closeGattSafely(it) }
     val serverDevice = gattServerPeers.remove(endpointId)
     gattServerReady.remove(endpointId)
     clearServerNotifications(endpointId)
@@ -723,6 +773,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     clearServerNotifications(endpointId)
     gattServerPeers.remove(endpointId)
     gattServerEndpointByAddress.remove(device.address, endpointId)
+    gattServerMtuByAddress.remove(device.address)
     gattServerReady.remove(endpointId)
     gattServerGenerations.remove(endpointId)
     emitSuccess(mapOf("type" to "gattDisconnected", "endpointId" to endpointId,
@@ -744,16 +795,25 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     Log.w(logTag, "fail client GATT endpoint=$endpointId")
     val generation = gattHandleGenerations[endpointId]
     removeGattHandle(endpointId, gatt)
+    gattClientMtuByEndpoint.remove(endpointId)
     emitSuccess(mapOf("type" to "gattDisconnected", "endpointId" to endpointId,
       "connectionGeneration" to generation))
-    gatt.disconnect()
-    gatt.close()
+    closeGattSafely(gatt)
+  }
+
+  /** Release a central GATT object in the order expected by older Android
+   * Bluetooth stacks. This is idempotent because timeout cleanup and late
+   * callbacks may race each other. */
+  private fun closeGattSafely(gatt: BluetoothGatt) {
+    try { gatt.disconnect() } catch (_: Exception) { }
+    try { gatt.close() } catch (_: Exception) { }
   }
 
   private fun removeGattHandle(endpointId: String, gatt: BluetoothGatt) {
     if (gattHandles[endpointId] === gatt) {
       gattHandles.remove(endpointId)
       gattHandleGenerations.remove(endpointId)
+      gattClientMtuByEndpoint.remove(endpointId)
     }
     if (gattClients[endpointId]?.gatt === gatt) gattClients.remove(endpointId)
   }

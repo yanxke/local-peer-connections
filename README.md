@@ -89,7 +89,7 @@ Implemented:
 - [x] Exact PeerConnection lifecycle transition guard
 - [x] Portable backend connection/write-completion contract
 - [x] Runtime ownership and idempotent cascade-close of connection attempts and authenticated PeerConnections
-- [x] Public PeerConnection identity/session diagnostics, authenticated security level, active transport, direct reliable send, latest-only realtime send/receive streams, and disconnect lifecycle
+- [x] Public PeerConnection identity/session diagnostics, authenticated security level, active transport, negotiated GATT MTU, direct reliable send, latest-only realtime send/receive streams, and disconnect lifecycle
 - [x] PeerConnection lifecycle event stream for committed reconnecting, reconnected, and disconnected transitions
 - [x] Authenticated DATA framing/commit boundary before application callbacks, with terminal malformed-frame handling
 - [x] Explicit HostSession authenticated-peer snapshot and direct unicast/broadcast send entry points

@@ -106,6 +106,18 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     case "stopGatt":
       peripheral.removeAllServices()
       gattService = nil
+      // A Dart runtime can be recreated while the CoreBluetooth plugin
+      // instance is still alive (for example after a Flutter hot restart or
+      // an integration-test reset).  Release every central-side link before
+      // clearing the bookkeeping; otherwise the next listen/connect sees the
+      // old subscription and reports ENDPOINT_BUSY/duplicate subscription.
+      for client in gattClients.values {
+        central.cancelPeripheralConnection(client.peripheral)
+      }
+      gattClients.removeAll()
+      expectedGattServices.removeAll()
+      expectedGattGenerations.removeAll()
+      closingGattGenerations.removeAll()
       gattServerCentrals.removeAll()
       gattServerEndpointByCentral.removeAll()
       gattServerCentralByEndpoint.removeAll()
@@ -309,7 +321,13 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
       rejectGatt(peripheral, message: error?.localizedDescription ?? "LPC TX subscription failed"); return
     }
     eventSink?(["type": "gattConnected", "endpointId": peripheral.identifier.uuidString,
-                "localRole": "central", "platformSafeWriteSize": peripheral.maximumWriteValueLength(for: .withResponse),
+                "localRole": "central", "platformSafeWriteSize": peripheral.maximumWriteValueLength(for: .withoutResponse),
+                "connectionGeneration": client.generation])
+  }
+
+  public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+    guard let client = gattClients[peripheral.identifier] else { return }
+    eventSink?(["type": "gattWritable", "endpointId": peripheral.identifier.uuidString,
                 "connectionGeneration": client.generation])
   }
   public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic,
@@ -322,9 +340,16 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   }
   public func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic,
                          error: Error?) {
-    guard let client = gattClients[peripheral.identifier], characteristic.uuid == client.rx.uuid else { return }
+    guard var client = gattClients[peripheral.identifier], characteristic.uuid == client.rx.uuid else { return }
+    // CoreBluetooth permits only one outstanding write-with-response for a
+    // characteristic. Release the gate only from this callback so LPC cannot
+    // overlap response-required writes during bidirectional traffic.
+    client.writeInFlight = false
+    gattClients[peripheral.identifier] = client
     if let error {
-      eventSink?(FlutterError(code: "PLATFORM_ERROR", message: error.localizedDescription, details: nil))
+      NSLog("LocalPeerConnections: GATT write failed endpoint=\(peripheral.identifier.uuidString) error=\(error.localizedDescription)")
+      eventSink?(["type": "gattDisconnected", "endpointId": peripheral.identifier.uuidString,
+                  "connectionGeneration": client.generation])
     } else {
       eventSink?(["type": "gattWritable", "endpointId": peripheral.identifier.uuidString,
                   "connectionGeneration": client.generation])
@@ -507,8 +532,17 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
       throw BackendError("ENDPOINT_LOST", "stale GATT connection generation")
     }
     if transmission == "notify" { return "terminalFailure" }
+    // CoreBluetooth's response-required callback can stall for an extended
+    // period when the Android peer is simultaneously notifying. LPC already
+    // provides its own reliable framing/ACK boundary, so use the negotiated
+    // no-response characteristic with CoreBluetooth's explicit flow-control
+    // signal. This prevents overlapping response writes without deadlocking
+    // the central drain on a missing didWriteValueFor callback.
+    if !client.peripheral.canSendWriteWithoutResponse {
+      return "temporarilyUnavailable"
+    }
     client.peripheral.writeValue(fragment.data, for: client.rx,
-      type: transmission == "writeWithoutResponse" ? .withoutResponse : .withResponse)
+      type: .withoutResponse)
     return "submitted"
   }
 
@@ -592,5 +626,6 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     let tx: CBCharacteristic
     let control: CBCharacteristic
     let generation: Int64
+    var writeInFlight: Bool = false
   }
 }

@@ -85,6 +85,11 @@ class GattBackendConnection implements RealtimeBackendConnection {
   TransportConnectionState get state => _state;
   @override
   int get maxWriteSize => _fragmenter.maxPayloadSize + 7;
+
+  /// Effective ATT MTU inferred from the platform's safe value payload.
+  /// Native GATT APIs report the value payload (MTU - 3); [maxWriteSize] is
+  /// the corresponding complete fragment size used by this backend.
+  int get negotiatedMtu => maxWriteSize + 3;
   @override
   Stream<BackendConnectionEvent> get events => _events.stream;
 

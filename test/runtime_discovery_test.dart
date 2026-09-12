@@ -550,6 +550,37 @@ void main() {
     await runtime.close();
   });
 
+  test('ConnectionAttempt fails when the platform never completes connect',
+      () async {
+    const methods = MethodChannel('runtime-attempt-timeout-test');
+    var closes = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'closeGattConnection') closes++;
+      // Deliberately omit a PlatformGattConnected/Disconnected event.
+      return null;
+    });
+    final runtime = await createRuntime(
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(methods: methods),
+    );
+    final attempt = runtime.connect('opaque-endpoint');
+    final failure = expectLater(
+      attempt.events,
+      emitsThrough(
+        isA<ConnectionAttemptFailed>().having(
+          (event) => event.error.code,
+          'error code',
+          LpcErrorCode.connectionTimeout,
+        ),
+      ),
+    );
+
+    await failure.timeout(const Duration(seconds: 12));
+    expect(closes, 1);
+    await runtime.close();
+  });
+
   test('HostSession close is idempotent and emits one terminal event',
       () async {
     final runtime = await createRuntime(
@@ -764,6 +795,46 @@ void main() {
     await _waitUntil(
         () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 1);
     await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(connects, 1);
+
+    await subscription.cancel();
+    await discovery.stop();
+    await runtime.close();
+    await events.close();
+  });
+
+  test('failed transport probe backs off while advertisements continue',
+      () async {
+    const methods = MethodChannel('runtime-known-probe-backoff-test');
+    final events = StreamController<PlatformBleEvent>.broadcast();
+    final runtimeEvents = <RuntimeEvent>[];
+    var connects = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'connectGatt') {
+        connects++;
+        events.add(const PlatformGattDisconnected('unstable-endpoint'));
+      }
+      return null;
+    });
+    final runtime = await createRuntime(
+      config: RuntimeConfig(
+        autoConnectKnownPeers: true,
+        knownPeerResolver: _KnownPeerResolver(),
+      ),
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(
+        methods: methods,
+        eventStream: events.stream,
+      ),
+    );
+    final subscription = runtime.events.listen(runtimeEvents.add);
+    final discovery = await runtime.startDiscovery();
+    events.add(const PlatformEndpointFound('unstable-endpoint', rssi: -40));
+    await _waitUntil(
+        () => runtimeEvents.whereType<KnownPeerProbeFailed>().isNotEmpty);
+    events.add(const PlatformEndpointFound('unstable-endpoint', rssi: -41));
+    await Future<void>.delayed(const Duration(milliseconds: 100));
     expect(connects, 1);
 
     await subscription.cancel();

@@ -2891,6 +2891,13 @@ After successful RESUME:
 - each uses fresh wire sequence numbers in the new transport generation;
 - each such retransmission consumes one retry attempt.
 
+RESUME commits the logical PeerConnection to `READY` before replaying retained
+operations. Replay is bounded by the reconnect deadline (and by the transport
+write completion); a stalled native write MUST NOT strand the peer in
+`RECONNECTING`. A replay that cannot complete is reported through the normal
+transport-loss/reconnect path, while the logical session remains usable for
+new operations once the resumed transport is ready.
+
 Therefore unacknowledged ACK-required operations including `MEMBERSHIP_SNAPSHOT`, `GROUP_MERGE`, `COORDINATOR_CHECKPOINT`, `GROUP_LEAVE`, `GROUP_RELIABLE`, `GROUP_DELIVERY_ACK`, and `GROUP_RELAY_STATUS` survive pairwise RESUME using the same generic reliability mechanism.
 
 ## 23.5 Frame-Specific Final ACK-Timeout Recovery
@@ -8327,6 +8334,7 @@ Every mobile release candidate MUST run:
 - [ ] IT-036 Three-peer checkpoint publication with ALL_COMMITTED_MEMBERS reaches DURABLE only after both remote peers fully reassemble, commit, and ACK the exact publication; dropping one ACK forces retry and does not produce false durability.
 - [ ] IT-037 During a three-peer checkpoint barrier, one required peer disconnects and resumes within timeout; the same publication may still reach DURABLE after its exact checkpoint operation is ACKed following RESUME.
 - [ ] IT-038 During a three-peer checkpoint barrier, one required peer is terminally removed before ACK; the original publication completes FAILED/PEER_LEFT and a new publication against the new membership can reach DURABLE.
+- [ ] IT-041 Both Android and iOS send 64-byte RELIABLE_ACKED packets at 5 packets/second for 60 seconds; every packet receives the fixture application ACK and both logical connections remain READY.
 
 ## In-process Runtime Integration Tests
 

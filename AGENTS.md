@@ -234,3 +234,6 @@ with the spec, you can fix AGENTS.md.
 Do not perform userspace reboots (or other device reboots) on connected test
 devices. If an iOS deployment is stuck or a device becomes unavailable, wait
 for it to recover or ask the user to reconnect/unlock it.
+
+When running the LPC multi device integration tests, watch for non stable connections
+and high packet loss rates, or stalled transfers, and debug and figure out why.

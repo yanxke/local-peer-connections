@@ -31,6 +31,21 @@ class _GattPlatform implements GattFragmentPlatform {
 Future<void> _turn() => Future<void>.delayed(Duration.zero);
 
 void main() {
+  test('GATT backend exposes negotiated MTU from safe ATT payload size', () {
+    final backend = GattBackendConnection(
+      connectionId: 'gatt',
+      platform: _GattPlatform(const [], safeWriteSize: 514),
+    );
+
+    // Android reports MTU - 3 as the platform write payload (514), so the
+    // diagnostic MTU is reconstructed as 517.
+    expect(backend.negotiatedMtu, 517);
+    // The complete serialized LPC fragment remains bounded by the native
+    // safe value size (514 bytes) even though the MTU includes the 3-byte ATT
+    // header.
+    expect(backend.maxWriteSize, 514);
+  });
+
   test('UT-063 GATT fragmentation-queue insertion is not transport submission',
       () async {
     final platform =

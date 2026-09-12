@@ -29,6 +29,7 @@ identity, lifecycle, transport, and group events.
 - [ ] Add test-only transport fault injection for altered authentication, dropped ACKs, terminal writes, and transient backpressure.
 - [ ] Add complete automated assertions for IT-007 and IT-011 through IT-016, including SessionId and transport-generation continuity.
 - [x] Add executable two-device soak and multi-device star scenarios for IT-017 through IT-019.
+- [ ] Complete a physical IT-041 bidirectional 64-byte, 5-packet/second, 60-second reliability run (fixture is implemented; current devices are not discovering the iOS advertisement).
 - [ ] Add weak-client and foreground/background scenarios for IT-020 and IT-022.
 - [ ] Add capability-gated L2CAP/LAN upgrade and fallback scenarios for IT-023 through IT-027.
 - [x] Add raw LPC ownership/coexistence scenarios for IT-032 through IT-035.

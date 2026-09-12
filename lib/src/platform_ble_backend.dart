@@ -336,7 +336,8 @@ sealed class PlatformBleEvent {
     if (type == 'gattDisconnected' && value['endpointId'] is String) {
       return PlatformGattDisconnected(value['endpointId'] as String,
           connectionGeneration:
-              (value['connectionGeneration'] as num?)?.toInt());
+              (value['connectionGeneration'] as num?)?.toInt(),
+          status: (value['status'] as num?)?.toInt());
     }
     if (type == 'gattWritable' &&
         (value['endpointId'] == null || value['endpointId'] is String)) {
@@ -379,9 +380,16 @@ class PlatformGattFragment extends PlatformBleEvent {
 }
 
 class PlatformGattDisconnected extends PlatformBleEvent {
-  const PlatformGattDisconnected(this.endpointId, {this.connectionGeneration});
+  const PlatformGattDisconnected(this.endpointId,
+      {this.connectionGeneration, this.status});
   final String endpointId;
   final int? connectionGeneration;
+
+  /// Native transport status when the platform supplies one. Android exposes
+  /// the BluetoothGatt status (for example 133 for a controller/resource
+  /// failure); iOS generally reports only a disconnect callback and leaves
+  /// this null. This is diagnostic metadata, not an LPC protocol error code.
+  final int? status;
 }
 
 class PlatformGattWritable extends PlatformBleEvent {

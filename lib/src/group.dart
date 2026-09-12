@@ -346,15 +346,20 @@ class GroupSession {
   GroupSession.internal(this._config, this._localPeerId, GroupId groupId,
       {void Function(GroupSession)? onClosed,
       void Function(GroupSession, Set<PeerId>)? onMembershipCommitted,
-      int nextCheckpointPublicationId = 1})
+      int nextCheckpointPublicationId = 1,
+      PeerId? initialCoordinator})
       : _groupId = groupId,
         _onClosed = onClosed,
         _onMembershipCommitted = onMembershipCommitted,
         _nextCheckpointPublicationId = nextCheckpointPublicationId {
     _members[_localPeerId] = GroupMember(_localPeerId, _config.maxPeers);
+    if (initialCoordinator != null && initialCoordinator != _localPeerId) {
+      _members[initialCoordinator] =
+          GroupMember(initialCoordinator, _config.maxPeers);
+    }
     _transition(GroupState.discovering);
     _transition(GroupState.forming);
-    _coordinator = _localPeerId;
+    _coordinator = initialCoordinator ?? _localPeerId;
     _transition(GroupState.ready);
     _emit((s, a) => GroupReady(s, a, _groupId, _coordinator!, members));
   }
@@ -366,6 +371,11 @@ class GroupSession {
   final Map<PeerId, GroupMember> _members = {};
   final StreamController<GroupEvent> _events =
       StreamController.broadcast(sync: true);
+  // Retain a small current-state window so an application attaching its
+  // listener immediately after group creation cannot miss a reliable
+  // advertisement delivered during synchronous bootstrap/merge.
+  final List<ReliableMessageReceived> _recentReliableMessages =
+      <ReliableMessageReceived>[];
   // The bound applies to the GroupSession as a whole, while the identity is
   // the normative (source, GroupMessageId) pair (Section 43.1.4).
   final CompletedGroupMessageDedup _delivered = CompletedGroupMessageDedup();
@@ -394,6 +404,8 @@ class GroupSession {
   GroupRouteTransport? _routeTransport;
   int _debugReliableSendsToDrop = 0;
   Stream<GroupEvent> get events => _events.stream;
+  List<ReliableMessageReceived> recentReliableMessages() =>
+      List.unmodifiable(_recentReliableMessages);
   GroupId get groupId => _groupId;
   PeerId get localPeerId => _localPeerId;
   GroupConfig get config => _config;
@@ -1010,7 +1022,14 @@ class GroupSession {
             bytes: bytes)) {
           return;
         }
-        _emit((s, a) => ReliableMessageReceived(s, a, source, id, mode, bytes));
+        final event = ReliableMessageReceived(
+            _eventSequence + 1, _now(), source, id, mode, bytes);
+        _recentReliableMessages.add(event);
+        if (_recentReliableMessages.length > 32) {
+          _recentReliableMessages.removeAt(0);
+        }
+        _eventSequence = event.eventSequence;
+        _events.add(event);
       });
 
   /// Backend/core hook for a fully authenticated, coordinator-validated
