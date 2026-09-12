@@ -587,11 +587,12 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
       Log.d(logTag, "client write temporarily unavailable endpoint=$endpointId reason=in-flight")
       return "temporarilyUnavailable"
     }
-    // Keep normal/control traffic response-bearing. The Windows peripheral
-    // package's response-free write callback remains unreliable under load;
-    // LPC Section 12 requires strict fragment order. Realtime is explicitly
-    // response-free under Section 22.2.
-    val withoutResponse = transmission == "writeWithoutResponse"
+    // The Windows adapter repairs the WinRT package's callback-dispatch
+    // reordering with a bounded Section 12 fragment sequencer. Normal traffic
+    // can therefore use response-free writes without paying an ATT response
+    // round trip. Realtime is response-free by its Section 22.2 requirement.
+    val withoutResponse = transmission == "normal" ||
+      transmission == "writeWithoutResponse"
     client.rx.value = fragment
     client.rx.writeType = if (withoutResponse)
       BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT

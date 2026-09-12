@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:bluetooth_low_energy/bluetooth_low_energy.dart';
 import 'package:flutter/services.dart';
 
 import 'gatt_backend_connection.dart';
 import 'platform_ble_events.dart';
 import 'protocol/capabilities.dart';
+import 'protocol/gatt_fragment.dart';
 import 'types.dart';
 
 /// Windows BLE transport adapter backed by the federated
@@ -179,6 +181,7 @@ class BluetoothLowEnergyBackend {
   Future<void> stopGatt() async {
     final active = _peripheralLinks.values.toList(growable: false);
     for (final link in active) {
+      link.dispose();
       _emitDisconnected(link.endpointId, link.generation);
     }
     _peripheralLinks.clear();
@@ -357,6 +360,7 @@ class BluetoothLowEnergyBackend {
     }
     _peripheralLinks.remove(endpointId);
     _peripheralEndpointByCentral.remove(peripheralLink.central.uuid.toString());
+    peripheralLink.dispose();
   }
 
   void _onDiscovered(DiscoveredEventArgs event) {
@@ -422,13 +426,7 @@ class BluetoothLowEnergyBackend {
     final response = _respondWrite(event.request);
     if (characteristicUuid == service.rx.uuid) {
       final link = _ensurePeripheralLink(event.central);
-      _events.add(
-        PlatformGattFragment(
-          link.endpointId,
-          value,
-          connectionGeneration: link.generation,
-        ),
-      );
+      link.addIncomingFragment(value);
     }
     await response;
   }
@@ -455,7 +453,10 @@ class BluetoothLowEnergyBackend {
       final endpointId = _peripheralEndpointByCentral.remove(centralKey);
       if (endpointId != null) {
         final link = _peripheralLinks.remove(endpointId);
-        if (link != null) _emitDisconnected(endpointId, link.generation);
+        if (link != null) {
+          link.dispose();
+          _emitDisconnected(endpointId, link.generation);
+        }
       }
     }
   }
@@ -472,11 +473,21 @@ class BluetoothLowEnergyBackend {
       );
     }
     final endpointId = 'server-${_nextServerEndpoint++}';
+    final generation = _nextGeneration++;
     final link = _WindowsPeripheralLink(
       endpointId: endpointId,
       central: central,
       tx: service.tx,
-      generation: _nextGeneration++,
+      generation: generation,
+      onIncomingFragment: (fragment) {
+        _events.add(
+          PlatformGattFragment(
+            endpointId,
+            fragment,
+            connectionGeneration: generation,
+          ),
+        );
+      },
     );
     _peripheralLinks[endpointId] = link;
     _peripheralEndpointByCentral[centralKey] = endpointId;
@@ -583,15 +594,249 @@ class _WindowsCentralLink {
 }
 
 class _WindowsPeripheralLink {
-  const _WindowsPeripheralLink({
+  _WindowsPeripheralLink({
     required this.endpointId,
     required this.central,
     required this.tx,
     required this.generation,
-  });
+    required void Function(Uint8List fragment) onIncomingFragment,
+  }) : _incomingOrderer = WindowsGattFragmentOrderer(
+         onDeliver: onIncomingFragment,
+       );
 
   final String endpointId;
   final Central central;
   final GATTCharacteristic tx;
   final int generation;
+  final WindowsGattFragmentOrderer _incomingOrderer;
+
+  void addIncomingFragment(Uint8List fragment) =>
+      _incomingOrderer.add(fragment);
+
+  void dispose() => _incomingOrderer.dispose();
+}
+
+/// Repairs the Windows peripheral callback ordering for one LPC GATT link.
+///
+/// Bluetooth's ATT bearer is ordered. Some versions of the Windows plugin can
+/// dispatch completed Write Without Response callbacks as `0, 2, 1` even when
+/// they arrived in ATT order. This adapter restores the Section 12 order
+/// before the protocol reassembler sees the fragments. It does not relax any
+/// LPC validation: malformed fragments, duplicates, a full repair buffer, or
+/// a two-second gap are passed to the normal reassembler as invalid input.
+class WindowsGattFragmentOrderer {
+  WindowsGattFragmentOrderer({
+    required void Function(Uint8List fragment) onDeliver,
+    this.maxBufferedFragments = 512,
+    this.reorderTimeout = const Duration(seconds: 2),
+  }) : assert(maxBufferedFragments > 0),
+       assert(!reorderTimeout.isNegative && reorderTimeout > Duration.zero),
+       _onDeliver = onDeliver;
+
+  final void Function(Uint8List fragment) _onDeliver;
+
+  /// The bound prevents a faulty platform callback source from accumulating
+  /// unbounded raw GATT data. The repair path is ordinarily only one delayed
+  /// callback; this larger cap permits a short scheduler burst without
+  /// changing LPC's existing frame-size or queue limits.
+  final int maxBufferedFragments;
+
+  /// Section 12's no-progress limit for an incomplete GATT frame.
+  final Duration reorderTimeout;
+
+  final List<_WindowsGattFrameOrder> _frames = <_WindowsGattFrameOrder>[];
+  var _bufferedFragmentCount = 0;
+  Timer? _gapTimer;
+
+  void add(Uint8List encoded) {
+    late final GattFragment fragment;
+    try {
+      fragment = GattFragment.decode(encoded);
+    } on Object {
+      _invalidate(encoded);
+      return;
+    }
+    final pending = _PendingWindowsGattFragment(fragment, encoded);
+
+    if (fragment.start) {
+      if (fragment.sequence != 0) {
+        _invalidate(encoded);
+        return;
+      }
+      if (_frames.isEmpty) {
+        _frames.add(_WindowsGattFrameOrder(start: pending));
+      } else if (_frames.first.start == null) {
+        // A callback for fragment 1 can run before callback 0. Preserve these
+        // pre-start candidates and drain them immediately after START arrives.
+        _frames.first.setStart(pending);
+        _frames.first.startBuffered = true;
+        _bufferedFragmentCount++;
+      } else if (!_queueFrameStart(pending)) {
+        _invalidate(encoded);
+        return;
+      }
+      _advance();
+      _updateGapTimer();
+      return;
+    }
+
+    final target = _targetFor(fragment.sequence);
+    if (target == null || !_buffer(target, pending)) {
+      _invalidate(encoded);
+      return;
+    }
+    _advance();
+    _updateGapTimer();
+  }
+
+  _WindowsGattFrameOrder? _targetFor(int sequence) {
+    if (_frames.isEmpty) {
+      final frame = _WindowsGattFrameOrder();
+      _frames.add(frame);
+      return frame;
+    }
+    final active = _frames.first;
+    if (!active.started || sequence >= active.nextSequence!) return active;
+
+    // An early START identifies the following frame. Once it exists, a lower
+    // sequence belongs to that queued frame rather than being a duplicate of
+    // the active one. This is the observed WinRT `...8, 0, 9...` callback
+    // race; ATT itself still carries `...8, 9, 0...`.
+    return _frames.length > 1 ? _frames[1] : null;
+  }
+
+  bool _queueFrameStart(_PendingWindowsGattFragment pending) {
+    if (_bufferedFragmentCount >= maxBufferedFragments) return false;
+    _frames.add(_WindowsGattFrameOrder(start: pending, startBuffered: true));
+    _bufferedFragmentCount++;
+    return true;
+  }
+
+  bool _buffer(
+    _WindowsGattFrameOrder target,
+    _PendingWindowsGattFragment pending,
+  ) {
+    final existing = target.pending[pending.fragment.sequence];
+    if (existing != null) {
+      return _sameBytes(existing.encoded, pending.encoded);
+    }
+    if (_bufferedFragmentCount >= maxBufferedFragments) return false;
+    target.pending[pending.fragment.sequence] = pending;
+    _bufferedFragmentCount++;
+    return true;
+  }
+
+  void _advance() {
+    while (_frames.isNotEmpty) {
+      final active = _frames.first;
+      final start = active.start;
+      if (start == null) return;
+      if (!active.started) {
+        active.started = true;
+        if (active.startBuffered) _bufferedFragmentCount--;
+        _onDeliver(start.encoded);
+        if (start.fragment.end) {
+          _frames.removeAt(0);
+          continue;
+        }
+        active.nextSequence = 1;
+      }
+      var completed = false;
+      while (true) {
+        final next = active.pending.remove(active.nextSequence);
+        if (next == null) break;
+        _bufferedFragmentCount--;
+        _onDeliver(next.encoded);
+        if (next.fragment.end) {
+          _frames.removeAt(0);
+          completed = true;
+          break;
+        }
+        active.nextSequence = active.nextSequence! + 1;
+      }
+      if (!completed) return;
+    }
+  }
+
+  void _expireGap() {
+    _gapTimer = null;
+    if (_frames.isEmpty || _bufferedFragmentCount == 0) return;
+    // Do not manufacture an LPC error event here. Delivering one retained,
+    // non-contiguous fragment delegates invalid-frame handling to the existing
+    // Section 12 reassembler, exactly as an unrepaired platform event would.
+    final first = _firstBufferedFragment();
+    _clear();
+    _onDeliver(first.encoded);
+  }
+
+  _PendingWindowsGattFragment _firstBufferedFragment() {
+    for (final frame in _frames) {
+      final start = frame.start;
+      if (start != null && frame.startBuffered && !frame.started) return start;
+      if (frame.pending.isNotEmpty) {
+        return frame.pending.values.reduce(
+          (left, right) =>
+              left.fragment.sequence < right.fragment.sequence ? left : right,
+        );
+      }
+    }
+    throw StateError('no buffered Windows GATT fragment');
+  }
+
+  void _invalidate(Uint8List encoded) {
+    _clear();
+    _onDeliver(encoded);
+  }
+
+  void _clear() {
+    _frames.clear();
+    _bufferedFragmentCount = 0;
+    _cancelGapTimer();
+  }
+
+  void _updateGapTimer() {
+    if (_bufferedFragmentCount == 0) {
+      _cancelGapTimer();
+    } else {
+      _gapTimer ??= Timer(reorderTimeout, _expireGap);
+    }
+  }
+
+  void _cancelGapTimer() {
+    _gapTimer?.cancel();
+    _gapTimer = null;
+  }
+
+  void dispose() => _clear();
+
+  static bool _sameBytes(Uint8List left, Uint8List right) {
+    if (left.length != right.length) return false;
+    for (var index = 0; index < left.length; index++) {
+      if (left[index] != right[index]) return false;
+    }
+    return true;
+  }
+}
+
+class _PendingWindowsGattFragment {
+  const _PendingWindowsGattFragment(this.fragment, this.encoded);
+
+  final GattFragment fragment;
+  final Uint8List encoded;
+}
+
+class _WindowsGattFrameOrder {
+  _WindowsGattFrameOrder({this.start, this.startBuffered = false});
+
+  _PendingWindowsGattFragment? start;
+  bool startBuffered;
+  final Map<int, _PendingWindowsGattFragment> pending =
+      <int, _PendingWindowsGattFragment>{};
+  var started = false;
+  int? nextSequence;
+
+  void setStart(_PendingWindowsGattFragment value) {
+    if (start != null) throw StateError('Windows GATT frame already has START');
+    start = value;
+  }
 }
