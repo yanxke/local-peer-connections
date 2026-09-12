@@ -443,6 +443,12 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
             "connectionGeneration" to generation))
           return
         }
+        // Ask Android for low-latency link timing before service discovery.
+        // This is a link-layer hint only: the portable backend still owns
+        // ordering, bounded backpressure, and Section 44 submission semantics.
+        if (!gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)) {
+          Log.d(logTag, "client high-priority connection request rejected endpoint=$endpointId")
+        }
         if (!gatt.discoverServices()) {
           Log.w(logTag, "client service discovery could not start endpoint=$endpointId")
           failGatt(endpointId, gatt)
@@ -494,8 +500,8 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
             if (characteristic.writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
               // Some Android stacks report local completion before a
               // response-free packet has reached the controller. Release the
-              // gate after one connection interval so ordered LPC fragments
-              // are not reordered over the air on Windows peers.
+              // gate after one high-priority connection interval so ordered
+              // LPC fragments are not reordered over the air on Windows peers.
               bluetoothStateHandler.postDelayed({
                 if (gattHandles[endpointId] === gatt &&
                     gattClients[endpointId] === client && client.writeInFlight) {
@@ -581,11 +587,10 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
       Log.d(logTag, "client write temporarily unavailable endpoint=$endpointId reason=in-flight")
       return "temporarilyUnavailable"
     }
-    // Normal/control traffic uses a response-bearing ATT write. The Windows
-    // peripheral caches the central identity and reaches the Flutter response
-    // callback without a per-fragment WinRT lookup, avoiding the committed
-    // request failure that otherwise appears as Android GATT status 14. Only
-    // the explicitly realtime path is response-free.
+    // Keep normal/control traffic response-bearing. The Windows peripheral
+    // package's response-free write callback remains unreliable under load;
+    // LPC Section 12 requires strict fragment order. Realtime is explicitly
+    // response-free under Section 22.2.
     val withoutResponse = transmission == "writeWithoutResponse"
     client.rx.value = fragment
     client.rx.writeType = if (withoutResponse)
@@ -905,12 +910,12 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     const val GCM_IV_BYTES = 12
     const val GCM_TAG_BITS = 128
     const val MAX_SERVER_NOTIFICATION_QUEUE = 64
-    // The integration devices negotiate a 39 ms connection interval. Keep
-    // response-free writes serialized for one interval because the Android
-    // callback can precede controller transmission. The Windows server
-    // completes the native no-response request before resolving Flutter-side
-    // identity data, so this gate does not add application-level latency.
-    const val NO_RESPONSE_PACING_MS = 40L
+    // Keep response-free writes serialized for a high-priority connection
+    // interval because the Android callback can precede controller
+    // transmission. The Windows server completes its native no-response
+    // request before resolving Flutter-side identity data, so this preserves
+    // fragment ordering without paying an ATT response round trip.
+    const val NO_RESPONSE_PACING_MS = 12L
     val CLIENT_CONFIGURATION_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
   }
 }
