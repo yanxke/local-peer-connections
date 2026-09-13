@@ -12,6 +12,70 @@ class _SnapshotController extends DeviceTestController {
   Map<String, Object?> snapshot() => value;
 }
 
+class _TrafficUpdateController extends DeviceTestController {
+  _TrafficUpdateController()
+    : value = {
+        'runtimeState': 'ready',
+        'localPeerId': '0123456789abcdef0123456789abcdef',
+        'displayName': 'Test Device',
+        'controlApi': 'disabled',
+        'capabilities': 15,
+        'presenceActive': true,
+        'endpoints': const <Object?>[],
+        'knownPeerIds': const <Object?>[],
+        'connections': [
+          {
+            'peerId': 'fedcba9876543210fedcba9876543210',
+            'state': 'ready',
+            'security': 'encryptedTofu',
+            'transport': 'gatt',
+            'negotiatedMtu': 517,
+            'sessionId': 'session',
+          },
+        ],
+        'attempts': const <Object?>[],
+        'telemetry': {
+          'messagesSent': 0,
+          'messagesReceived': 0,
+          'bytesSent': 0,
+          'bytesReceived': 0,
+          'speedWindowMs': 5000,
+          'connectionStatePercent': <String, Object?>{},
+        },
+        'trafficTests': {
+          'direct': {
+            'running': true,
+            'sent': 2,
+            'acked': 2,
+            'pending': 0,
+            'timedOut': 0,
+            'lossRate': 0,
+          },
+          'group': {'running': false},
+        },
+        'group': null,
+        'eventSequence': 0,
+      },
+      super(controlPort: 0);
+
+  final Map<String, Object?> value;
+  final updates = <Map<String, Object?>>[];
+
+  @override
+  Map<String, Object?> snapshot() => value;
+
+  @override
+  Future<void> updateSendTest({
+    int? messageSize,
+    double? messagesPerSecond,
+  }) async {
+    updates.add({
+      'messageSize': messageSize,
+      'messagesPerSecond': messagesPerSecond,
+    });
+  }
+}
+
 void main() {
   testWidgets('device test app renders raw LPC state', (tester) async {
     final controller = DeviceTestController(displayName: 'Test Device');
@@ -51,6 +115,25 @@ void main() {
 
     expect(find.text('Remember'), findsNothing);
     expect(find.textContaining('MTU=517'), findsOneWidget);
+  });
+
+  testWidgets('traffic sliders update an active run without restarting it', (
+    tester,
+  ) async {
+    final controller = _TrafficUpdateController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(DeviceTestApp(controller: controller));
+
+    final sliders = find.byType(Slider);
+    expect(sliders, findsNWidgets(2));
+    tester.widget<Slider>(sliders.at(0)).onChanged!(6);
+    tester.widget<Slider>(sliders.at(1)).onChanged!(3);
+    await tester.pump();
+
+    expect(controller.updates, [
+      {'messageSize': 512, 'messagesPerSecond': 1.0},
+      {'messageSize': 512, 'messagesPerSecond': 3.0},
+    ]);
   });
 
   testWidgets('unprovisioned authenticated peers show Remember', (

@@ -477,6 +477,23 @@ class DeviceTestController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Changes the active direct traffic fixture without replacing its test
+  /// identity or counters. The device UI uses this for slider changes while a
+  /// run is active; keeping the same run also lets ACKs for messages sent
+  /// before the change complete normally.
+  Future<void> updateSendTest({
+    int? messageSize,
+    double? messagesPerSecond,
+  }) async {
+    final run = _directTraffic;
+    if (run == null) return;
+    _updateTrafficRun(
+      run,
+      messageSize: messageSize,
+      messagesPerSecond: messagesPerSecond,
+    );
+  }
+
   Future<void> startGroupSendTest({
     required String peerId,
     required int messageSize,
@@ -529,6 +546,21 @@ class DeviceTestController extends ChangeNotifier {
       ...result,
     });
     notifyListeners();
+  }
+
+  /// Changes the active group traffic fixture in place. See
+  /// [updateSendTest] for why this must not stop and recreate the run.
+  Future<void> updateGroupSendTest({
+    int? messageSize,
+    double? messagesPerSecond,
+  }) async {
+    final run = _groupTraffic;
+    if (run == null) return;
+    _updateTrafficRun(
+      run,
+      messageSize: messageSize,
+      messagesPerSecond: messagesPerSecond,
+    );
   }
 
   Future<void> publishCheckpoint(List<int> bytes) async {
@@ -879,12 +911,58 @@ class DeviceTestController extends ChangeNotifier {
   }
 
   void _scheduleTraffic(_TrafficRun run) {
+    _scheduleTrafficTimer(run);
+    unawaited(_sendTraffic(run));
+  }
+
+  void _scheduleTrafficTimer(_TrafficRun run) {
+    // Timer.periodic captures its duration at creation. Recreate only this
+    // timer when the UI changes the rate; the run, sequence, pending ACKs,
+    // and counters remain intact.
+    run.timer?.cancel();
     final intervalMs = (1000 / run.messagesPerSecond).round().clamp(20, 60000);
     run.timer = Timer.periodic(Duration(milliseconds: intervalMs), (_) {
       _expireTraffic(run);
       unawaited(_sendTraffic(run));
     });
+  }
+
+  void _updateTrafficRun(
+    _TrafficRun run, {
+    int? messageSize,
+    double? messagesPerSecond,
+  }) {
+    final nextMessageSize = messageSize ?? run.messageSize;
+    final nextMessagesPerSecond = messagesPerSecond ?? run.messagesPerSecond;
+    _validateTrafficArguments(
+      nextMessageSize,
+      nextMessagesPerSecond,
+      run.deliveryMode,
+      run.maxPending,
+    );
+    if (nextMessageSize == run.messageSize &&
+        nextMessagesPerSecond == run.messagesPerSecond) {
+      return;
+    }
+    final previousMessageSize = run.messageSize;
+    final previousMessagesPerSecond = run.messagesPerSecond;
+    run.messageSize = nextMessageSize;
+    run.messagesPerSecond = nextMessagesPerSecond;
+    _scheduleTrafficTimer(run);
+    _expireTraffic(run);
+    _record('trafficTestUpdated', {
+      'kind': run.group ? 'group' : 'direct',
+      'testId': run.id,
+      'messageSize': nextMessageSize,
+      'messagesPerSecond': nextMessagesPerSecond,
+      'previousMessageSize': previousMessageSize,
+      'previousMessagesPerSecond': previousMessagesPerSecond,
+    });
+    // Make the new setting effective immediately instead of waiting for the
+    // first tick of the newly scheduled timer. Backpressure still prevents a
+    // second concurrent send or an unbounded pending-ACK set.
     unawaited(_sendTraffic(run));
+    notifyListeners();
   }
 
   Future<void> _stopTrafficRun(_TrafficRun run) async {
@@ -892,7 +970,11 @@ class DeviceTestController extends ChangeNotifier {
     // Keep the run installed while ACKs drain so the receive handler can still
     // match acknowledgements. A bounded grace period prevents shutdown from
     // hanging forever when the peer is genuinely unreachable.
-    final deadline = _telemetryClock.elapsedMilliseconds + run.ackTimeoutMs;
+    var deadline = _telemetryClock.elapsedMilliseconds + run.ackTimeoutMs;
+    for (final pending in run.pending.values) {
+      final pendingDeadline = pending.sentAtMs + pending.ackTimeoutMs;
+      if (pendingDeadline > deadline) deadline = pendingDeadline;
+    }
     while ((run.inFlight || run.pending.isNotEmpty) &&
         _telemetryClock.elapsedMilliseconds < deadline) {
       _expireTraffic(run);
@@ -955,7 +1037,8 @@ class DeviceTestController extends ChangeNotifier {
       }
       run.sent++;
       run.pending[sequence] = _TrafficPending(
-        _telemetryClock.elapsedMilliseconds,
+        sentAtMs: _telemetryClock.elapsedMilliseconds,
+        ackTimeoutMs: run.ackTimeoutMs,
       );
       _record('trafficMessageSent', {
         'kind': run.group ? 'group' : 'direct',
@@ -991,7 +1074,7 @@ class DeviceTestController extends ChangeNotifier {
     final now = _telemetryClock.elapsedMilliseconds;
     final expired = <int>[];
     for (final entry in run.pending.entries) {
-      if (force || now - entry.value.sentAtMs >= run.ackTimeoutMs) {
+      if (force || now - entry.value.sentAtMs >= entry.value.ackTimeoutMs) {
         expired.add(entry.key);
       }
     }
@@ -1508,6 +1591,13 @@ class DeviceTestController extends ChangeNotifier {
       case 'stopSendTest':
         await stopSendTest();
         return snapshot();
+      case 'updateSendTest':
+        await updateSendTest(
+          messageSize: (arguments['messageSize'] as num?)?.toInt(),
+          messagesPerSecond: (arguments['messagesPerSecond'] as num?)
+              ?.toDouble(),
+        );
+        return snapshot();
       case 'startGroupSendTest':
         await startGroupSendTest(
           peerId: _requiredString(arguments, 'peerId'),
@@ -1521,6 +1611,13 @@ class DeviceTestController extends ChangeNotifier {
         return snapshot();
       case 'stopGroupSendTest':
         await stopGroupSendTest();
+        return snapshot();
+      case 'updateGroupSendTest':
+        await updateGroupSendTest(
+          messageSize: (arguments['messageSize'] as num?)?.toInt(),
+          messagesPerSecond: (arguments['messagesPerSecond'] as num?)
+              ?.toDouble(),
+        );
         return snapshot();
       case 'publishCheckpoint':
         await publishCheckpoint(bytesFromArguments(arguments));
@@ -1869,8 +1966,8 @@ class _TrafficRun {
 
   final int id;
   final String peerId;
-  final int messageSize;
-  final double messagesPerSecond;
+  int messageSize;
+  double messagesPerSecond;
   final DeliveryMode deliveryMode;
   final int maxPending;
   final bool group;
@@ -1886,9 +1983,10 @@ class _TrafficRun {
 }
 
 class _TrafficPending {
-  _TrafficPending(this.sentAtMs);
+  _TrafficPending({required this.sentAtMs, required this.ackTimeoutMs});
 
   final int sentAtMs;
+  final int ackTimeoutMs;
 }
 
 class _TrafficEnvelope {

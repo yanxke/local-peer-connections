@@ -406,8 +406,12 @@ class _TrafficPanelState extends State<_TrafficPanel> {
                     divisions: _messageSizes.length - 1,
                     value: _messageSizeIndex.toDouble(),
                     label: '$_messageSize B',
-                    onChanged: (value) =>
-                        setState(() => _messageSizeIndex = value.round()),
+                    onChanged: (value) {
+                      final index = value.round();
+                      if (index == _messageSizeIndex) return;
+                      setState(() => _messageSizeIndex = index);
+                      _updateTrafficSettings();
+                    },
                   ),
                 ),
                 SizedBox(width: 72, child: Text('$_messageSize B')),
@@ -423,8 +427,12 @@ class _TrafficPanelState extends State<_TrafficPanel> {
                     divisions: 19,
                     value: _messagesPerSecond.toDouble(),
                     label: '$_messagesPerSecond msg/s',
-                    onChanged: (value) =>
-                        setState(() => _messagesPerSecond = value.round()),
+                    onChanged: (value) {
+                      final rate = value.round();
+                      if (rate == _messagesPerSecond) return;
+                      setState(() => _messagesPerSecond = rate);
+                      _updateTrafficSettings();
+                    },
                   ),
                 ),
                 SizedBox(width: 72, child: Text('$_messagesPerSecond/s')),
@@ -528,6 +536,21 @@ class _TrafficPanelState extends State<_TrafficPanel> {
   Future<void> _stop() => widget.group
       ? widget.controller.stopGroupSendTest()
       : widget.controller.stopSendTest();
+
+  void _updateTrafficSettings() {
+    // The controller intentionally treats this as a no-op when the panel is
+    // idle, so the same slider callbacks also set the next run's defaults.
+    final update = widget.group
+        ? widget.controller.updateGroupSendTest(
+            messageSize: _messageSize,
+            messagesPerSecond: _messagesPerSecond.toDouble(),
+          )
+        : widget.controller.updateSendTest(
+            messageSize: _messageSize,
+            messagesPerSecond: _messagesPerSecond.toDouble(),
+          );
+    unawaited(update);
+  }
 }
 
 class _EndpointTile extends StatelessWidget {

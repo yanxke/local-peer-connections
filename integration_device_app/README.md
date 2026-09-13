@@ -58,8 +58,10 @@ Useful commands include:
 {"action":"sendGroup","arguments":{"peerId":"...","text":"group hello"}}
 {"action":"publishCheckpoint","arguments":{"size":262144}}
 {"action":"startSendTest","arguments":{"peerId":"...","messageSize":1024,"messagesPerSecond":2,"deliveryMode":"reliableAcked"}}
+{"action":"updateSendTest","arguments":{"messageSize":2048,"messagesPerSecond":1}}
 {"action":"stopSendTest"}
 {"action":"startGroupSendTest","arguments":{"peerId":"...","messageSize":1024,"messagesPerSecond":2,"deliveryMode":"realtimeLatest"}}
+{"action":"updateGroupSendTest","arguments":{"messageSize":2048,"messagesPerSecond":1}}
 {"action":"stopGroupSendTest"}
 {"action":"provisionKnownPeer","arguments":{"peerId":"<32-hex-peer-id>"}}
 {"action":"removeKnownPeer","arguments":{"peerId":"<32-hex-peer-id>"}}
