@@ -332,8 +332,16 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
           if (responseNeeded) sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
           if (gattServerReady.add(endpointId)) {
             Log.d(logTag, "server notifications ready endpoint=$endpointId address=${device.address}")
+            // Android reports ATT value capacity as MTU - 3, which is 514
+            // for MTU 517. BluetoothGattCharacteristic nevertheless rejects
+            // values larger than its 512-byte API limit. Passing 514 to LPC
+            // would make the first encoded fragment of a 512-byte application
+            // message 514 bytes and permanently stall the bounded drain.
+            // Keep the platform boundary at the smaller API-safe value; the
+            // protocol's own fragmenter applies the same 512-byte payload cap.
             val platformSafeWriteSize =
-              ((gattServerMtuByAddress[device.address] ?: 23) - 3).coerceAtLeast(20)
+              ((gattServerMtuByAddress[device.address] ?: 23) - 3)
+                .coerceIn(20, MAX_GATT_VALUE_BYTES)
             emitSuccess(mapOf("type" to "gattConnected", "endpointId" to endpointId,
                 "localRole" to "peripheral", "platformSafeWriteSize" to platformSafeWriteSize,
                 "connectionGeneration" to gattServerGenerations[endpointId]))
@@ -527,8 +535,11 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         if (status != BluetoothGatt.GATT_SUCCESS) {
           rejectGatt(endpointId, gatt, "LPC TX subscription failed"); return
         }
-          val platformSafeWriteSize =
-            ((gattClientMtuByEndpoint[endpointId] ?: 23) - 3).coerceAtLeast(20)
+        // See the peripheral-side explanation above: MTU - 3 may be 514,
+        // but Android's characteristic API rejects a 514-byte value.
+        val platformSafeWriteSize =
+          ((gattClientMtuByEndpoint[endpointId] ?: 23) - 3)
+            .coerceIn(20, MAX_GATT_VALUE_BYTES)
           emitSuccess(mapOf("type" to "gattConnected", "endpointId" to endpointId,
             "localRole" to "central", "platformSafeWriteSize" to platformSafeWriteSize,
             "connectionGeneration" to generation))
@@ -620,7 +631,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     // transient local queue condition; it must not be treated as transport loss.
     client.writeInFlight = true
     return if (client.gatt.writeCharacteristic(client.rx)) "submitted" else {
-      Log.w(logTag, "client write submission rejected endpoint=$endpointId")
+      Log.w(logTag, "client write submission rejected endpoint=$endpointId bytes=${fragment.size} transmission=$transmission")
       client.writeInFlight = false
       "temporarilyUnavailable"
     }
@@ -936,6 +947,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     const val GCM_IV_BYTES = 12
     const val GCM_TAG_BITS = 128
     const val MAX_SERVER_NOTIFICATION_QUEUE = 64
+    const val MAX_GATT_VALUE_BYTES = 512
     val CLIENT_CONFIGURATION_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
   }
 }

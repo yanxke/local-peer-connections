@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import math
 import sys
 import time
 import urllib.error
@@ -517,39 +518,7 @@ class Runner:
         """Run a symmetric 64-byte reliable traffic test for one minute."""
         self.reset_all()
         first, second = self.apis[:2]
-        # With persisted friends, resetRuntime already starts automatic
-        # known-peer probing. Do not issue a second explicit connect while
-        # that probe is in flight: two simultaneous central attempts create
-        # duplicate GATT generations and make the physical run look like a
-        # throughput failure. Only fall back to an explicit direction when
-        # the automatic path does not produce a ready connection.
-        try:
-            self.wait(
-                lambda: all(
-                    len(api.snapshot().get("connections", [])) == 1
-                    and api.snapshot()["connections"][0].get("state") == "ready"
-                    for api in (first, second)
-                ),
-                "known-peer connection ready on both devices",
-                timeout=min(self.timeout, 30),
-            )
-            connection_direction = "known-peer auto-connect"
-        except RunnerFailure as auto_error:
-            try:
-                self.connect(first, second)
-                connection_direction = f"{first.device.label}->{second.device.label}"
-            except RunnerFailure as first_error:
-                # A mobile OS can temporarily omit its peripheral advertisement
-                # from the other side's scan. Try the reciprocal central direction
-                # before declaring the physical run unavailable.
-                try:
-                    self.connect(second, first)
-                    connection_direction = f"{second.device.label}->{first.device.label}"
-                except RunnerFailure as second_error:
-                    raise RunnerFailure(
-                        f"IT-041: automatic connection failed ({auto_error}); "
-                        f"neither explicit direction succeeded: {first_error}; {second_error}"
-                    ) from second_error
+        connection_direction = self.ensure_bidirectional_ready("IT-041", first, second)
         # peer_id(api, other) returns the peer visible from ``api``.  Each
         # producer must therefore use the destination reported by its own
         # device: ``first`` sends to ``second_peer`` and vice versa.
@@ -631,6 +600,186 @@ class Runner:
         print(
             "IT-041: bidirectional 64-byte reliable traffic at 5 packets/s "
             f"for {duration_seconds}s delivered with zero application-level loss "
+            f"({connection_direction})"
+        )
+
+    def ensure_bidirectional_ready(
+        self, scenario: str, first: DeviceApi, second: DeviceApi
+    ) -> str:
+        """Return the connection path after establishing one READY link.
+
+        Known-peer probing is preferred because issuing a second explicit
+        connect while that probe is in flight can create duplicate GATT
+        generations. The explicit directions remain a bounded fallback for
+        mobile stacks that temporarily omit the peer advertisement.
+        """
+        try:
+            self.wait(
+                lambda: all(
+                    len(api.snapshot().get("connections", [])) == 1
+                    and api.snapshot()["connections"][0].get("state") == "ready"
+                    for api in (first, second)
+                ),
+                "known-peer connection ready on both devices",
+                timeout=min(self.timeout, 30),
+            )
+            return "known-peer auto-connect"
+        except RunnerFailure as auto_error:
+            try:
+                self.connect(first, second)
+                return f"{first.device.label}->{second.device.label}"
+            except RunnerFailure as first_error:
+                try:
+                    self.connect(second, first)
+                    return f"{second.device.label}->{first.device.label}"
+                except RunnerFailure as second_error:
+                    raise RunnerFailure(
+                        f"{scenario}: automatic connection failed ({auto_error}); "
+                        f"neither explicit direction succeeded: {first_error}; {second_error}"
+                    ) from second_error
+
+    def _assert_traffic_connections_ready(
+        self, scenario: str, devices: tuple[DeviceApi, DeviceApi], phase: int
+    ) -> None:
+        for api in devices:
+            connections = api.snapshot().get("connections", [])
+            if len(connections) == 1 and connections[0].get("state") == "ready":
+                continue
+            # Keep the failure artifact useful without logging payload bytes or
+            # secrets: event types, error codes, and native lifecycle
+            # diagnostics identify a stalled generation and its recovery path.
+            diagnostics = [
+                {
+                    key: event.get(key)
+                    for key in ("type", "error", "status", "endpointId", "message")
+                    if event.get(key) is not None
+                }
+                for event in api.events()[-20:]
+            ]
+            raise RunnerFailure(
+                f"{scenario}: phase {phase} connection not READY on {api.device.label}; "
+                f"connections={connections}; diagnostics={diagnostics}"
+            )
+
+    def scenario_bidirectional_size_ramp(self) -> None:
+        """Run the requested bidirectional 1 Hz 64..2048..64 byte profile."""
+        self.reset_all()
+        first, second = self.apis[:2]
+        connection_direction = self.ensure_bidirectional_ready("IT-043", first, second)
+        first_target_peer = self.peer_id(first, second)
+        second_target_peer = self.peer_id(second, first)
+
+        sizes = (64, 128, 256, 512, 1024, 2048, 1024, 512, 256, 128, 64)
+        phase_seconds = 5
+        rate = 1
+        expected_bandwidth = 200
+        drain_buffer_seconds = 2
+        active_seconds = len(sizes) * phase_seconds
+        totals = {
+            first.device.label: {"deliveredBytes": 0, "sent": 0, "lost": 0},
+            second.device.label: {"deliveredBytes": 0, "sent": 0, "lost": 0},
+        }
+
+        for phase, size in enumerate(sizes, start=1):
+            arguments = [
+                {
+                    "peerId": first_target_peer,
+                    "messageSize": size,
+                    "messagesPerSecond": rate,
+                    "deliveryMode": "reliableAcked",
+                    # At the 200 B/s acceptance floor, four queued 2048-byte
+                    # messages could make the last one wait over 40 seconds.
+                    # Keep one accepted logical operation per direction so the
+                    # documented per-message drain budget is sufficient and
+                    # the test measures link behavior rather than fixture
+                    # backlog.
+                    "maxPending": 1,
+                },
+                {
+                    "peerId": second_target_peer,
+                    "messageSize": size,
+                    "messagesPerSecond": rate,
+                    "deliveryMode": "reliableAcked",
+                    "maxPending": 1,
+                },
+            ]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(api.command, "startSendTest", args)
+                    for api, args in zip((first, second), arguments)
+                ]
+                for future in futures:
+                    future.result()
+
+            phase_deadline = time.monotonic() + phase_seconds
+            while time.monotonic() < phase_deadline:
+                self._assert_traffic_connections_ready("IT-043", (first, second), phase)
+                time.sleep(min(0.25, max(0.05, phase_deadline - time.monotonic())))
+
+            # A 2048-byte application message at the 200 B/s acceptance floor
+            # needs ceil(2048 / 200) = 11 seconds to drain. Add the explicit
+            # two-second buffer here and in the fixture (12.24 seconds by its
+            # millisecond calculation), so phase changes wait for application
+            # ACKs instead of abandoning large messages before the next 64B
+            # phase begins. The command timeout also includes an HTTP margin.
+            drain_wait = math.ceil(size / expected_bandwidth) + drain_buffer_seconds
+            command_timeout = max(self.timeout, drain_wait + 5)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(api.command, "stopSendTest", timeout=command_timeout)
+                    for api in (first, second)
+                ]
+                phase_snapshots = [future.result() for future in futures]
+
+            for api, snapshot in zip((first, second), phase_snapshots):
+                traffic = snapshot.get("trafficTests", {}).get("direct", {})
+                sent = traffic.get("sent", 0)
+                acked = traffic.get("acked", 0)
+                timed_out = traffic.get("timedOut", 0)
+                if traffic.get("running") is not False:
+                    raise RunnerFailure(f"IT-043: phase {phase} did not stop on {api.device.label}")
+                if (
+                    traffic.get("messageSize") != size
+                    or traffic.get("messagesPerSecond") != rate
+                    or traffic.get("maxPending") != 1
+                ):
+                    raise RunnerFailure(
+                        f"IT-043: phase {phase} wrong traffic configuration on "
+                        f"{api.device.label}: {traffic}"
+                    )
+                if acked + timed_out != sent:
+                    raise RunnerFailure(
+                        f"IT-043: phase {phase} incomplete ACK accounting on "
+                        f"{api.device.label}: {traffic}"
+                    )
+                totals[api.device.label]["deliveredBytes"] += acked * size
+                totals[api.device.label]["sent"] += sent
+                totals[api.device.label]["lost"] += timed_out
+                print(
+                    f"IT-043 phase {phase}/{len(sizes)} {size}B "
+                    f"{api.device.label}: sent={sent} acked={acked} timedOut={timed_out}"
+                )
+
+            self._assert_traffic_connections_ready("IT-043", (first, second), phase)
+
+        for api in (first, second):
+            total = totals[api.device.label]
+            completed = total["sent"]
+            loss_rate = total["lost"] / completed if completed else 1.0
+            bandwidth = total["deliveredBytes"] / active_seconds
+            if bandwidth < expected_bandwidth:
+                raise RunnerFailure(
+                    f"IT-043: {api.device.label} average delivered bandwidth "
+                    f"{bandwidth:.2f} B/s is below {expected_bandwidth} B/s; totals={total}"
+                )
+            if loss_rate >= 0.10:
+                raise RunnerFailure(
+                    f"IT-043: {api.device.label} loss rate {loss_rate:.2%} is not below 10%; "
+                    f"totals={total}"
+                )
+        print(
+            "IT-043: bidirectional 1 Hz 64B..2048B..64B reliable traffic "
+            f"for {active_seconds}s met >=200 B/s and <10% loss "
             f"({connection_direction})"
         )
 
@@ -953,6 +1102,8 @@ class Runner:
             self.scenario_bidirectional_fixed_rate()
         elif scenario == "IT-042":
             self.scenario_bidirectional_group()
+        elif scenario == "IT-043":
+            self.scenario_bidirectional_size_ramp()
         elif scenario == "IT-017":
             self.scenario_soak()
         elif scenario == "IT-018":
@@ -1017,7 +1168,7 @@ def main() -> int:
     parser.add_argument("--device", action="append", type=parse_device, required=True,
                         help="generic device label and forwarded host port, e.g. device-a=18765")
     parser.add_argument("--scenario", action="append", required=True,
-                        help="IT-001 through IT-042; repeat for multiple scenarios")
+                        help="IT-001 through IT-043; repeat for multiple scenarios")
     parser.add_argument("--provision-known-peers", action="store_true",
                         help="exchange current device PeerIds over the trusted control channel before scenarios")
     parser.add_argument("--timeout", type=float, default=60.0)

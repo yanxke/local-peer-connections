@@ -8346,6 +8346,7 @@ Every mobile release candidate MUST run:
 - [ ] IT-037 During a three-peer checkpoint barrier, one required peer disconnects and resumes within timeout; the same publication may still reach DURABLE after its exact checkpoint operation is ACKed following RESUME.
 - [ ] IT-038 During a three-peer checkpoint barrier, one required peer is terminally removed before ACK; the original publication completes FAILED/PEER_LEFT and a new publication against the new membership can reach DURABLE.
 - [ ] IT-041 Both Android and iOS send 64-byte RELIABLE_ACKED packets at 5 packets/second for 60 seconds; every packet receives the fixture application ACK and both logical connections remain READY.
+- [x] IT-043 Both Android and iOS send direct RELIABLE_ACKED packets in both directions at 1 Hz for 5 seconds per size, ramping 64, 128, 256, 512, 1024, 2048 bytes and back down to 64 bytes; each direction averages at least 200 B/s, loss remains below 10%, and the post-2048-byte 64-byte phase continues to deliver.
 
 ## In-process Runtime Integration Tests
 

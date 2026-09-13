@@ -129,7 +129,7 @@ The runner fails fast when a device is not advertising/discoverable and
 reports unsupported fault-injection scenarios as blocked; it never reports
 those as passing. See [TODO.md](TODO.md) for the remaining scenarios.
 
-`IT-040` and `IT-041` are bidirectional direct-message scenarios. `IT-042`
+`IT-040`, `IT-041`, and `IT-043` are bidirectional direct-message scenarios. `IT-042`
 forms a two-device LPC group and sends reliable 64-byte group messages from
 both members concurrently, verifying delivery and payload digests in both
 directions. All three scenarios use bounded waits and report connection or ACK
@@ -160,6 +160,22 @@ python3 tool/device_integration_runner.py \
 It sends 64-byte `reliableAcked` packets at 5 packets/second from each device,
 checks that both links remain ready, and requires every application-level ACK
 to arrive before reporting a pass.
+
+For the staged large-message/backpressure run, use `IT-043`:
+
+```sh
+python3 tool/device_integration_runner.py \
+  --device android=18765 --device ios=18766 \
+  --scenario IT-043 --timeout 60 \
+  --json-output artifacts/it-043.json
+```
+
+It sends `reliableAcked` packets in both directions at 1 Hz for 5 seconds at
+each size in `64, 128, 256, 512, 1024, 2048, 1024, 512, 256, 128, 64` bytes.
+Each phase drains before the next begins. Its timeout budget is
+`ceil(messageSize / 200 B/s) + 2 seconds`; the two seconds are an explicit
+buffer for the expected minimum bandwidth, and the final 64-byte phase proves
+that large-message backpressure did not strand the link.
 
 For a concurrent two-device group-message smoke test, use `IT-042`:
 

@@ -63,6 +63,11 @@ void main() {
     );
   });
 
+  test('traffic ACK timeout follows the expected bandwidth plus buffer', () {
+    expect(trafficAckTimeoutMsForMessageSize(64), 2320);
+    expect(trafficAckTimeoutMsForMessageSize(2048), 12240);
+  });
+
   test('throughput rates use only the recent five-second window', () {
     final window = RollingTelemetryWindow();
     window.add(timestampMs: 1000, sentMessages: 4, sentBytes: 40);

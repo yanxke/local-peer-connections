@@ -416,8 +416,15 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     let generation = nextGattGeneration
     nextGattGeneration += 1
     gattServerGenerations[endpointId] = generation
+    // CoreBluetooth exposes the negotiated notification capacity on the
+    // subscribed CBCentral. Hard-coding 20 here makes every iOS-peripheral
+    // notification use the legacy ATT minimum, multiplying the fragment
+    // count for larger DATA frames and allowing the fixture's next traffic
+    // phase to overtake a still-draining write. Keep the protocol's minimum
+    // while passing the actual platform-safe value to LPC.
+    let platformSafeWriteSize = max(20, central.maximumUpdateValueLength)
     eventSink?(["type": "gattConnected", "endpointId": endpointId,
-                "localRole": "peripheral", "platformSafeWriteSize": 20,
+                "localRole": "peripheral", "platformSafeWriteSize": platformSafeWriteSize,
                 "connectionGeneration": generation])
   }
   public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral,

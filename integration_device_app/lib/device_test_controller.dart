@@ -431,8 +431,14 @@ class DeviceTestController extends ChangeNotifier {
     required int messageSize,
     required double messagesPerSecond,
     required DeliveryMode deliveryMode,
+    int maxPending = _maxTrafficPending,
   }) async {
-    _validateTrafficArguments(messageSize, messagesPerSecond, deliveryMode);
+    _validateTrafficArguments(
+      messageSize,
+      messagesPerSecond,
+      deliveryMode,
+      maxPending,
+    );
     await stopSendTest();
     final run = _TrafficRun(
       id: _allocateTrafficId(),
@@ -440,6 +446,7 @@ class DeviceTestController extends ChangeNotifier {
       messageSize: messageSize,
       messagesPerSecond: messagesPerSecond,
       deliveryMode: deliveryMode,
+      maxPending: maxPending,
     );
     _directTraffic = run;
     _lastDirectTraffic = null;
@@ -475,10 +482,16 @@ class DeviceTestController extends ChangeNotifier {
     required int messageSize,
     required double messagesPerSecond,
     required DeliveryMode deliveryMode,
+    int maxPending = _maxTrafficPending,
   }) async {
     final localGroup = group;
     if (localGroup == null) throw invalidStateError();
-    _validateTrafficArguments(messageSize, messagesPerSecond, deliveryMode);
+    _validateTrafficArguments(
+      messageSize,
+      messagesPerSecond,
+      deliveryMode,
+      maxPending,
+    );
     await stopGroupSendTest();
     final run = _TrafficRun(
       id: _allocateTrafficId(),
@@ -486,6 +499,7 @@ class DeviceTestController extends ChangeNotifier {
       messageSize: messageSize,
       messagesPerSecond: messagesPerSecond,
       deliveryMode: deliveryMode,
+      maxPending: maxPending,
       group: true,
     );
     _groupTraffic = run;
@@ -589,8 +603,9 @@ class DeviceTestController extends ChangeNotifier {
     final hadPeers = knownPeers.hasPeers;
     await knownPeers.forget(parsed);
     _record('knownPeerRemoved', {'peerId': parsed.toString()});
-    if (hadPeers && !knownPeers.hasPeers && runtime != null)
+    if (hadPeers && !knownPeers.hasPeers && runtime != null) {
       await resetRuntime();
+    }
     notifyListeners();
   }
 
@@ -844,6 +859,7 @@ class DeviceTestController extends ChangeNotifier {
     int messageSize,
     double messagesPerSecond,
     DeliveryMode deliveryMode,
+    int maxPending,
   ) {
     if (messageSize < _trafficHeaderLength || messageSize > 1048576) {
       throw const LpcException(LpcErrorCode.messageTooLarge);
@@ -855,6 +871,9 @@ class DeviceTestController extends ChangeNotifier {
     }
     if (deliveryMode != DeliveryMode.reliableAcked &&
         deliveryMode != DeliveryMode.realtimeLatest) {
+      throw const LpcException(LpcErrorCode.invalidArgument);
+    }
+    if (maxPending < 1 || maxPending > _maxTrafficPending) {
       throw const LpcException(LpcErrorCode.invalidArgument);
     }
   }
@@ -873,7 +892,7 @@ class DeviceTestController extends ChangeNotifier {
     // Keep the run installed while ACKs drain so the receive handler can still
     // match acknowledgements. A bounded grace period prevents shutdown from
     // hanging forever when the peer is genuinely unreachable.
-    final deadline = _telemetryClock.elapsedMilliseconds + _trafficAckTimeoutMs;
+    final deadline = _telemetryClock.elapsedMilliseconds + run.ackTimeoutMs;
     while ((run.inFlight || run.pending.isNotEmpty) &&
         _telemetryClock.elapsedMilliseconds < deadline) {
       _expireTraffic(run);
@@ -893,7 +912,7 @@ class DeviceTestController extends ChangeNotifier {
     // The timer continues at the requested rate; skipped ticks are intentional
     // backpressure, not packet reordering.
     if (run.inFlight ||
-        run.pending.length >= _maxTrafficPending ||
+        run.pending.length >= run.maxPending ||
         (_directTraffic != run && _groupTraffic != run)) {
       return;
     }
@@ -972,7 +991,7 @@ class DeviceTestController extends ChangeNotifier {
     final now = _telemetryClock.elapsedMilliseconds;
     final expired = <int>[];
     for (final entry in run.pending.entries) {
-      if (force || now - entry.value.sentAtMs >= _trafficAckTimeoutMs) {
+      if (force || now - entry.value.sentAtMs >= run.ackTimeoutMs) {
         expired.add(entry.key);
       }
     }
@@ -998,6 +1017,7 @@ class DeviceTestController extends ChangeNotifier {
       'peerId': run.peerId,
       'messageSize': run.messageSize,
       'messagesPerSecond': run.messagesPerSecond,
+      'maxPending': run.maxPending,
       'deliveryMode': run.deliveryMode.name,
       'sent': run.sent,
       'acked': run.acked,
@@ -1481,6 +1501,8 @@ class DeviceTestController extends ChangeNotifier {
           messagesPerSecond:
               (arguments['messagesPerSecond'] as num?)?.toDouble() ?? 1,
           deliveryMode: trafficDeliveryModeFrom(arguments['deliveryMode']),
+          maxPending:
+              (arguments['maxPending'] as num?)?.toInt() ?? _maxTrafficPending,
         );
         return snapshot();
       case 'stopSendTest':
@@ -1493,6 +1515,8 @@ class DeviceTestController extends ChangeNotifier {
           messagesPerSecond:
               (arguments['messagesPerSecond'] as num?)?.toDouble() ?? 1,
           deliveryMode: trafficDeliveryModeFrom(arguments['deliveryMode']),
+          maxPending:
+              (arguments['maxPending'] as num?)?.toInt() ?? _maxTrafficPending,
         );
         return snapshot();
       case 'stopGroupSendTest':
@@ -1813,7 +1837,19 @@ const _trafficDataKind = 1;
 const _trafficAckKind = 2;
 const _trafficHeaderLength = 8;
 const _trafficChannel = 0x4c50;
-const _trafficAckTimeoutMs = 5000;
+
+/// The application ACK used by the physical traffic fixture is not the LPC
+/// ACK timeout from Section 23.2. It measures end-to-end fixture delivery, so
+/// a large GATT message needs time to cross the link before its ACK can
+/// return. Keep this bound explicit and finite: the IT-043 runner uses the
+/// same 200 B/s floor and documents the additional two-second buffer.
+const trafficMinimumExpectedBytesPerSecond = 200;
+const trafficAckTimeoutBufferMs = 2000;
+
+int trafficAckTimeoutMsForMessageSize(int messageSize) =>
+    ((messageSize * 1000 + trafficMinimumExpectedBytesPerSecond - 1) ~/
+        trafficMinimumExpectedBytesPerSecond) +
+    trafficAckTimeoutBufferMs;
 // Keep the fixture conservative because each reliable data packet also has a
 // protocol ACK in the reverse direction. Four outstanding logical packets per
 // sender bounds the bidirectional GATT queue while still allowing the slider
@@ -1827,6 +1863,7 @@ class _TrafficRun {
     required this.messageSize,
     required this.messagesPerSecond,
     required this.deliveryMode,
+    required this.maxPending,
     this.group = false,
   });
 
@@ -1835,6 +1872,7 @@ class _TrafficRun {
   final int messageSize;
   final double messagesPerSecond;
   final DeliveryMode deliveryMode;
+  final int maxPending;
   final bool group;
   final Map<int, _TrafficPending> pending = {};
   Timer? timer;
@@ -1843,6 +1881,8 @@ class _TrafficRun {
   int acked = 0;
   int timedOut = 0;
   bool inFlight = false;
+
+  int get ackTimeoutMs => trafficAckTimeoutMsForMessageSize(messageSize);
 }
 
 class _TrafficPending {
