@@ -3,6 +3,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lpc_integration_device_app/device_test_controller.dart';
 import 'package:lpc_integration_device_app/main.dart';
 
+class _SnapshotController extends DeviceTestController {
+  _SnapshotController(this.value) : super(controlPort: 0);
+
+  final Map<String, Object?> value;
+
+  @override
+  Map<String, Object?> snapshot() => value;
+}
+
 void main() {
   testWidgets('device test app renders raw LPC state', (tester) async {
     final controller = DeviceTestController(displayName: 'Test Device');
@@ -68,5 +77,66 @@ void main() {
     );
 
     expect(find.text('Remember'), findsOneWidget);
+  });
+
+  testWidgets('group traffic explains missing group and offers creation', (
+    tester,
+  ) async {
+    final controller = _SnapshotController({
+      'runtimeState': 'ready',
+      'localPeerId': '0123456789abcdef0123456789abcdef',
+      'displayName': 'Test Device',
+      'controlApi': 'disabled',
+      'capabilities': 15,
+      'presenceActive': true,
+      'endpoints': const <Object?>[],
+      'knownPeerIds': const <Object?>[],
+      'connections': [
+        {
+          'peerId': 'fedcba9876543210fedcba9876543210',
+          'state': 'ready',
+          'security': 'encryptedTofu',
+          'transport': 'gatt',
+          'negotiatedMtu': 517,
+          'sessionId': 'session',
+        },
+      ],
+      'attempts': const <Object?>[],
+      'telemetry': {
+        'messagesSent': 0,
+        'messagesReceived': 0,
+        'bytesSent': 0,
+        'bytesReceived': 0,
+        'speedWindowMs': 5000,
+        'connectionStatePercent': <String, Object?>{},
+      },
+      'trafficTests': {
+        'direct': {'running': false},
+        'group': {'running': false},
+      },
+      'group': null,
+    });
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(DeviceTestApp(controller: controller));
+    expect(
+      tester.allWidgets.whereType<Text>().any(
+        (text) =>
+            text.data?.startsWith('Create a group on both devices') == true,
+      ),
+      isTrue,
+    );
+    expect(
+      tester.allWidgets.whereType<Text>().any(
+        (text) => text.data == 'Create group',
+      ),
+      isTrue,
+    );
+    final startButtons = tester.allWidgets.whereType<FilledButton>().where(
+      (button) =>
+          button.child is Text &&
+          (button.child! as Text).data == 'Start sending',
+    );
+    expect(startButtons, hasLength(2));
+    expect(startButtons.last.onPressed, isNull);
   });
 }

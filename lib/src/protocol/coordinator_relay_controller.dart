@@ -74,7 +74,12 @@ class CoordinatorRelayController {
       destinationReady: destinationReady,
       reservationBytes: reservationBytes,
     );
-    final genericAck = incoming.sourcePeerId == coordinatorPeerId
+    // GROUP_RELIABLE carries a pairwise generic ACK only for the embedded
+    // RELIABLE_ACKED mode.  In particular, acknowledging an ordered
+    // source->coordinator hop creates an unsolicited ACK frame and obscures
+    // the separate GROUP_RELAY_STATUS completion signal.
+    final genericAck = incoming.sourcePeerId == coordinatorPeerId ||
+            incoming.deliveryMode != DeliveryMode.reliableAcked
         ? null
         : incoming.pairwiseMessageId;
     return switch (admission.kind) {
@@ -85,11 +90,23 @@ class CoordinatorRelayController {
       RelayAdmissionKind.deliverLocally => CoordinatorRelayActions(
           sourceHopGenericAckMessageId: genericAck,
           deliverLocally: admission.operation,
-          deliveryAck: incoming.sourcePeerId == coordinatorPeerId
+          // A local destination is the final hop. Ordered traffic reports
+          // transport completion, while ACKed traffic reports destination
+          // acceptance. Sending GROUP_DELIVERY_ACK for ordered traffic makes
+          // a compliant member reject the control frame as a protocol error.
+          deliveryAck: incoming.sourcePeerId == coordinatorPeerId ||
+                  incoming.deliveryMode != DeliveryMode.reliableAcked
               ? null
               : _deliveryAck(admission.operation!),
+          relayStatus: incoming.sourcePeerId == coordinatorPeerId ||
+                  incoming.deliveryMode != DeliveryMode.reliableOrdered
+              ? null
+              : _relayStatus(admission.operation!,
+                  GroupRelayStatus.sentToDestinationTransport),
           localSourceState: incoming.sourcePeerId == coordinatorPeerId
-              ? SendState.remoteAcknowledged
+              ? incoming.deliveryMode == DeliveryMode.reliableAcked
+                  ? SendState.remoteAcknowledged
+                  : SendState.sentToTransport
               : null,
         ),
       RelayAdmissionKind.status => _routeFailure(

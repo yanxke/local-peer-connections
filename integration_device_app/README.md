@@ -82,6 +82,10 @@ realtime traffic. The sender reports sent, ACKed, pending, timed-out, ACK,
 and loss rates in the snapshot and UI. ACKs are diagnostic fixture traffic and
 are not LPC protocol acknowledgements.
 
+For the group traffic panel, tap **Create group** on both connected devices.
+The panel lists a destination only after the AUTO_GROUP membership handshake
+commits that peer; a direct LPC connection by itself is not yet a group route.
+
 The native Android and iOS GATT bindings report their negotiated ATT payload
 size to LPC (with a 20-byte minimum), so encrypted frames are not needlessly
 fragmented into the legacy minimum-MTU size. The fixed-rate runner scenario
@@ -125,6 +129,12 @@ The runner fails fast when a device is not advertising/discoverable and
 reports unsupported fault-injection scenarios as blocked; it never reports
 those as passing. See [TODO.md](TODO.md) for the remaining scenarios.
 
+`IT-040` and `IT-041` are bidirectional direct-message scenarios. `IT-042`
+forms a two-device LPC group and sends reliable 64-byte group messages from
+both members concurrently, verifying delivery and payload digests in both
+directions. All three scenarios use bounded waits and report connection or ACK
+failures separately from message assertions.
+
 For star scenarios, make each --device label match the corresponding
 fixture's normalized LPC_TEST_NAME, so the runner can select the intended
 advertised endpoint.
@@ -150,6 +160,18 @@ python3 tool/device_integration_runner.py \
 It sends 64-byte `reliableAcked` packets at 5 packets/second from each device,
 checks that both links remain ready, and requires every application-level ACK
 to arrive before reporting a pass.
+
+For a concurrent two-device group-message smoke test, use `IT-042`:
+
+```sh
+python3 tool/device_integration_runner.py \
+  --device android=18765 --device ios=18766 \
+  --scenario IT-042 --timeout 60
+```
+
+It forms one committed group, sends one reliable 64-byte message from each
+member at the same time, and verifies both `groupMessageReceived` events and
+their payload digests.
 
 See [TODO.md](TODO.md) for the conformance scenarios that still need
 capability support, fault injection, or longer multi-device runs.

@@ -233,7 +233,12 @@ with the spec, you can fix AGENTS.md.
 
 Do not perform userspace reboots (or other device reboots) on connected test
 devices. If an iOS deployment is stuck or a device becomes unavailable, wait
-for it to recover or ask the user to reconnect/unlock it.
+for it to recover or ask the user to reconnect/unlock it.  Sometimes iOS install
+is blocked by an older, stale Flutter/devicectl launch process, in which
+case terminate the stale tooling processes and try.  Sometimes
+iOS install has stale Runner.app processes from previous launches which block
+CoreDevice’s install operation, in which case terminate those processes and retry.
 
 When running the LPC multi device integration tests, watch for non stable connections
-and high packet loss rates, or stalled transfers, and debug and figure out why.
+and high packet loss rates, or stalled transfers, and debug and figure out why.  Add logs
+where useful to help identify the problem.

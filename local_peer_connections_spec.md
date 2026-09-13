@@ -6751,6 +6751,16 @@ In the route-admission failure case, the coordinator MUST still generic-ACK the 
 
 `GROUP_RELAY_STATUS` is the authoritative group-routing failure signal.
 
+For `RELIABLE_ORDERED`, the coordinator MUST NOT emit a pairwise generic
+ACK for the non-ACK-required source hop.  When the destination is the
+coordinator, it commits local application delivery and sends the original
+non-coordinator source an ACK-required
+`GROUP_RELAY_STATUS(SENT_TO_DESTINATION_TRANSPORT)`.  A
+`GROUP_DELIVERY_ACK` is never valid for a `RELIABLE_ORDERED` operation.
+This lets the source complete its public `SendHandle` at
+`SENT_TO_TRANSPORT` without treating final-hop transport submission as
+remote-acknowledged application delivery.
+
 The coordinator MUST NOT:
 
 - generic-ACK a partially received source operation;
@@ -8167,6 +8177,7 @@ expected parser result
 - [x] UT-153 Incomplete stale former-coordinator GROUP_RELIABLE reassembly is discarded and never combined with rerouted chunks from the new coordinator.
 - [x] UT-154 Stale former-coordinator GROUP_REALTIME_DATAGRAM is authenticated then discarded without RealtimeDatagramReceived.
 - [x] UT-155 A former coordinator newly originating routing/signaling after authority loss does not qualify for stale-authority handling.
+- [x] UT-156 A non-coordinator `RELIABLE_ORDERED` send whose destination is the coordinator receives `GROUP_RELAY_STATUS(SENT_TO_DESTINATION_TRANSPORT)`, never `GROUP_DELIVERY_ACK`, and its non-ACK-required source hop receives no generic ACK.
 - [x] UT-156 HELLO `keepalive_interval_ms` is encoded at offset 106 and both
   peers derive identical READY keepalive interval/dead-timeout values.
 - [x] UT-157 Backend-driven HELLO/AUTH sends encrypted generation-1 READY at

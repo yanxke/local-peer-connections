@@ -25,6 +25,7 @@ identity, lifecycle, transport, and group events.
 - [x] Add a host-side Python runner that orchestrates forwarded Android/iOS control APIs and optionally collects JSON results.
 - [x] Add executable two-direction connection scenarios for IT-003 and IT-004.
 - [x] Add executable scenarios for IT-005, IT-006, IT-008, IT-009, IT-021, and IT-032 through IT-035.
+- [x] Add executable bidirectional direct-message scenarios (IT-040/IT-041) and a concurrent bidirectional group-message scenario (IT-042).
 - [ ] Add raw advertisement assertions for IT-001 and IT-002; the current platform API intentionally exposes only filtered endpoint observations.
 - [ ] Add test-only transport fault injection for altered authentication, dropped ACKs, terminal writes, and transient backpressure.
 - [ ] Add complete automated assertions for IT-007 and IT-011 through IT-016, including SessionId and transport-generation continuity.

@@ -721,6 +721,66 @@ class Runner:
         )
         print("IT-032/033: group converged and routed reliable traffic")
 
+    def scenario_bidirectional_group(self) -> None:
+        """Send one reliable group message from each member concurrently.
+
+        IT-032/033 exercises only a source-to-destination group route.  This
+        scenario deliberately starts both routes at the same time so the
+        coordinator, delivery ACKs, and source-side correlations are tested in
+        both directions independently of the direct-traffic scenarios.
+        """
+        self.reset_all()
+        first, second = self.apis[:2]
+        self.connect(first, second)
+        self.create_group()
+        self.wait_group(2)
+        self.wait(
+            lambda: all(
+                len(api.snapshot().get("connections", [])) == 1
+                and api.snapshot()["connections"][0].get("state") == "ready"
+                for api in (first, second)
+            ),
+            "ready connections before bidirectional group send",
+        )
+        self.drain_events()
+        first_target_peer = self.peer_id(first, second)
+        second_target_peer = self.peer_id(second, first)
+        arguments = [
+            {"peerId": first_target_peer, "size": 64},
+            {"peerId": second_target_peer, "size": 64},
+        ]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(api.command, "sendGroup", args)
+                for api, args in zip((first, second), arguments)
+            ]
+            for future in futures:
+                future.result()
+
+        self.wait_for_event(
+            second,
+            "groupMessageReceived",
+            lambda event: event.get("bytes") == 64
+            and event.get("digest") == self.payload_digest(64),
+        )
+        self.wait_for_event(
+            first,
+            "groupMessageReceived",
+            lambda event: event.get("bytes") == 64
+            and event.get("digest") == self.payload_digest(64),
+        )
+        for api in (first, second):
+            connections = api.snapshot().get("connections", [])
+            if len(connections) != 1 or connections[0].get("state") != "ready":
+                raise RunnerFailure(
+                    f"IT-042: connection left ready after bidirectional group send "
+                    f"on {api.device.label}"
+                )
+        print(
+            "IT-042: bidirectional reliable group messages delivered "
+            "with valid 64-byte payloads"
+        )
+
     def scenario_group_leave(self) -> None:
         self.reset_all()
         self.connect(self.apis[0], self.apis[1])
@@ -891,6 +951,8 @@ class Runner:
             self.scenario_bidirectional_mixed()
         elif scenario == "IT-041":
             self.scenario_bidirectional_fixed_rate()
+        elif scenario == "IT-042":
+            self.scenario_bidirectional_group()
         elif scenario == "IT-017":
             self.scenario_soak()
         elif scenario == "IT-018":
@@ -955,7 +1017,7 @@ def main() -> int:
     parser.add_argument("--device", action="append", type=parse_device, required=True,
                         help="generic device label and forwarded host port, e.g. device-a=18765")
     parser.add_argument("--scenario", action="append", required=True,
-                        help="IT-001 through IT-040; repeat for multiple scenarios")
+                        help="IT-001 through IT-042; repeat for multiple scenarios")
     parser.add_argument("--provision-known-peers", action="store_true",
                         help="exchange current device PeerIds over the trusted control channel before scenarios")
     parser.add_argument("--timeout", type=float, default=60.0)

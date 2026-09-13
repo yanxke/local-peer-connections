@@ -204,6 +204,17 @@ class GattBackendConnection implements RealtimeBackendConnection {
         final result = await _platform.submitGattFragment(
             pending.fragments[pending.nextFragment],
             transmission: pending.transmission);
+        // The platform future can complete after a terminal link failure has
+        // cleared the queue (or after a replacement drain has advanced it).
+        // Never mutate/remove a stale pending write in that case.  Without
+        // this guard an in-flight callback races terminalFailure(), and the
+        // removeFirst() below throws `Bad state: No element`, masking the
+        // original transport failure and wedging reconnect handling.
+        if (_state != TransportConnectionState.open ||
+            _writes.isEmpty ||
+            !identical(_writes.first, pending)) {
+          return;
+        }
         if (result == GattFragmentSubmission.temporarilyUnavailable) {
           _log(
               'fragment temporarily unavailable index=${pending.nextFragment + 1}/${pending.fragments.length} queueFrames=${_writes.length}');

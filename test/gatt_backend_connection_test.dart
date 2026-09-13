@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:typed_data';
 
@@ -25,6 +26,26 @@ class _GattPlatform implements GattFragmentPlatform {
     submitted.add(fragment);
     transmissions.add(transmission);
     return _responses.removeFirst();
+  }
+}
+
+class _BlockingGattPlatform implements GattFragmentPlatform {
+  final Completer<GattFragmentSubmission> submission =
+      Completer<GattFragmentSubmission>();
+  bool submitStarted = false;
+
+  @override
+  int get platformSafeWriteSize => 23;
+
+  @override
+  Future<void> close() async {}
+
+  @override
+  Future<GattFragmentSubmission> submitGattFragment(Uint8List fragment,
+      {GattFragmentTransmission transmission =
+          GattFragmentTransmission.normal}) async {
+    submitStarted = true;
+    return submission.future;
   }
 }
 
@@ -116,6 +137,26 @@ void main() {
     expect(backend.state, TransportConnectionState.failed);
     expect(() => backend.write(Uint8List.fromList([3])),
         throwsA(isA<LpcException>()));
+  });
+
+  test('in-flight GATT completion after disconnect is ignored safely',
+      () async {
+    final platform = _BlockingGattPlatform();
+    final backend =
+        GattBackendConnection(connectionId: 'gatt', platform: platform);
+    final write = backend.write(Uint8List.fromList([1]));
+    while (!platform.submitStarted) {
+      await _turn();
+    }
+
+    // Simulate the native disconnect callback while submitGattFragment is
+    // still awaiting its platform future.  The late completion must not try
+    // to remove an item that terminalFailure already cleared.
+    backend.terminalFailure();
+    platform.submission.complete(GattFragmentSubmission.submitted);
+
+    expect(await write.completion, TransportWriteState.failed);
+    expect(backend.state, TransportConnectionState.failed);
   });
 
   test('UT-072 terminal GATT failure moves its PeerConnection to reconnecting',

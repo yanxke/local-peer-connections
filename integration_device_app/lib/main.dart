@@ -212,10 +212,10 @@ class _StatusCard extends StatelessWidget {
         '${telemetry['messagesReceived'] ?? 0}\n'
         'Bytes sent/received: ${telemetry['bytesSent'] ?? 0} / '
         '${telemetry['bytesReceived'] ?? 0}\n'
-        'Recent 5s send speed: '
+        'Send: '
         '${value(telemetry['messagesSentPerSecond'])} msg/s, '
         '${value(telemetry['bytesSentPerSecond'])} B/s\n'
-        'Recent 5s receive speed: '
+        'Receive: '
         '${value(telemetry['messagesReceivedPerSecond'])} msg/s, '
         '${value(telemetry['bytesReceivedPerSecond'])} B/s\n'
         'Connection time: connecting ${value(percentages['connecting'])}%, '
@@ -326,6 +326,7 @@ class _TrafficPanelState extends State<_TrafficPanel> {
   @override
   Widget build(BuildContext context) {
     final candidates = widget.group ? _groupPeers() : _directPeers();
+    final groupExists = widget.snapshot['group'] is Map;
     // Keep the control usable as soon as LPC reports a ready peer. A
     // destination can still be changed from the dropdown, but requiring a
     // first tap just to populate this field made Start appear inexplicably
@@ -353,7 +354,14 @@ class _TrafficPanelState extends State<_TrafficPanel> {
             Text(title, style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 4),
             if (candidates.isEmpty)
-              const Text('Connect to a peer before starting a traffic test.')
+              Text(
+                widget.group
+                    ? groupExists
+                          ? 'Group is waiting for a connected member.'
+                          : 'Create a group on both devices before starting '
+                                'group traffic.'
+                    : 'Connect to a peer before starting a traffic test.',
+              )
             else
               DropdownButton<String>(
                 isExpanded: true,
@@ -369,6 +377,24 @@ class _TrafficPanelState extends State<_TrafficPanel> {
                     ),
                 ],
                 onChanged: (value) => setState(() => _peerId = value),
+              ),
+            if (widget.group && !groupExists && _directPeers().isNotEmpty)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: OutlinedButton.icon(
+                    onPressed: () => unawaited(
+                      widget.controller.createGroup().catchError((error) {
+                        // The controller records the detailed failure in its
+                        // diagnostics; keep the panel mounted and usable.
+                        debugPrint('create group failed: $error');
+                      }),
+                    ),
+                    icon: const Icon(Icons.group_add),
+                    label: const Text('Create group'),
+                  ),
+                ),
               ),
             Row(
               children: [

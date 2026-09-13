@@ -51,7 +51,7 @@ void main() {
       reservationBytes: 10,
       destinationPairwiseMessageId: _destinationHopMessageId,
     );
-    expect(admission.sourceHopGenericAckMessageId, List.filled(8, 9));
+    expect(admission.sourceHopGenericAckMessageId, isNull);
     expect(admission.forward!.groupId, _group(8));
     expect(admission.forward!.pairwiseMessageId, _destinationHopMessageId);
     expect(admission.forward!.groupMessageId, operation.groupMessageId);
@@ -166,7 +166,9 @@ void main() {
     expect(actions.forward, isNotNull);
   });
 
-  test('delivery to the coordinator is committed locally and acknowledged', () {
+  test(
+      'ACKed delivery to the coordinator is committed locally and acknowledged',
+      () {
     final controller = _controller();
     final actions = controller.admit(
       _operation(destination: 1),
@@ -176,6 +178,27 @@ void main() {
     );
     expect(actions.deliverLocally, isNotNull);
     expect(actions.deliveryAck, isNotNull);
+    expect(actions.forward, isNull);
+  });
+
+  test(
+      'UT-156 ordered delivery to coordinator reports transport completion, never delivery ACK',
+      () {
+    final controller = _controller();
+    final actions = controller.admit(
+      _operation(destination: 1, mode: DeliveryMode.reliableOrdered),
+      committedMembers: members,
+      destinationReady: false,
+      reservationBytes: 10,
+    );
+
+    expect(actions.deliverLocally, isNotNull);
+    expect(actions.sourceHopGenericAckMessageId, isNull);
+    expect(actions.deliveryAck, isNull);
+    expect(actions.relayStatus?.status,
+        GroupRelayStatus.sentToDestinationTransport);
+    expect(actions.relayStatus?.sourcePeerId, _peer(2));
+    expect(actions.relayStatus?.destinationPeerId, _peer(1));
     expect(actions.forward, isNull);
   });
 
