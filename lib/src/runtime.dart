@@ -390,7 +390,14 @@ class PeerConnection {
         frame.type == FrameType.groupRelayStatus ||
         frame.type == FrameType.groupInfo ||
         frame.type == FrameType.groupMerge ||
-        frame.type == FrameType.membershipSnapshot) {
+        frame.type == FrameType.membershipSnapshot ||
+        // Coordinator checkpoints are consumed by the group route transport
+        // just like membership and reliable group frames. Keeping this in the
+        // shared group stream is required for mobile/macOS checkpoint
+        // validation; omitting it makes the sender wait until its bounded
+        // publication timeout while ordinary STATE_UPDATE traffic still
+        // appears healthy.
+        frame.type == FrameType.coordinatorCheckpoint) {
       _groupFrames.add(frame);
       return;
     }
@@ -2765,6 +2772,8 @@ class _RuntimeGroupRouteTransport
     }
     final value = _CheckpointPublicationData(handle, Uint8List.fromList(bytes),
         coordinatorTerm, validationRequirement);
+    logger(
+        'checkpoint publish publication=${handle.publicationId} term=$coordinatorTerm bytes=${bytes.length} validation=$validationRequirement members=${group.members.length}');
     _checkpointPublications[handle.publicationId] = value;
     for (final peerId in group.members
         .map((member) => member.peerId)
@@ -2866,6 +2875,8 @@ class _RuntimeGroupRouteTransport
         chunks: chunks,
         operation: operation,
         publication: value.handle);
+    logger(
+        'checkpoint send peer=${peer.peerId} publication=${value.handle.publicationId} sequence=${operation.sequence} message=${_debugId(messageId)} chunks=${chunks.length} bytes=${value.bytes.length}');
     _checkpointHops[_hopKey(peer, messageId)] = hop;
     group.checkpointOperationStarted(value.handle, peer.peerId);
     unawaited(() async {
@@ -2874,6 +2885,8 @@ class _RuntimeGroupRouteTransport
             chunks: chunks,
             messageId: messageId,
             nowMs: peer._core.monotonicNowMs);
+        logger(
+            'checkpoint submitted peer=${peer.peerId} publication=${value.handle.publicationId} message=${_debugId(messageId)} results=$results state=${peer.state}');
         if (results.any(
             (result) => result != TransportWriteState.submittedToPlatform)) {
           _logCheckpointFailure(
@@ -3440,18 +3453,25 @@ class _RuntimeGroupRouteTransport
     final chunk = CoordinatorCheckpointChunk.decode(frame.payload);
     final receiver = _checkpointReceivers[peer] ??= CheckpointReceiver();
     final result = await receiver.add(frame.messageId, chunk,
-        validate: (checkpoint) =>
-            group.validateCoordinatorCheckpoint(checkpoint.bytes),
-        commit: (checkpoint) {
-          if (checkpoint.term < group.coordinatorTerm) {
-            throw const LpcException(LpcErrorCode.protocolMismatch);
-          }
-          group.commitCoordinatorCheckpoint(checkpoint.bytes,
-              coordinator: peer.peerId,
-              checkpointSequence: checkpoint.sequence);
-        });
+        validate: (checkpoint) async {
+      final valid = await group.validateCoordinatorCheckpoint(checkpoint.bytes);
+      logger(
+          'checkpoint validate peer=${peer.peerId} message=${_debugId(frame.messageId)} sequence=${checkpoint.sequence} bytes=${checkpoint.bytes.length} valid=$valid');
+      return valid;
+    }, commit: (checkpoint) {
+      if (checkpoint.term < group.coordinatorTerm) {
+        throw const LpcException(LpcErrorCode.protocolMismatch);
+      }
+      group.commitCoordinatorCheckpoint(checkpoint.bytes,
+          coordinator: peer.peerId, checkpointSequence: checkpoint.sequence);
+    });
     if (result.acknowledgmentMessageId != null) {
+      logger(
+          'checkpoint receive ACK peer=${peer.peerId} message=${_debugId(frame.messageId)} result=${result.committed != null ? 'committed' : 'duplicate'}');
       await peer._core.submitAck(frame.messageId);
+    } else {
+      logger(
+          'checkpoint receive incomplete peer=${peer.peerId} message=${_debugId(frame.messageId)} sequence=${chunk.sequence}');
     }
   }
 
@@ -3694,6 +3714,8 @@ class _RuntimeGroupRouteTransport
       PeerConnection peer, List<int> messageId) async {
     final checkpoint = _checkpointHops.remove(_hopKey(peer, messageId));
     if (checkpoint != null) {
+      logger(
+          'checkpoint ACK peer=${peer.peerId} message=${_debugId(messageId)} publication=${checkpoint.publication.publicationId}');
       group.checkpointOperationFinished(checkpoint.publication, peer.peerId,
           CheckpointPeerResult.acknowledged,
           checkpointSequence: checkpoint.operation.sequence);

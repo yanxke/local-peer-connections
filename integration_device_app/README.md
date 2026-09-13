@@ -1,7 +1,7 @@
 # LPC integration device app
 
 This is a small debug-only Flutter application for exercising the public LPC
-API on real Android and iOS devices. It contains no messenger concepts such as
+API on real Android, iOS, and macOS devices. It contains no messenger concepts such as
 friends, conversations, or application envelopes.
 
 ## Run on a device
@@ -33,7 +33,22 @@ fixture.
 
 On Android the fixture requests the Bluetooth permissions required by the
 platform before starting LPC. On iOS the Bluetooth usage descriptions are
-included in the app and CoreBluetooth presents authorization as needed.
+included in the app and CoreBluetooth presents authorization as needed. The
+macOS runner includes the App Sandbox Bluetooth entitlement and Bluetooth usage
+descriptions; macOS may still show a system authorization prompt on first run.
+
+To run the desktop fixture:
+
+```sh
+flutter run --debug -d macos \
+  --dart-define=LPC_TEST_NAME='LPC Mac' \
+  --dart-define=LPC_TEST_PORT=8765
+```
+
+The macOS control API is available directly at `http://127.0.0.1:8765`. For an
+iOS device, forward its control port with `iproxy 18766 8765 <udid>`; both
+fixtures then use the same HTTP commands and LPC automatically probes known
+peers without an upper-layer reconnect direction.
 
 ## Control API
 
@@ -55,8 +70,12 @@ Useful commands include:
 {"action":"sendReliable","arguments":{"peerId":"...","text":"hello","deliveryMode":"reliableAcked"}}
 {"action":"sendRealtime","arguments":{"peerId":"...","channelId":1,"text":"state"}}
 {"action":"createGroup","arguments":{"namespace":[1,2,3],"token":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]}}
+{"action":"createCheckpointGroup"}
 {"action":"sendGroup","arguments":{"peerId":"...","text":"group hello"}}
 {"action":"publishCheckpoint","arguments":{"size":262144}}
+{"action":"startCheckpointTest","arguments":{"checkpointSize":1024,"checkpointsPerSecond":1}}
+{"action":"updateCheckpointTest","arguments":{"checkpointSize":2048,"checkpointsPerSecond":2}}
+{"action":"stopCheckpointTest"}
 {"action":"startSendTest","arguments":{"peerId":"...","messageSize":1024,"messagesPerSecond":2,"deliveryMode":"reliableAcked"}}
 {"action":"updateSendTest","arguments":{"messageSize":2048,"messagesPerSecond":1}}
 {"action":"stopSendTest"}
@@ -87,6 +106,22 @@ are not LPC protocol acknowledgements.
 For the group traffic panel, tap **Create group** on both connected devices.
 The panel lists a destination only after the AUTO_GROUP membership handshake
 commits that peer; a direct LPC connection by itself is not yet a group route.
+
+The **Coordinator checkpoint test** panel requires a checkpoint-enabled group;
+tap **Create checkpoint group** on both devices when no group is active. Only
+the elected LPC coordinator publishes. Its size slider covers 64 bytes through
+64 KiB and its rate slider covers 1 through 20 publications/second. Slider
+changes apply immediately to an active run without resetting its counters or
+in-flight publication. The panel reports accepted and durable payload bytes,
+durable payload bandwidth, failed-publication rate, pending publications, and
+accepted-to-DURABLE latency (last/average/maximum). LPC accepts at most four
+checkpoint publications per second; higher UI rates intentionally exercise
+that bounded resource limit rather than silently queueing an unbounded stream;
+admission failures are shown separately from failed accepted publications.
+For a passing bandwidth/latency run, use 4 publications/second and hold each
+size for five seconds. The test budget for a publication is
+`ceil(checkpointSize / 200 B/s) + 2 seconds`; the two seconds cover checkpoint
+ACK/validation overhead and are not a protocol timeout.
 
 The native Android and iOS GATT bindings report their negotiated ATT payload
 size to LPC (with a 20-byte minimum), so encrypted frames are not needlessly
@@ -190,6 +225,23 @@ python3 tool/device_integration_runner.py \
 It forms one committed group, sends one reliable 64-byte message from each
 member at the same time, and verifies both `groupMessageReceived` events and
 their payload digests.
+
+For the coordinator checkpoint bandwidth/latency ramp, use `IT-044`:
+
+```sh
+python3 tool/device_integration_runner.py \
+  --device device-a=18765 --device device-b=18766 \
+  --scenario IT-044 --timeout 60 \
+  --json-output artifacts/it-044.json
+```
+
+It creates a checkpoint-enabled two-device group and runs the elected
+coordinator through `64, 128, 256, 512, 1024, 2048, 1024, 512, 256, 128, 64`
+bytes at 4 publications/second for five seconds per phase. Each phase prints
+durable payload bandwidth, accepted-to-DURABLE average/maximum latency, and
+failed-publication rate. Every phase requires at least 200 B/s durable payload
+bandwidth, less than 10% failed publications, and READY connections after the
+bounded pending-publication drain.
 
 See [TODO.md](TODO.md) for the conformance scenarios that still need
 capability support, fault injection, or longer multi-device runs.

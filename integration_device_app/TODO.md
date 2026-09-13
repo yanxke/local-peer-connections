@@ -16,6 +16,7 @@ identity, lifecycle, transport, and group events.
 - [x] Outbound connection attempts, inbound connections, SAS confirmation, and connection lifecycle events.
 - [x] Reliable ordered/acked and realtime direct traffic.
 - [x] Group creation, membership/coordinator events, reliable group traffic, and group leave.
+- [x] Coordinator checkpoint size/rate/timing test controls with live slider updates.
 - [x] Runtime capability reporting and reset/cleanup.
 - [x] On-device diagnostics screen suitable for manual testing.
 - [x] Controller unit tests for command payload parsing and bounded event history.
@@ -26,6 +27,7 @@ identity, lifecycle, transport, and group events.
 - [x] Add executable two-direction connection scenarios for IT-003 and IT-004.
 - [x] Add executable scenarios for IT-005, IT-006, IT-008, IT-009, IT-021, and IT-032 through IT-035.
 - [x] Add executable bidirectional direct-message scenarios (IT-040/IT-041) and a concurrent bidirectional group-message scenario (IT-042).
+- [x] Add executable coordinator checkpoint bandwidth/latency size-ramp scenario (IT-044) and expose its metrics in the manual fixture UI.
 - [ ] Add raw advertisement assertions for IT-001 and IT-002; the current platform API intentionally exposes only filtered endpoint observations.
 - [ ] Add test-only transport fault injection for altered authentication, dropped ACKs, terminal writes, and transient backpressure.
 - [ ] Add complete automated assertions for IT-007 and IT-011 through IT-016, including SessionId and transport-generation continuity.

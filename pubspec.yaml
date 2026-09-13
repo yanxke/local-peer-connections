@@ -21,3 +21,5 @@ flutter:
         pluginClass: LocalPeerConnectionsPlugin
       ios:
         pluginClass: LocalPeerConnectionsPlugin
+      macos:
+        pluginClass: LocalPeerConnectionsPlugin

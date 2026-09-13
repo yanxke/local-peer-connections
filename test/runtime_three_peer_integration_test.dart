@@ -38,13 +38,16 @@ void main() {
       // convergence and later migration independently of the already-covered
       // simultaneous-election unit test. The established two-member group
       // must remain the merge winner when the third singleton joins.
-      final groupA = link.a.joinOrCreateGroup(_groupConfig());
-      final groupB = link.b.joinOrCreateGroup(_groupConfig());
+      final groupA =
+          link.a.joinOrCreateGroup(_groupConfig(checkpointing: true));
+      final groupB =
+          link.b.joinOrCreateGroup(_groupConfig(checkpointing: true));
       await _waitFor(
         () => _sameCommittedGroup([groupA, groupB], memberCount: 2),
         timeout: const Duration(seconds: 5),
       );
-      final groupC = link.c.joinOrCreateGroup(_groupConfig());
+      final groupC =
+          link.c.joinOrCreateGroup(_groupConfig(checkpointing: true));
       final groups = [groupA, groupB, groupC];
       try {
         await _waitFor(
@@ -61,6 +64,29 @@ void main() {
       final originalGroupId = groups[0].groupId;
       final originalCoordinator = groups[0].coordinatorPeerId;
       expect(groups.expand((group) => group.members).length, 9);
+
+      // Regression coverage for the runtime frame demultiplexer: checkpoint
+      // frames must reach every non-coordinator GroupSession so the
+      // application validator can ACK the publication. A missing
+      // coordinatorCheckpoint case leaves the publication pending forever
+      // while ordinary group traffic still appears healthy.
+      for (final group in groups.where((group) => !group.isCoordinator)) {
+        group.setCoordinatorCheckpointValidator((bytes) => bytes.isNotEmpty);
+      }
+      final checkpointCoordinator =
+          groups.firstWhere((group) => group.isCoordinator);
+      final checkpoint = checkpointCoordinator.publishCoordinatorCheckpoint(
+        [1, 2, 3],
+        options: CheckpointPublishOptions(
+          applicationValidationRequirement:
+              CheckpointApplicationValidationRequirement.required,
+        ),
+      );
+      expect(
+        (await checkpoint.completion.timeout(const Duration(seconds: 3)))
+            .status,
+        CheckpointPublicationStatus.durable,
+      );
 
       final receivedByTarget = Completer<ReliableMessageReceived>();
       final targetBeforeFailure = groups[1];
@@ -181,13 +207,14 @@ bool _sameCommittedGroup(List<GroupSession> groups,
       (group) => group.groupId == id && group.coordinatorPeerId == coordinator);
 }
 
-GroupConfig _groupConfig() => GroupConfig(
+GroupConfig _groupConfig({bool checkpointing = false}) => GroupConfig(
       applicationNamespace: const [1, 2, 3],
       groupJoinToken: List<int>.filled(16, 4),
       groupTrustMode: GroupTrustMode.openTofu,
       maxPeers: 3,
       autoAccept: true,
       autoMerge: true,
+      coordinatorCheckpointing: checkpointing,
     );
 
 Future<void> _waitFor(

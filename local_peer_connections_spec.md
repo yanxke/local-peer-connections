@@ -8178,7 +8178,7 @@ expected parser result
 - [x] UT-154 Stale former-coordinator GROUP_REALTIME_DATAGRAM is authenticated then discarded without RealtimeDatagramReceived.
 - [x] UT-155 A former coordinator newly originating routing/signaling after authority loss does not qualify for stale-authority handling.
 - [x] UT-156 A non-coordinator `RELIABLE_ORDERED` send whose destination is the coordinator receives `GROUP_RELAY_STATUS(SENT_TO_DESTINATION_TRANSPORT)`, never `GROUP_DELIVERY_ACK`, and its non-ACK-required source hop receives no generic ACK.
-- [x] UT-156 HELLO `keepalive_interval_ms` is encoded at offset 106 and both
+- [x] UT-241 HELLO `keepalive_interval_ms` is encoded at offset 106 and both
   peers derive identical READY keepalive interval/dead-timeout values.
 - [x] UT-157 Backend-driven HELLO/AUTH sends encrypted generation-1 READY at
   sequence 1 in both directions; a PeerConnection becomes READY only after
@@ -8347,6 +8347,19 @@ Every mobile release candidate MUST run:
 - [ ] IT-038 During a three-peer checkpoint barrier, one required peer is terminally removed before ACK; the original publication completes FAILED/PEER_LEFT and a new publication against the new membership can reach DURABLE.
 - [ ] IT-041 Both Android and iOS send 64-byte RELIABLE_ACKED packets at 5 packets/second for 60 seconds; every packet receives the fixture application ACK and both logical connections remain READY.
 - [x] IT-043 Both Android and iOS send direct RELIABLE_ACKED packets in both directions at 1 Hz for 5 seconds per size, ramping 64, 128, 256, 512, 1024, 2048 bytes and back down to 64 bytes; each direction averages at least 200 B/s, loss remains below 10%, and the post-2048-byte 64-byte phase continues to deliver.
+- [ ] IT-044 The elected coordinator publishes application-validated checkpoints through the upward-and-downward size ramp `64, 128, 256, 512, 1024, 2048, 1024, 512, 256, 128, 64` bytes, at 4 accepted publications/second for 5 seconds per phase; the fixture records durable payload bandwidth, accepted-to-DURABLE latency, and failed-publication rate, requires at least 200 B/s durable payload bandwidth and less than 10% failed publications in every phase, and verifies the final 64-byte phase still completes without a reconnect or queue stall.
+
+For IT-044, the per-publication completion wait MUST be at least
+`ceil(checkpointSize / 200 B/s) + 2 seconds`. The two seconds are an explicit
+buffer for the expected minimum payload bandwidth and checkpoint ACK/validation
+overhead; this wait is a test-harness bound, not a change to LPC's checkpoint
+publication timeout. Durable payload bandwidth is the number of checkpoint
+payload bytes whose handles reached `DURABLE`, divided by the phase's active
+measurement interval. Failed-publication rate is failed accepted publications
+divided by all accepted publications in that phase. Publications rejected
+synchronously by LPC's four-per-second rolling admission limit are recorded as
+admission failures and MUST NOT be hidden as transport loss; a phase with any
+such failure is not a passing bandwidth sample.
 
 ## In-process Runtime Integration Tests
 

@@ -82,6 +82,8 @@ class DeviceTestHome extends StatelessWidget {
               group: true,
             ),
             const SizedBox(height: 8),
+            _CheckpointPanel(controller: controller, snapshot: snapshot),
+            const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(
@@ -405,6 +407,7 @@ class _TrafficPanelState extends State<_TrafficPanel> {
                     max: (_messageSizes.length - 1).toDouble(),
                     divisions: _messageSizes.length - 1,
                     value: _messageSizeIndex.toDouble(),
+                    key: const ValueKey('traffic-message-size-slider'),
                     label: '$_messageSize B',
                     onChanged: (value) {
                       final index = value.round();
@@ -426,6 +429,7 @@ class _TrafficPanelState extends State<_TrafficPanel> {
                     max: 20,
                     divisions: 19,
                     value: _messagesPerSecond.toDouble(),
+                    key: const ValueKey('traffic-rate-slider'),
                     label: '$_messagesPerSecond msg/s',
                     onChanged: (value) {
                       final rate = value.round();
@@ -550,6 +554,209 @@ class _TrafficPanelState extends State<_TrafficPanel> {
             messagesPerSecond: _messagesPerSecond.toDouble(),
           );
     unawaited(update);
+  }
+}
+
+class _CheckpointPanel extends StatefulWidget {
+  const _CheckpointPanel({required this.controller, required this.snapshot});
+
+  final DeviceTestController controller;
+  final Map<String, Object?> snapshot;
+
+  @override
+  State<_CheckpointPanel> createState() => _CheckpointPanelState();
+}
+
+class _CheckpointPanelState extends State<_CheckpointPanel> {
+  static const _checkpointSizes = <int>[
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048,
+    4096,
+    8192,
+    16384,
+    32768,
+    65536,
+  ];
+
+  int _checkpointSizeIndex = 0;
+  int _checkpointsPerSecond = 1;
+
+  int get _checkpointSize => _checkpointSizes[_checkpointSizeIndex];
+
+  @override
+  Widget build(BuildContext context) {
+    final group = (widget.snapshot['group'] as Map?)?.cast<String, Object?>();
+    final checkpointing = widget.snapshot['checkpointingEnabled'] == true;
+    final localCoordinator = group?['localIsCoordinator'] == true;
+    final groupReady = group?['state'] == 'ready';
+    final members = (group?['members'] as List?)?.length ?? 0;
+    final test = (widget.snapshot['checkpointTest'] as Map?)
+        ?.cast<String, Object?>();
+    final running = test?['running'] == true;
+    final canStart =
+        checkpointing &&
+        localCoordinator &&
+        groupReady &&
+        members > 1 &&
+        !running;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Coordinator checkpoint test',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 4),
+            if (group == null)
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Create a checkpoint-enabled group on both devices.',
+                    ),
+                  ),
+                  OutlinedButton(
+                    onPressed: () => unawaited(
+                      widget.controller.createCheckpointGroup().catchError((
+                        error,
+                      ) {
+                        debugPrint('create checkpoint group failed: $error');
+                      }),
+                    ),
+                    child: const Text('Create checkpoint group'),
+                  ),
+                ],
+              )
+            else if (!checkpointing)
+              const Text(
+                'The current group has checkpointing disabled. Leave it and '
+                'create a checkpoint-enabled group on both devices.',
+              )
+            else if (!localCoordinator)
+              const Text(
+                'Only the current group coordinator can publish checkpoints.',
+              )
+            else if (!groupReady || members < 2)
+              const Text('Waiting for a second READY group member.')
+            else
+              const Text(
+                'Publishes arbitrary checkpoint bytes through LPC. At most '
+                'four publications per second are accepted by the protocol. '
+                'Latency is accepted-to-DURABLE; bandwidth counts only durable '
+                'payload bytes.',
+              ),
+            Row(
+              children: [
+                const SizedBox(width: 92, child: Text('Checkpoint size')),
+                Expanded(
+                  child: Slider(
+                    key: const ValueKey('checkpoint-size-slider'),
+                    min: 0,
+                    max: (_checkpointSizes.length - 1).toDouble(),
+                    divisions: _checkpointSizes.length - 1,
+                    value: _checkpointSizeIndex.toDouble(),
+                    label: '$_checkpointSize B',
+                    onChanged: (value) {
+                      final index = value.round();
+                      if (index == _checkpointSizeIndex) return;
+                      setState(() => _checkpointSizeIndex = index);
+                      _update();
+                    },
+                  ),
+                ),
+                SizedBox(width: 72, child: Text('$_checkpointSize B')),
+              ],
+            ),
+            Row(
+              children: [
+                const SizedBox(width: 92, child: Text('Publish rate')),
+                Expanded(
+                  child: Slider(
+                    key: const ValueKey('checkpoint-rate-slider'),
+                    min: 1,
+                    max: 20,
+                    divisions: 19,
+                    value: _checkpointsPerSecond.toDouble(),
+                    label: '$_checkpointsPerSecond checkpoint/s',
+                    onChanged: (value) {
+                      final rate = value.round();
+                      if (rate == _checkpointsPerSecond) return;
+                      setState(() => _checkpointsPerSecond = rate);
+                      _update();
+                    },
+                  ),
+                ),
+                SizedBox(width: 72, child: Text('$_checkpointsPerSecond/s')),
+              ],
+            ),
+            Row(
+              children: [
+                FilledButton(
+                  onPressed: canStart
+                      ? () => unawaited(
+                          widget.controller.startCheckpointTest(
+                            checkpointSize: _checkpointSize,
+                            checkpointsPerSecond: _checkpointsPerSecond
+                                .toDouble(),
+                          ),
+                        )
+                      : null,
+                  child: const Text('Start publishing'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed: running
+                      ? () => unawaited(widget.controller.stopCheckpointTest())
+                      : null,
+                  child: const Text('Stop'),
+                ),
+              ],
+            ),
+            if (test != null && test['accepted'] != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '${running ? 'running' : 'stopped'}  accepted ${test['accepted']}  '
+                  'durable ${test['durable']}  failed ${test['failed']}  '
+                  'admission-failed ${test['admissionFailed'] ?? 0}  '
+                  'pending ${test['pending']}  loss '
+                  '${_formatPercent(test['lossRate'])}\n'
+                  'payload bytes: accepted ${test['acceptedBytes'] ?? '-'}  '
+                  'durable ${test['durableBytes'] ?? '-'}\n'
+                  'bandwidth: ${_formatMetric(test['durableBandwidthBytesPerSecond'])} B/s  '
+                  'duration ${test['durationMs'] ?? '-'} ms\n'
+                  'latency ms: last ${test['lastCompletionMs'] ?? '-'}  '
+                  'avg ${_formatMetric(test['averageCompletionMs'])}  '
+                  'max ${test['maxCompletionMs'] ?? '-'}',
+                  style: const TextStyle(fontFamily: 'monospace'),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatMetric(Object? value) =>
+      value is num ? value.toStringAsFixed(1) : '-';
+
+  String _formatPercent(Object? value) =>
+      value is num ? '${(value * 100).toStringAsFixed(1)}%' : '-';
+
+  void _update() {
+    unawaited(
+      widget.controller.updateCheckpointTest(
+        checkpointSize: _checkpointSize,
+        checkpointsPerSecond: _checkpointsPerSecond.toDouble(),
+      ),
+    );
   }
 }
 

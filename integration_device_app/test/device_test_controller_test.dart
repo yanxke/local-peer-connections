@@ -111,5 +111,18 @@ void main() {
     final snapshot = DeviceTestController(controlPort: 0).snapshot();
     expect(snapshot['knownPeerIds'], isEmpty);
     expect(snapshot['autoConnectKnownPeers'], isFalse);
+    expect(snapshot['checkpointingEnabled'], isFalse);
+    expect(snapshot['checkpointTest'], {'running': false});
+  });
+
+  test('checkpoint test commands are available through the control API', () {
+    final controller = DeviceTestController(controlPort: 0);
+    expect(
+      () async => await controller.command('startCheckpointTest', {
+        'checkpointSize': 1024,
+        'checkpointsPerSecond': 1,
+      }),
+      throwsA(isA<LpcException>()),
+    );
   });
 }

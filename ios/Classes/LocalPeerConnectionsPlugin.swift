@@ -1,5 +1,13 @@
+#if os(macOS)
+import FlutterMacOS
+#else
 import Flutter
+#endif
+#if os(iOS)
 import UIKit
+#else
+import AppKit
+#endif
 import Security
 import CoreBluetooth
 
@@ -9,7 +17,15 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   private static let identityChannel = "dev.localpeerconnections.local_peer_connections/identity"
   private static let backendChannel = "dev.localpeerconnections.local_peer_connections/backend"
   private static let backendEventsChannel = "dev.localpeerconnections.local_peer_connections/backend_events"
+  #if os(macOS)
+  // macOS keychain records are shared more broadly than iOS application
+  // keychain records. Keep the desktop fixture's identity namespace separate
+  // from mobile and older desktop builds; a stale protected record there can
+  // block SecItemCopyMatching on the main Flutter thread before LPC starts.
+  private static let service = "dev.localpeerconnections.local_peer_connections.identity.macos.v2"
+  #else
   private static let service = "dev.localpeerconnections.local_peer_connections.identity"
+  #endif
   private static let account = "ed25519_seed_v1"
 
   private var central: CBCentralManager!
@@ -36,9 +52,14 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = LocalPeerConnectionsPlugin()
-    let identity = FlutterMethodChannel(name: identityChannel, binaryMessenger: registrar.messenger())
-    let backend = FlutterMethodChannel(name: backendChannel, binaryMessenger: registrar.messenger())
-    let events = FlutterEventChannel(name: backendEventsChannel, binaryMessenger: registrar.messenger())
+    #if os(macOS)
+    let messenger = registrar.messenger
+    #else
+    let messenger = registrar.messenger()
+    #endif
+    let identity = FlutterMethodChannel(name: identityChannel, binaryMessenger: messenger)
+    let backend = FlutterMethodChannel(name: backendChannel, binaryMessenger: messenger)
+    let events = FlutterEventChannel(name: backendEventsChannel, binaryMessenger: messenger)
     registrar.addMethodCallDelegate(instance, channel: identity)
     registrar.addMethodCallDelegate(instance, channel: backend)
     events.setStreamHandler(instance)
@@ -446,11 +467,11 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     let initialize = {
       if self.central == nil {
         self.central = CBCentralManager(delegate: self, queue: DispatchQueue.main)
-        print("[LocalPeerConnections] central manager initialized state=\(self.central.state.rawValue) \(self.authorizationDiagnostics()) appState=\(UIApplication.shared.applicationState.rawValue)")
+        print("[LocalPeerConnections] central manager initialized state=\(self.central.state.rawValue) \(self.authorizationDiagnostics())")
       }
       if self.peripheral == nil {
         self.peripheral = CBPeripheralManager(delegate: self, queue: DispatchQueue.main)
-        print("[LocalPeerConnections] peripheral manager initialized state=\(self.peripheral.state.rawValue) \(self.authorizationDiagnostics()) appState=\(UIApplication.shared.applicationState.rawValue)")
+        print("[LocalPeerConnections] peripheral manager initialized state=\(self.peripheral.state.rawValue) \(self.authorizationDiagnostics())")
       }
     }
     if Thread.isMainThread {
@@ -461,10 +482,14 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   }
 
   private func authorizationDiagnostics() -> String {
+    #if os(iOS)
     if #available(iOS 13.1, *) {
       return "centralAuthorization=\(CBCentralManager.authorization.rawValue) peripheralAuthorization=\(CBPeripheralManager.authorization.rawValue)"
     }
     return "authorization=unavailable"
+    #else
+    return "centralAuthorization=\(CBCentralManager.authorization.rawValue) peripheralAuthorization=\(CBPeripheralManager.authorization.rawValue)"
+    #endif
   }
 
   /// Hosts exactly the Section 11 service. The Dart GATT backend remains the
@@ -607,8 +632,9 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
       kSecReturnData: true,
       kSecMatchLimit: kSecMatchLimitOne
     ]
+    let platformQuery = query
     var item: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    let status = SecItemCopyMatching(platformQuery as CFDictionary, &item)
     if status == errSecSuccess {
       guard let seed = item as? Data, seed.count == 32 else { throw IdentityStorageError.invalidStoredSeed }
       return seed
@@ -617,10 +643,12 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     var seed = Data(count: 32)
     let randomStatus = seed.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
     guard randomStatus == errSecSuccess else { throw IdentityStorageError.keychain(randomStatus) }
-    var add = query
+    var add = platformQuery
     add.removeValue(forKey: kSecReturnData); add.removeValue(forKey: kSecMatchLimit)
     add[kSecValueData] = seed
+    #if os(iOS)
     add[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    #endif
     let addStatus = SecItemAdd(add as CFDictionary, nil)
     guard addStatus == errSecSuccess else { throw IdentityStorageError.keychain(addStatus) }
     return seed

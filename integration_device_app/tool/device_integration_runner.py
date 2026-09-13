@@ -989,6 +989,122 @@ class Runner:
         )
         print("IT-028: 262144-byte checkpoint reached durable")
 
+    def scenario_checkpoint_bandwidth_latency(self) -> None:
+        """Measure the bounded, application-validated checkpoint path.
+
+        The fixture publishes at the protocol's four-publications/second
+        admission limit, then changes only the payload size between five-second
+        phases. Completion latency is accepted-to-DURABLE; bandwidth counts
+        only payloads whose publication handles became DURABLE. This keeps the
+        measurement separate from the control HTTP round trip and exposes
+        admission failures rather than hiding them as transport loss.
+        """
+        scenario = "IT-044"
+        sizes = (64, 128, 256, 512, 1024, 2048, 1024, 512, 256, 128, 64)
+        publish_rate = 4.0
+        phase_seconds = 5.0
+        minimum_bandwidth = 200.0
+        self.reset_all()
+        first, second = self.apis[:2]
+        self.connect(first, second)
+        self.create_group(checkpointing=True)
+        self.wait_group(2)
+        snapshots = [api.snapshot() for api in self.apis]
+        coordinator = next(
+            api for api, snapshot in zip(self.apis, snapshots)
+            if isinstance(snapshot.get("group"), dict)
+            and snapshot["group"].get("localIsCoordinator") is True
+        )
+        self.drain_events()
+        for phase, size in enumerate(sizes, start=1):
+            coordinator.command("startCheckpointTest", {
+                "checkpointSize": size,
+                "checkpointsPerSecond": publish_rate,
+            })
+            time.sleep(phase_seconds)
+            coordinator.command("stopCheckpointTest")
+
+            def drained() -> bool:
+                test = coordinator.snapshot().get("checkpointTest", {})
+                return (
+                    isinstance(test, dict)
+                    and test.get("running") is False
+                    and test.get("pending", 0) == 0
+                )
+
+            # Match the explicit harness budget from the physical-test spec,
+            # with a floor for draining the bounded one-in-flight/one-pending
+            # checkpoint queues after the five-second publication window.
+            drain_timeout = max(30.0, math.ceil(size / minimum_bandwidth) + 2.0)
+            self.wait(
+                drained,
+                f"{scenario} phase {phase} checkpoint drain",
+                timeout=drain_timeout,
+            )
+            test = coordinator.snapshot().get("checkpointTest", {})
+            if not isinstance(test, dict):
+                raise RunnerFailure(f"{scenario}: missing phase snapshot {phase}")
+            accepted = int(test.get("accepted", 0))
+            durable = int(test.get("durable", 0))
+            failed = int(test.get("failed", 0))
+            admission_failed = int(test.get("admissionFailed", 0))
+            completed = int(test.get("completed", 0))
+            durable_bytes = int(test.get("durableBytes", durable * size))
+            active_duration = max(
+                float(test.get("durationMs", phase_seconds * 1000)) / 1000.0,
+                phase_seconds,
+            )
+            bandwidth = durable_bytes / active_duration
+            loss_rate = failed / max(1, accepted + failed)
+            result = {
+                "phase": phase,
+                "checkpointSize": size,
+                "accepted": accepted,
+                "durable": durable,
+                "completed": completed,
+                "failed": failed,
+                "admissionFailed": admission_failed,
+                "acceptedBytes": test.get("acceptedBytes", accepted * size),
+                "durableBytes": durable_bytes,
+                "bandwidthBytesPerSecond": bandwidth,
+                "lossRate": loss_rate,
+                "averageLatencyMs": test.get("averageCompletionMs"),
+                "maxLatencyMs": test.get("maxCompletionMs"),
+                "durationSeconds": active_duration,
+            }
+            print(json.dumps({"scenario": scenario, **result}, sort_keys=True))
+            if accepted < math.floor(phase_seconds * publish_rate * 0.8):
+                raise RunnerFailure(
+                    f"{scenario}: phase {phase} admitted only {accepted} "
+                    f"checkpoint publications: {result}"
+                )
+            if bandwidth < minimum_bandwidth:
+                raise RunnerFailure(
+                    f"{scenario}: phase {phase} durable bandwidth "
+                    f"{bandwidth:.1f} B/s is below {minimum_bandwidth:.1f}: {result}"
+                )
+            if loss_rate >= 0.10:
+                raise RunnerFailure(
+                    f"{scenario}: phase {phase} failed-publication rate "
+                    f"{loss_rate:.2%} is not below 10%: {result}"
+                )
+            if admission_failed:
+                raise RunnerFailure(
+                    f"{scenario}: phase {phase} hit the four-publication/second "
+                    f"admission limit {admission_failed} times: {result}"
+                )
+            for api in (first, second):
+                connections = api.snapshot().get("connections", [])
+                if any(connection.get("state") != "ready" for connection in connections):
+                    raise RunnerFailure(
+                        f"{scenario}: phase {phase} connection left READY on "
+                        f"{api.device.label}: {connections}"
+                    )
+        print(
+            f"{scenario}: checkpoint size ramp passed with durable bandwidth "
+            "and accepted-to-DURABLE latency recorded for every phase"
+        )
+
     def scenario_star(self, minimum_devices: int) -> None:
         if len(self.apis) < minimum_devices:
             raise ScenarioBlocked(
@@ -1104,6 +1220,8 @@ class Runner:
             self.scenario_bidirectional_group()
         elif scenario == "IT-043":
             self.scenario_bidirectional_size_ramp()
+        elif scenario == "IT-044":
+            self.scenario_checkpoint_bandwidth_latency()
         elif scenario == "IT-017":
             self.scenario_soak()
         elif scenario == "IT-018":
@@ -1168,7 +1286,7 @@ def main() -> int:
     parser.add_argument("--device", action="append", type=parse_device, required=True,
                         help="generic device label and forwarded host port, e.g. device-a=18765")
     parser.add_argument("--scenario", action="append", required=True,
-                        help="IT-001 through IT-043; repeat for multiple scenarios")
+                        help="IT-001 through IT-044; repeat for multiple scenarios")
     parser.add_argument("--provision-known-peers", action="store_true",
                         help="exchange current device PeerIds over the trusted control channel before scenarios")
     parser.add_argument("--timeout", type=float, default=60.0)

@@ -63,9 +63,13 @@ class DeviceTestController extends ChangeNotifier {
   };
   _TrafficRun? _directTraffic;
   _TrafficRun? _groupTraffic;
+  _CheckpointRun? _checkpointTest;
   Map<String, Object?>? _lastDirectTraffic;
   Map<String, Object?>? _lastGroupTraffic;
+  Map<String, Object?>? _lastCheckpointTest;
   int _nextTrafficId = 1;
+  int _nextCheckpointTestId = 1;
+  bool _groupCheckpointing = false;
   // Capabilities are current runtime state, not diagnostic history. Keep a
   // dedicated value because high-rate endpoint updates can evict the
   // initialization event from the bounded event buffer before a reset or
@@ -371,10 +375,20 @@ class DeviceTestController extends ChangeNotifier {
       ),
     );
     group = localGroup;
+    _groupCheckpointing = checkpointing;
+    if (checkpointing) {
+      // This raw fixture has no application checkpoint schema. Accept every
+      // fully reassembled value so the checkpoint panel measures LPC
+      // transport, validation dispatch, and durable ACK latency rather than
+      // failing because the fixture omitted an application validator.
+      localGroup.setCoordinatorCheckpointValidator((_) => true);
+    }
     localGroup.events.listen(_onGroupEvent);
     _record('groupCreated', _groupSnapshot(localGroup));
     notifyListeners();
   }
+
+  Future<void> createCheckpointGroup() => createGroup(checkpointing: true);
 
   Future<void> sendGroup(String peerId, List<int> bytes) async {
     final localGroup = group;
@@ -577,6 +591,83 @@ class DeviceTestController extends ChangeNotifier {
     unawaited(_recordCheckpointCompletion(handle));
   }
 
+  Future<void> startCheckpointTest({
+    required int checkpointSize,
+    required double checkpointsPerSecond,
+  }) async {
+    final localGroup = group;
+    if (localGroup == null || !_groupCheckpointing) {
+      throw invalidStateError();
+    }
+    if (!localGroup.isCoordinator || localGroup.state != GroupState.ready) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    _validateCheckpointArguments(checkpointSize, checkpointsPerSecond);
+    await stopCheckpointTest();
+    final run = _CheckpointRun(
+      id: _nextCheckpointTestId++ & 0xffff,
+      checkpointSize: checkpointSize,
+      checkpointsPerSecond: checkpointsPerSecond,
+      startedAtMs: _telemetryClock.elapsedMilliseconds,
+    );
+    _checkpointTest = run;
+    _lastCheckpointTest = null;
+    _record('checkpointTestStarted', {
+      'testId': run.id,
+      'checkpointSize': checkpointSize,
+      'checkpointsPerSecond': checkpointsPerSecond,
+    });
+    _scheduleCheckpointTest(run);
+    notifyListeners();
+  }
+
+  Future<void> stopCheckpointTest() async {
+    final run = _checkpointTest;
+    if (run == null) return;
+    run.timer?.cancel();
+    run.timer = null;
+    run.stoppedAtMs ??= _telemetryClock.elapsedMilliseconds;
+    // Publication handles remain owned by GroupSession until LPC receives
+    // their peer result. Keep the bounded run object alive for those callbacks,
+    // but stop accepting new publications immediately.
+    _checkpointTest = null;
+    final result = _checkpointSnapshot(run)!..['running'] = false;
+    _lastCheckpointTest = result;
+    _record('checkpointTestStopped', result);
+    notifyListeners();
+  }
+
+  Future<void> updateCheckpointTest({
+    int? checkpointSize,
+    double? checkpointsPerSecond,
+  }) async {
+    final run = _checkpointTest;
+    if (run == null) return;
+    final nextSize = checkpointSize ?? run.checkpointSize;
+    final nextRate = checkpointsPerSecond ?? run.checkpointsPerSecond;
+    _validateCheckpointArguments(nextSize, nextRate);
+    if (nextSize == run.checkpointSize &&
+        nextRate == run.checkpointsPerSecond) {
+      return;
+    }
+    final previousSize = run.checkpointSize;
+    final previousRate = run.checkpointsPerSecond;
+    run.checkpointSize = nextSize;
+    run.checkpointsPerSecond = nextRate;
+    _scheduleCheckpointTestTimer(run);
+    _record('checkpointTestUpdated', {
+      'testId': run.id,
+      'checkpointSize': nextSize,
+      'checkpointsPerSecond': nextRate,
+      'previousCheckpointSize': previousSize,
+      'previousCheckpointsPerSecond': previousRate,
+    });
+    // Apply a slider change immediately while preserving the publication
+    // counters and any in-flight LPC checkpoint operation.
+    unawaited(_publishCheckpointTest(run));
+    notifyListeners();
+  }
+
   Future<void> _recordCheckpointCompletion(
     CoordinatorCheckpointHandle handle,
   ) async {
@@ -595,8 +686,10 @@ class DeviceTestController extends ChangeNotifier {
   }
 
   Future<void> leaveGroup() async {
+    await stopCheckpointTest();
     group?.leave();
     group = null;
+    _groupCheckpointing = false;
     _record('groupLeft', {});
     notifyListeners();
   }
@@ -695,6 +788,11 @@ class DeviceTestController extends ChangeNotifier {
           _lastGroupTraffic ??
           {'running': false},
     },
+    'checkpointingEnabled': _groupCheckpointing,
+    'checkpointTest':
+        _checkpointSnapshot(_checkpointTest) ??
+        _lastCheckpointTest ??
+        {'running': false},
     'pendingVerifications': [
       for (final value in _pendingHostVerifications.values)
         {'peerId': value.peerId.toString(), 'sas': value.sas},
@@ -721,6 +819,7 @@ class DeviceTestController extends ChangeNotifier {
   Future<void> _closeRuntime() async {
     await stopSendTest();
     await stopGroupSendTest();
+    await stopCheckpointTest();
     for (final subscription in _peerSubscriptions.values) {
       await subscription.cancel();
     }
@@ -736,6 +835,7 @@ class DeviceTestController extends ChangeNotifier {
     _pendingHostVerifications.clear();
     group?.close();
     group = null;
+    _groupCheckpointing = false;
     await discovery?.stop();
     discovery = null;
     await host?.close();
@@ -913,6 +1013,148 @@ class DeviceTestController extends ChangeNotifier {
   void _scheduleTraffic(_TrafficRun run) {
     _scheduleTrafficTimer(run);
     unawaited(_sendTraffic(run));
+  }
+
+  void _validateCheckpointArguments(
+    int checkpointSize,
+    double checkpointsPerSecond,
+  ) {
+    if (checkpointSize < 1 || checkpointSize > 262144) {
+      throw const LpcException(LpcErrorCode.messageTooLarge);
+    }
+    if (!checkpointsPerSecond.isFinite ||
+        checkpointsPerSecond <= 0 ||
+        checkpointsPerSecond > 20) {
+      throw const LpcException(LpcErrorCode.invalidArgument);
+    }
+  }
+
+  void _scheduleCheckpointTest(_CheckpointRun run) {
+    _scheduleCheckpointTestTimer(run);
+    unawaited(_publishCheckpointTest(run));
+  }
+
+  void _scheduleCheckpointTestTimer(_CheckpointRun run) {
+    run.timer?.cancel();
+    final intervalMs = (1000 / run.checkpointsPerSecond).round().clamp(
+      20,
+      60000,
+    );
+    run.timer = Timer.periodic(Duration(milliseconds: intervalMs), (_) {
+      unawaited(_publishCheckpointTest(run));
+    });
+  }
+
+  Future<void> _publishCheckpointTest(_CheckpointRun run) async {
+    if (_checkpointTest != run || run.pending.length >= _maxCheckpointPending) {
+      return;
+    }
+    final localGroup = group;
+    if (localGroup == null ||
+        !localGroup.isCoordinator ||
+        localGroup.state != GroupState.ready) {
+      return;
+    }
+    final publicationId = run.nextPublication++ & 0xffff;
+    final startedAtMs = _telemetryClock.elapsedMilliseconds;
+    final bytes = List<int>.generate(
+      run.checkpointSize,
+      (index) => (index + publicationId) & 0xff,
+    );
+    try {
+      final handle = localGroup.publishCoordinatorCheckpoint(bytes);
+      run.accepted++;
+      run.acceptedBytes += bytes.length;
+      run.pending[handle.publicationId] = _CheckpointPending(
+        startedAtMs,
+        bytes.length,
+      );
+      _record('checkpointTestPublicationAccepted', {
+        'testId': run.id,
+        'publicationId': handle.publicationId,
+        'bytes': bytes.length,
+      });
+      unawaited(_recordCheckpointTestCompletion(run, handle));
+    } on Object catch (error) {
+      run.admissionFailed++;
+      _recordError(
+        'checkpointTestPublicationFailed',
+        error,
+        extra: {'testId': run.id, 'bytes': bytes.length},
+      );
+      notifyListeners();
+    }
+  }
+
+  Future<void> _recordCheckpointTestCompletion(
+    _CheckpointRun run,
+    CoordinatorCheckpointHandle handle,
+  ) async {
+    final result = await handle.completion;
+    final pending = run.pending.remove(result.publicationId);
+    if (pending != null) {
+      final elapsed = _telemetryClock.elapsedMilliseconds - pending.startedAtMs;
+      run.completed++;
+      run.totalCompletionMs += elapsed;
+      run.lastCompletionMs = elapsed;
+      run.maxCompletionMs =
+          run.maxCompletionMs == null || elapsed > run.maxCompletionMs!
+          ? elapsed
+          : run.maxCompletionMs;
+      if (result.status == CheckpointPublicationStatus.durable) {
+        run.durable++;
+        run.durableBytes += pending.bytes;
+      } else {
+        run.failed++;
+        run.failedBytes += pending.bytes;
+      }
+    }
+    _record('checkpointTestPublicationCompleted', {
+      'testId': run.id,
+      'publicationId': result.publicationId,
+      'status': result.status.name,
+      'elapsedMs': pending == null
+          ? null
+          : _telemetryClock.elapsedMilliseconds - pending.startedAtMs,
+    });
+    if (_checkpointTest != run) {
+      _lastCheckpointTest = _checkpointSnapshot(run)!..['running'] = false;
+    }
+    notifyListeners();
+  }
+
+  Map<String, Object?>? _checkpointSnapshot(_CheckpointRun? run) {
+    if (run == null) return null;
+    final completed = run.completed;
+    final elapsedMs =
+        ((run.stoppedAtMs ?? _telemetryClock.elapsedMilliseconds) -
+                run.startedAtMs)
+            .clamp(1, 0x7fffffff);
+    final attempted = run.accepted + run.failed;
+    return {
+      'running': true,
+      'testId': run.id,
+      'checkpointSize': run.checkpointSize,
+      'checkpointsPerSecond': run.checkpointsPerSecond,
+      'accepted': run.accepted,
+      'acceptedBytes': run.acceptedBytes,
+      'admissionFailed': run.admissionFailed,
+      'completed': completed,
+      'durable': run.durable,
+      'durableBytes': run.durableBytes,
+      'failed': run.failed,
+      'failedBytes': run.failedBytes,
+      'pending': run.pending.length,
+      'durabilityRate': completed == 0 ? 0 : run.durable / completed,
+      'lossRate': attempted == 0 ? 0 : run.failed / attempted,
+      'durationMs': elapsedMs,
+      'durableBandwidthBytesPerSecond': run.durableBytes * 1000 / elapsedMs,
+      'lastCompletionMs': run.lastCompletionMs,
+      'averageCompletionMs': completed == 0
+          ? null
+          : run.totalCompletionMs / completed,
+      'maxCompletionMs': run.maxCompletionMs,
+    };
   }
 
   void _scheduleTrafficTimer(_TrafficRun run) {
@@ -1622,6 +1864,27 @@ class DeviceTestController extends ChangeNotifier {
       case 'publishCheckpoint':
         await publishCheckpoint(bytesFromArguments(arguments));
         return snapshot();
+      case 'createCheckpointGroup':
+        await createCheckpointGroup();
+        return snapshot();
+      case 'startCheckpointTest':
+        await startCheckpointTest(
+          checkpointSize:
+              (arguments['checkpointSize'] as num?)?.toInt() ?? 1024,
+          checkpointsPerSecond:
+              (arguments['checkpointsPerSecond'] as num?)?.toDouble() ?? 1,
+        );
+        return snapshot();
+      case 'updateCheckpointTest':
+        await updateCheckpointTest(
+          checkpointSize: (arguments['checkpointSize'] as num?)?.toInt(),
+          checkpointsPerSecond: (arguments['checkpointsPerSecond'] as num?)
+              ?.toDouble(),
+        );
+        return snapshot();
+      case 'stopCheckpointTest':
+        await stopCheckpointTest();
+        return snapshot();
       case 'leaveGroup':
         await leaveGroup();
         return snapshot();
@@ -1952,6 +2215,10 @@ int trafficAckTimeoutMsForMessageSize(int messageSize) =>
 // sender bounds the bidirectional GATT queue while still allowing the slider
 // to measure sustained throughput.
 const _maxTrafficPending = 4;
+// A checkpoint publication is coalesced by LPC to one in-flight and one
+// pending value per peer. This extra fixture bound prevents a disconnected
+// peer from accumulating unbounded completion futures in the UI harness.
+const _maxCheckpointPending = 16;
 
 class _TrafficRun {
   _TrafficRun({
@@ -1980,6 +2247,42 @@ class _TrafficRun {
   bool inFlight = false;
 
   int get ackTimeoutMs => trafficAckTimeoutMsForMessageSize(messageSize);
+}
+
+class _CheckpointRun {
+  _CheckpointRun({
+    required this.id,
+    required this.checkpointSize,
+    required this.checkpointsPerSecond,
+    required this.startedAtMs,
+  });
+
+  final int id;
+  int checkpointSize;
+  double checkpointsPerSecond;
+  final int startedAtMs;
+  int? stoppedAtMs;
+  final Map<int, _CheckpointPending> pending = {};
+  Timer? timer;
+  int nextPublication = 0;
+  int accepted = 0;
+  int acceptedBytes = 0;
+  int admissionFailed = 0;
+  int completed = 0;
+  int durable = 0;
+  int durableBytes = 0;
+  int failed = 0;
+  int failedBytes = 0;
+  int totalCompletionMs = 0;
+  int? lastCompletionMs;
+  int? maxCompletionMs;
+}
+
+class _CheckpointPending {
+  _CheckpointPending(this.startedAtMs, this.bytes);
+
+  final int startedAtMs;
+  final int bytes;
 }
 
 class _TrafficPending {

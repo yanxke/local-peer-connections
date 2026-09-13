@@ -53,6 +53,8 @@ class _TrafficUpdateController extends DeviceTestController {
           },
           'group': {'running': false},
         },
+        'checkpointingEnabled': false,
+        'checkpointTest': {'running': false},
         'group': null,
         'eventSequence': 0,
       },
@@ -124,16 +126,96 @@ void main() {
     addTearDown(controller.dispose);
     await tester.pumpWidget(DeviceTestApp(controller: controller));
 
-    final sliders = find.byType(Slider);
-    expect(sliders, findsNWidgets(2));
-    tester.widget<Slider>(sliders.at(0)).onChanged!(6);
-    tester.widget<Slider>(sliders.at(1)).onChanged!(3);
+    final sizeSlider = tester.widget<Slider>(
+      find.byKey(const ValueKey('traffic-message-size-slider')),
+    );
+    final rateSlider = tester.widget<Slider>(
+      find.byKey(const ValueKey('traffic-rate-slider')),
+    );
+    sizeSlider.onChanged!(6);
+    rateSlider.onChanged!(3);
     await tester.pump();
 
     expect(controller.updates, [
       {'messageSize': 512, 'messagesPerSecond': 1.0},
       {'messageSize': 512, 'messagesPerSecond': 3.0},
     ]);
+  });
+
+  testWidgets('checkpoint panel exposes live size and rate controls', (
+    tester,
+  ) async {
+    final controller = _SnapshotController({
+      'runtimeState': 'ready',
+      'localPeerId': '0123456789abcdef0123456789abcdef',
+      'displayName': 'Test Device',
+      'controlApi': 'disabled',
+      'capabilities': 15,
+      'presenceActive': true,
+      'endpoints': const <Object?>[],
+      'knownPeerIds': const <Object?>[],
+      'connections': const <Object?>[],
+      'attempts': const <Object?>[],
+      'telemetry': {
+        'messagesSent': 0,
+        'messagesReceived': 0,
+        'bytesSent': 0,
+        'bytesReceived': 0,
+        'speedWindowMs': 5000,
+        'connectionStatePercent': <String, Object?>{},
+      },
+      'trafficTests': {
+        'direct': {'running': false},
+        'group': {'running': false},
+      },
+      'checkpointingEnabled': true,
+      'checkpointTest': {
+        'running': true,
+        'accepted': 2,
+        'completed': 1,
+        'durable': 1,
+        'failed': 0,
+        'pending': 1,
+        'acceptedBytes': 2048,
+        'durableBytes': 1024,
+        'lossRate': 0.0,
+        'durationMs': 5000,
+        'durableBandwidthBytesPerSecond': 204.8,
+        'lastCompletionMs': 120,
+        'averageCompletionMs': 120.0,
+        'maxCompletionMs': 120,
+      },
+      'group': {
+        'state': 'ready',
+        'localIsCoordinator': true,
+        'members': [
+          '0123456789abcdef0123456789abcdef',
+          'fedcba9876543210fedcba9876543210',
+        ],
+      },
+      'eventSequence': 0,
+    });
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(DeviceTestApp(controller: controller));
+    await tester.scrollUntilVisible(
+      find.text('Coordinator checkpoint test'),
+      500,
+      scrollable: find.byType(Scrollable).first,
+    );
+
+    expect(find.text('Coordinator checkpoint test'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('checkpoint-size-slider')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('checkpoint-rate-slider')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('durable 1'), findsOneWidget);
+    expect(find.textContaining('bandwidth: 204.8 B/s'), findsOneWidget);
+    expect(find.textContaining('loss 0.0%'), findsOneWidget);
+    expect(find.textContaining('latency ms: last 120'), findsOneWidget);
   });
 
   testWidgets('unprovisioned authenticated peers show Remember', (
