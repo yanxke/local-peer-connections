@@ -246,3 +246,5 @@ where useful to help identify the problem.
 When fixing bugs in the implementation or when there are platform (Android/iOS/Bluetooth) caveats, document the reason for the fixes in the code so that future maintainers can understand why the specific logic is there.
 
 Deployments on iOS could take a while to complete.
+
+Applications should not be hot restarted because it can cause duplicate endpoints.
