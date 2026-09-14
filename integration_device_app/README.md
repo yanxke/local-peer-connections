@@ -52,9 +52,8 @@ peers without an upper-layer reconnect direction.
 
 ## Control API
 
-Debug builds bind only to `127.0.0.1` on port `8765` by default. The three
-debug harnesses use separate loopback ports by default: LPC `8765`, LPM
-`8766`, and LPGE `8767`. Override LPC with
+Debug builds bind only to `127.0.0.1` on port `8765` by default. Other apps
+should use different ports.  Override LPC with
 `--dart-define=LPC_TEST_PORT=<port>` only for a custom deployment layout.
 
 ```text
