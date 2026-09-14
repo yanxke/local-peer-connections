@@ -274,9 +274,11 @@ change LPC wire semantics or replace the normative requirements in the spec.
   reboot the device or broadly kill the CoreDevice service. Keep the `iproxy`
   control-port forward alive. If Flutter reports an Automation permission
   request, approve it in macOS Settings.
-  An in-place `xcrun devicectl device install app` followed by
-  `xcrun devicectl device process launch` is a useful fallback when Flutter's
-  deploy wrapper is the stale process.
+  On iOS 14+, debug Flutter apps must be launched through `flutter run`, an
+  IDE with the Flutter plugin, or Xcode; direct `devicectl device process
+  launch` is rejected. An in-place `xcrun devicectl device install app` is
+  still allowed for installation, but CoreDevice must not be used to launch
+  the debug Flutter app as a fallback when Flutter's deploy wrapper is stale.
 - On macOS, build with `flutter build macos --debug` and keep the application
   open while the user approves the LPC identity's Keychain access. Prefer
   “Always Allow” for the test identity. A pending Keychain dialog can leave
