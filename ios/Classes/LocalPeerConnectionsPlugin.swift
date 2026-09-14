@@ -377,8 +377,13 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     }
     client.connectedEmitted = true
     gattClients[peripheral.identifier] = client
+    // Use the smaller capacity for the shared LPC fragmenter. Reliable/control
+    // traffic uses Write With Response below, while realtime traffic uses
+    // Write Without Response; both modes must fit the same encoded fragment.
+    let responseWriteSize = peripheral.maximumWriteValueLength(for: .withResponse)
+    let noResponseWriteSize = peripheral.maximumWriteValueLength(for: .withoutResponse)
     eventSink?(["type": "gattConnected", "endpointId": peripheral.identifier.uuidString,
-                "localRole": "central", "platformSafeWriteSize": peripheral.maximumWriteValueLength(for: .withoutResponse),
+                "localRole": "central", "platformSafeWriteSize": min(responseWriteSize, noResponseWriteSize),
                 "connectionGeneration": client.generation])
   }
 
@@ -593,24 +598,37 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     guard let identifier = UUID(uuidString: endpointId) else {
       throw BackendError("ENDPOINT_LOST", "unknown GATT connection")
     }
-    guard let client = gattClients[identifier] else {
+    guard var client = gattClients[identifier] else {
       throw BackendError("ENDPOINT_LOST", "unknown GATT connection")
     }
     if let requestedGeneration, client.generation != requestedGeneration {
       throw BackendError("ENDPOINT_LOST", "stale GATT connection generation")
     }
     if transmission == "notify" { return "terminalFailure" }
-    // CoreBluetooth's response-required callback can stall for an extended
-    // period when the Android peer is simultaneously notifying. LPC already
-    // provides its own reliable framing/ACK boundary, so use the negotiated
-    // no-response characteristic with CoreBluetooth's explicit flow-control
-    // signal. This prevents overlapping response writes without deadlocking
-    // the central drain on a missing didWriteValueFor callback.
-    if !client.peripheral.canSendWriteWithoutResponse {
+    if transmission == "writeWithoutResponse" {
+      // This is the Section 22 realtime path. CoreBluetooth exposes explicit
+      // central-side flow control for it; a full transmit window is ordinary
+      // bounded backpressure and must leave the LPC write pending.
+      if !client.peripheral.canSendWriteWithoutResponse {
+        return "temporarilyUnavailable"
+      }
+      client.peripheral.writeValue(fragment.data, for: client.rx,
+        type: .withoutResponse)
+      return "submitted"
+    }
+
+    // Reliable/control fragments use Write With Response. The response
+    // callback is the per-fragment flow-control boundary, preventing a burst
+    // of checkpoints and ACK/control frames from filling iOS's no-response
+    // central buffer. LPC's own frame/operation ACKs remain authoritative;
+    // this platform response only gates the next fragment submission.
+    if client.writeInFlight {
       return "temporarilyUnavailable"
     }
+    client.writeInFlight = true
+    gattClients[identifier] = client
     client.peripheral.writeValue(fragment.data, for: client.rx,
-      type: .withoutResponse)
+      type: .withResponse)
     return "submitted"
   }
 

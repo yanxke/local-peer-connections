@@ -138,6 +138,90 @@ void main() {
     await runtime.close();
   });
 
+  test('UT-246 transport reconnect event preserves membership version',
+      () async {
+    final runtime = await createRuntime(localPeerId: peer(1));
+    final group = runtime.joinOrCreateGroup(GroupConfig(
+        applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
+    group.commitMembership(
+      [GroupMember(peer(1), 8), GroupMember(peer(2), 8)],
+      coordinator: peer(1),
+    );
+    final version = group.membershipView().version;
+    final seen = Completer<GroupTransportChanged>();
+    final sub = group.events.listen((event) {
+      if (event is GroupTransportChanged && !seen.isCompleted) {
+        seen.complete(event);
+      }
+    });
+
+    group.notifyTransportChanged(
+      peer(2),
+      previousTransport: TransportType.gatt,
+      currentTransport: TransportType.gatt,
+      transportGeneration: 2,
+    );
+    final event = await seen.future;
+    expect(event.peerId, peer(2));
+    expect(event.previousTransport, TransportType.gatt);
+    expect(event.currentTransport, TransportType.gatt);
+    expect(event.transportGeneration, 2);
+    expect(group.membershipView().version, version);
+    expect(
+      group.members.map((member) => (member.peerId, member.maxPeers)).toList(),
+      [(peer(1), 8), (peer(2), 8)],
+    );
+    await sub.cancel();
+    await runtime.close();
+  });
+
+  test('UT-248 same-group higher term refreshes authority', () async {
+    final runtime = await createRuntime(localPeerId: peer(1));
+    final group = runtime.joinOrCreateGroup(GroupConfig(
+        applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
+    group.commitMembership(
+      [GroupMember(peer(1), 8), GroupMember(peer(2), 8)],
+      coordinator: peer(1),
+      coordinatorTerm: 0,
+    );
+    final version = group.membershipView().version;
+    final seen = <CoordinatorChanged>[];
+    final sub = group.events.listen((event) {
+      if (event is CoordinatorChanged) seen.add(event);
+    });
+
+    group.adoptCoordinatorAuthority(
+      coordinator: peer(2),
+      coordinatorTerm: 1,
+    );
+
+    expect(group.coordinatorPeerId, peer(2));
+    expect(group.coordinatorTerm, 1);
+    expect(group.membershipView().version, version);
+    expect(seen.single.term, 1);
+    expect(seen.single.membershipVersion, version);
+    await sub.cancel();
+    await runtime.close();
+  });
+
+  test('UT-245 committed snapshot replaces existing member records', () async {
+    final runtime = await createRuntime(localPeerId: peer(1));
+    final group = runtime.joinOrCreateGroup(GroupConfig(
+        applicationNamespace: [1], groupJoinToken: List.filled(16, 0)));
+
+    group.commitMembership(
+      [GroupMember(peer(1), 8), GroupMember(peer(2), 8)],
+      coordinator: peer(1),
+    );
+    group.commitMembership(
+      [GroupMember(peer(1), 2), GroupMember(peer(2), 2)],
+      coordinator: peer(1),
+    );
+
+    expect(group.members.map((member) => member.maxPeers), [2, 2]);
+    await runtime.close();
+  });
+
   test('COORD-004/005/010 migration preserves GroupId and committed members',
       () async {
     final runtime = await createRuntime(localPeerId: peer(1));

@@ -3913,6 +3913,22 @@ pairwise link. This refresh is required even if a prior generation sent
 that earlier record was received or discarded. The peer MUST receive that
 winning-group record before the corresponding `GROUP_MERGE`.
 
+If an authenticated `GROUP_INFO` has the same `GroupId` and the same complete
+committed member-record set as the local group, but advertises a strictly
+higher `coordinator_term`, the receiver MUST adopt that coordinator PeerId and
+term before routing any subsequent membership-dependent application traffic.
+The advertised coordinator MUST be one of the committed members. This
+same-group authority refresh MUST NOT change the committed member set or
+`membership_version`; it MUST emit the normal `CoordinatorChanged` event when
+the coordinator changes. An equal-or-lower term MUST NOT overwrite current
+authority metadata. If the receiver is the current coordinator and the
+authenticated peer advertises a lower term or different current coordinator,
+the receiver MUST send its current same-group `GROUP_INFO` back on that same
+ordered pairwise link before emitting the transport-ready/current-state
+catch-up signal for that peer. This response lets a process-restarted member
+adopt current authority before any queued application state is admitted; it
+MUST NOT change membership or create a new application-level reconnect role.
+
 Before applying an incoming `GROUP_MERGE`, the runtime MUST verify all of the
 following:
 
@@ -5273,6 +5289,20 @@ Pairwise LPC `MessageId` values are protocol-internal and MUST NOT be substitute
 
 `MemberFound` is emitted only after a bootstrap PeerConnection has authenticated enough to establish the peer's PeerId and SecurityLevel. Raw unauthenticated BLE discovery remains a Runtime-level `EndpointFound` event and MUST NOT be exposed as an authenticated GroupSession MemberFound.
 
+When an authenticated PeerConnection for an already committed member returns
+to READY after reconnect/RESUME, or changes to a new transport generation
+without a committed membership change, the GroupSession MUST emit one
+`GroupTransportChanged` event for that member after the new transport is
+usable. If an application recreates its GroupSession after the authenticated
+transport is already READY, receipt of a same-group `GROUP_INFO` for the
+committed member MUST produce the same event so current-state replication is
+not lost in the process-restart ordering race. The event MUST carry the member
+PeerId, the current transport, and the new transport generation;
+`previousTransport` MAY be absent when the prior transport is not known. This
+event MUST NOT change the committed member set or membership version. It is
+the signal for applications with current-state replication to schedule only
+their latest state/checkpoint catch-up for that peer.
+
 
 ## 32.10 Coordinator Transparency
 
@@ -5771,6 +5801,18 @@ When compatible:
 - inbound frames and application events MUST be dispatched to the correct logical protocol/application consumer according to frame type and ownership. Direct application DATA MUST NOT become GroupSession application delivery merely because the connection is also group-owned, and GroupSession routed frames MUST NOT be surfaced as direct-chat DATA.
 
 A `GroupSession` internally requiring a compatible connection to a peer already connected by a direct/HostSession/known-peer path MUST be able to attach to that connection. GroupSession creation MUST NOT require a duplicate physical BLE link solely to establish GroupSession ownership.
+
+If a fresh authenticated READY connection for the same PeerId and compatible
+security profile is accepted while the previous logical PeerConnection is
+RECONNECTING, the Runtime MUST treat the fresh connection as the replacement
+owner when the previous connection cannot complete RESUME (for example, the
+remote application restarted and no longer has the previous resume state). It
+MUST cancel the old reconnect schedule and expiry timer, close the old logical
+connection, and attach the Runtime's compatible logical owners to the fresh
+connection. The old RECONNECTING connection MUST NOT later expire and remove
+the peer or close the replacement transport. GroupSession routing attached to
+the peer MUST observe the replacement as a new usable transport and preserve
+the committed membership set and version.
 
 ### Incompatible security requirements
 
@@ -8326,6 +8368,9 @@ expected parser result
 - [x] UT-242 A platform disconnect that races Dart binding removal still issues one generation-safe native close and a late echoed disconnect cannot create a close loop.
 - [x] UT-243 A locally peripheral-side PeerConnection remains eligible for bounded automatic RESUME through a fresh discovered central candidate without an application-selected reconnect initiator.
 - [x] UT-244 A native GATT endpoint-busy teardown failure applies bounded known-peer probe backoff so repeated advertisements do not create a probe storm.
+- [x] UT-246 GroupSession emits GroupTransportChanged when a committed member returns READY on a new transport generation without changing membership.
+- [ ] UT-247 A fresh compatible same-PeerId READY connection replaces a RECONNECTING logical owner, cancels its old expiry, and preserves GroupSession ownership.
+- [x] UT-248 An authenticated same-group GROUP_INFO with a higher coordinator term refreshes authority without changing membership version, before application traffic is admitted.
 
 # 55. Mandatory Physical Integration Tests
 

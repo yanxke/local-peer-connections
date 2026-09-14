@@ -1610,6 +1610,17 @@ class DeviceTestController extends ChangeNotifier {
           'current': current.toString(),
           'localIsCoordinator': localIsCoordinator,
         });
+      case GroupTransportChanged(
+        :final peerId,
+        :final currentTransport,
+        :final transportGeneration,
+      ):
+        _record('groupTransportChanged', {
+          ...values,
+          'peerId': peerId.toString(),
+          'currentTransport': currentTransport.name,
+          'transportGeneration': transportGeneration,
+        });
       case ReliableMessageReceived(
         :final sourcePeerId,
         :final groupMessageId,

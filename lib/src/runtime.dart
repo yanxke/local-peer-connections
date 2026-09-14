@@ -2423,6 +2423,14 @@ class NearbyRuntime {
     final routing = _RuntimeGroupRouteTransport(
         group: group,
         peers: () => Set.unmodifiable(_groupPeers[group] ?? const {}),
+        // A process restart can recreate the GroupSession after the
+        // authenticated PeerConnection has already been restored.  In that
+        // ordering the session membership is authoritative, but the
+        // Runtime-owned route-peer cache may still be empty.  Let the route
+        // transport reconcile that cache immediately before it resolves a
+        // hop, rather than making upper layers retry or choose a reconnect
+        // direction.
+        syncPeers: () => _syncGroupPeers(group),
         maxReservedBytesPerDestination: this.config.maxQueuedBytesPerPeer,
         maxReservedMessagesPerDestination: this.config.maxQueuedMessagesPerPeer,
         logger: _log);
@@ -2447,14 +2455,25 @@ class NearbyRuntime {
   }
 
   void _groupMembershipCommitted(GroupSession group, Set<PeerId> memberIds) {
+    _syncGroupPeers(group, memberIds: memberIds);
+  }
+
+  void _syncGroupPeers(GroupSession group, {Set<PeerId>? memberIds}) {
     final previous = _groupPeers[group] ?? <PeerConnection>{};
     final profile = _autoGroupProfile;
+    final committedMemberIds =
+        memberIds ?? group.members.map((member) => member.peerId).toSet();
     final next = _peers
         .where((peer) =>
-            memberIds.contains(peer.peerId) &&
+            committedMemberIds.contains(peer.peerId) &&
             (profile == null || _peerMatchesGroupProfile(peer, profile)))
         .toSet();
     _groupPeers[group] = next;
+    if (previous.length != next.length ||
+        previous.any((peer) => !next.contains(peer))) {
+      _log(
+          'group route peers synchronized group=${_debugId(group.groupId.bytes)} members=${committedMemberIds.join(',')} peers=${next.map((peer) => '${peer.peerId}:${peer.state}').join(',')}');
+    }
     for (final peer in previous.difference(next)) {
       if (!_hasOtherOwner(peer)) unawaited(peer.disconnect());
     }
@@ -2713,6 +2732,35 @@ class NearbyRuntime {
       String? gattEndpointId,
       List<int>? connectionRank,
       List<int> remoteApplicationMetadata = const []}) async {
+    // A process restart cannot present the previous RESUME secret, so the
+    // restarted peer may arrive as a fresh authenticated READY connection
+    // while the old logical owner is still RECONNECTING.  Keep one logical
+    // owner per compatible PeerId: cancel the stale reconnect machinery and
+    // retire that old object before attaching group/host ownership to this
+    // authenticated replacement.  Without this, the old expiry timer can
+    // later disconnect the replacement path and a GroupSession never sees a
+    // usable transport-generation change for current-state catch-up.
+    final reconnecting = _peers
+        .where((peer) =>
+            peer.peerId == core.remotePeerId &&
+            peer.state == PeerConnectionState.reconnecting &&
+            peer.securityLevel == securityLevel)
+        .toList(growable: false);
+    for (final old in reconnecting) {
+      _log(
+          'replacing reconnecting peer=${old.peerId} with fresh authenticated connection');
+      _gattReconnectExpiryTimers.remove(old)?.cancel();
+      _reconnectWaitingForDiscovery.remove(old);
+      _reconnectWaitingSchedules.remove(old)?.cancel();
+      final reconnects = _gattReconnects.entries
+          .where((entry) => identical(entry.value.peer, old))
+          .toList(growable: false);
+      for (final entry in reconnects) {
+        _gattReconnects.remove(entry.key);
+        entry.value.dispose();
+      }
+      await old.disconnect();
+    }
     final duplicate = _peers
         .where((peer) =>
             peer.peerId == core.remotePeerId &&
@@ -2831,9 +2879,7 @@ class NearbyRuntime {
       entry.value.observePeer(peer);
       // Routing can observe a peer before it becomes a committed group
       // member, but only committed membership creates group ownership.
-      if (entry.key.members.any((member) => member.peerId == peer.peerId)) {
-        _groupPeers[entry.key]?.add(peer);
-      }
+      _syncGroupPeers(entry.key);
     }
     if (connectionRank != null) {
       _connectionRanks[peer] = List<int>.unmodifiable(connectionRank);
@@ -2858,6 +2904,7 @@ class _RuntimeGroupRouteTransport
   _RuntimeGroupRouteTransport({
     required this.group,
     required this.peers,
+    required this.syncPeers,
     required this.maxReservedBytesPerDestination,
     required this.maxReservedMessagesPerDestination,
     required this.logger,
@@ -2870,6 +2917,7 @@ class _RuntimeGroupRouteTransport
 
   final GroupSession group;
   final Set<PeerConnection> Function() peers;
+  final void Function() syncPeers;
   final int maxReservedBytesPerDestination;
   final int maxReservedMessagesPerDestination;
   final void Function(String) logger;
@@ -2895,6 +2943,7 @@ class _RuntimeGroupRouteTransport
   final Map<PeerId, CheckpointReplicationQueue> _checkpointQueues = {};
   final Map<int, _CheckpointPublicationData> _checkpointPublications = {};
   final Map<GroupMessageId, SendHandleController> _sourceHandles = {};
+  final Set<PeerId> _sameGroupCatchUpPending = <PeerId>{};
   GroupMemberRouter? _memberRouter;
   GroupCoordinatorRouter? _coordinatorRouter;
   GroupDestinationRouter? _destinationRouter;
@@ -2923,7 +2972,10 @@ class _RuntimeGroupRouteTransport
         unawaited(_onPeerDisconnected(peer));
       }
     });
-    unawaited(_sendGroupInfo(peer));
+    // A fresh normal READY connection for an existing member is the process
+    // restart/replacement path, not only the in-session RESUME path.  Emit
+    // the same current-state catch-up trigger after GROUP_INFO is usable.
+    unawaited(_notifyTransportReady(peer));
     checkpointPeerReady(peer.peerId);
     if (!group.isCoordinator && peer.peerId == group.coordinatorPeerId) {
       unawaited(_rerouteMemberOperations());
@@ -2945,6 +2997,8 @@ class _RuntimeGroupRouteTransport
         final coordinator = group.coordinatorPeerId;
         final peer = coordinator == null ? null : _readyPeer(coordinator);
         if (peer == null) {
+          logger(
+              'group source submit deferred failed: coordinator=$coordinator groupState=${group.state} groupMembers=${group.members.map((member) => member.peerId).join(',')} routePeers=${peers().map((candidate) => '${candidate.peerId}:${candidate.state}').join(',')}');
           controller.complete(SendState.failed);
           _sourceHandles.remove(operation.groupMessageId);
           return;
@@ -2952,7 +3006,9 @@ class _RuntimeGroupRouteTransport
         _member().begin(operation);
         await _submitHop(peer, operation,
             finalHop: false, sourceOperation: operation);
-      } on Object {
+      } on Object catch (error) {
+        logger(
+            'group source submit failed source=${operation.sourcePeerId} destination=${operation.destinationPeerId} message=${_debugId(operation.groupMessageId.bytes)} error=$error');
         controller.complete(SendState.failed);
         _sourceHandles.remove(operation.groupMessageId);
       }
@@ -3246,6 +3302,7 @@ class _RuntimeGroupRouteTransport
       committedMembers: group.members.map((member) => member.peerId).toSet());
 
   PeerConnection? _readyPeer(PeerId peerId) {
+    syncPeers();
     for (final peer in peers()) {
       if (peer.peerId == peerId && peer.state == PeerConnectionState.ready) {
         observePeer(peer);
@@ -3374,7 +3431,44 @@ class _RuntimeGroupRouteTransport
     logger(
         'group info peer=${peer.peerId} localGroup=${_debugId(local.groupId.bytes)} localMembers=${local.members.length} remoteGroup=${_debugId(info.info.groupId.bytes)} remoteMembers=${info.info.members.length} decision=${evaluation.decision} winner=${evaluation.winner == null ? 'none' : _debugId(evaluation.winner!.groupId.bytes)} localCoordinator=${group.isCoordinator}');
     if (evaluation.decision == GroupMergeDecision.sameGroup) {
-      if (_sameMembers(local.members, info.info.members)) return;
+      if (_sameMembers(local.members, info.info.members)) {
+        final remoteCoordinator = info.coordinatorPeerId;
+        if (remoteCoordinator != null &&
+            info.coordinatorTerm > group.coordinatorTerm) {
+          group.adoptCoordinatorAuthority(
+            coordinator: remoteCoordinator,
+            coordinatorTerm: info.coordinatorTerm,
+          );
+          logger(
+              'group same-group authority refreshed peer=${peer.peerId} coordinator=$remoteCoordinator term=${info.coordinatorTerm}');
+        }
+        // A restarted member can send its lower-term GROUP_INFO after the
+        // coordinator has already queued a state catch-up for the newly
+        // READY transport.  Echo the coordinator's current metadata first;
+        // the authenticated peer then adopts the term before the following
+        // state frames are delivered.  This is important on BLE, where a
+        // process restart can recreate the GroupSession after the transport
+        // itself is already usable.
+        if (group.isCoordinator &&
+            (info.coordinatorTerm < group.coordinatorTerm ||
+                info.coordinatorPeerId != group.coordinatorPeerId)) {
+          await _sendGroupInfo(peer);
+        }
+        // A restarted application can create its GroupSession after LPC has
+        // already re-established the authenticated PeerConnection. The
+        // transport itself is READY, but the prior GroupSession did not hear
+        // the initial transport-ready notification. Treat this authenticated
+        // same-group reattachment as another current-state catch-up trigger;
+        // it does not mutate membership or replay historical messages.
+        if (group.members.any((member) => member.peerId == peer.peerId)) {
+          if (group.state == GroupState.ready) {
+            _notifySameGroupCatchUp(peer);
+          } else {
+            _sameGroupCatchUpPending.add(peer.peerId);
+          }
+        }
+        return;
+      }
       // Same-GroupId views are split-brain membership views, not a merge.
       // The coordinator with the newer committed term reconciles the union
       // through MEMBERSHIP_SNAPSHOT (Section 10.10/31.7); a member waits for
@@ -3691,6 +3785,19 @@ class _RuntimeGroupRouteTransport
     final expectedAck = chunk.deliveryMode == DeliveryMode.reliableAcked;
     if ((frame.flags & 1 != 0) != expectedAck) {
       throw const LpcException(LpcErrorCode.protocolMismatch);
+    }
+    // Do not consume a routed application operation while the recreated
+    // GroupSession is still forming.  GroupSession.receiveReliable() is
+    // intentionally a no-op until committed membership is READY; accepting
+    // the pairwise hop first would nevertheless send its ACK and permanently
+    // strand a current-state packet after an app restart.  Leaving the frame
+    // unacknowledged preserves the bounded LPC retry path, which will retry
+    // the same operation after GROUP_INFO/membership bootstrap completes.
+    if (group.state != GroupState.ready ||
+        !group.members.any((member) => member.peerId == peer.peerId)) {
+      logger(
+          'group reliable deferred peer=${peer.peerId} reason=group-not-ready-or-peer-not-committed state=${group.state}');
+      return;
     }
     final complete = _reassemblers[peer]!.add(frame.messageId, chunk);
     if (complete == null) return;
@@ -4011,7 +4118,7 @@ class _RuntimeGroupRouteTransport
     // GROUP_INFO is current-state, not a retained operation. Send it again
     // after every READY generation so a previous handoff race cannot leave
     // a peer with only a pre-merge view.
-    await _sendGroupInfo(peer);
+    await _notifyTransportReady(peer);
     await _retransmitHopsFor(peer);
     await _retransmitCheckpointsFor(peer);
     checkpointPeerReady(peer.peerId);
@@ -4041,6 +4148,20 @@ class _RuntimeGroupRouteTransport
     }
   }
 
+  Future<void> _notifyTransportReady(PeerConnection peer) async {
+    final sent = await _sendGroupInfo(peer);
+    if (!sent || _disposed || peer.state != PeerConnectionState.ready) return;
+    // GroupSession membership can remain committed across a transport loss or
+    // a process-restart replacement. Notify only after the current group
+    // metadata is usable so applications can republish their latest state;
+    // this never creates a new roster/version or chooses a reconnect side.
+    group.notifyTransportChanged(
+      peer.peerId,
+      currentTransport: peer.activeTransport,
+      transportGeneration: peer._core.generation,
+    );
+  }
+
   Future<void> _onPeerDisconnected(PeerConnection peer) async {
     _onPeerLost(peer);
     for (final hop in _checkpointHops.values
@@ -4056,6 +4177,14 @@ class _RuntimeGroupRouteTransport
 
   void _onGroupEvent(GroupEvent event) {
     if (_disposed) return;
+    // GROUP_INFO and the GroupReady event can cross while a freshly recreated
+    // GroupSession is still forming.  Drain on either side of that ordering
+    // so a same-group process restart cannot lose its only current-state
+    // catch-up trigger.
+    if (_sameGroupCatchUpPending.isNotEmpty &&
+        (event is GroupReady || group.state == GroupState.ready)) {
+      _drainSameGroupCatchUpPending();
+    }
     if (event is MemberLeft && group.isCoordinator) {
       final router = _coordinatorRouter;
       if (router != null) {
@@ -4084,6 +4213,36 @@ class _RuntimeGroupRouteTransport
           sends: member.sends,
           tombstones: member.tombstones);
       unawaited(_rerouteMemberOperations());
+    }
+  }
+
+  void _notifySameGroupCatchUp(PeerConnection peer) {
+    if (_disposed || peer.state != PeerConnectionState.ready) return;
+    if (group.state != GroupState.ready) {
+      _sameGroupCatchUpPending.add(peer.peerId);
+      // If GroupReady was emitted just before GROUP_INFO arrived, there will
+      // be no later GroupReady event to drain this entry.  Recheck after the
+      // current event turn as well as from the normal GroupReady path.
+      scheduleMicrotask(_drainSameGroupCatchUpPending);
+      logger(
+          'group same-group reattachment catch-up deferred peer=${peer.peerId}');
+      return;
+    }
+    logger(
+        'group same-group reattachment catch-up peer=${peer.peerId} generation=${peer._core.generation}');
+    group.notifyTransportChanged(
+      peer.peerId,
+      currentTransport: peer.activeTransport,
+      transportGeneration: peer._core.generation,
+    );
+  }
+
+  void _drainSameGroupCatchUpPending() {
+    if (_disposed || group.state != GroupState.ready) return;
+    for (final peer in _frameSubscriptions.keys.toList()) {
+      if (_sameGroupCatchUpPending.remove(peer.peerId)) {
+        _notifySameGroupCatchUp(peer);
+      }
     }
   }
 

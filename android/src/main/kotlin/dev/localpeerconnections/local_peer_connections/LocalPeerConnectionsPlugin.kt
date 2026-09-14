@@ -67,6 +67,11 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
   // be mistaken for a disconnect or fragment from the replacement link.
   private var nextGattGeneration = 1L
   private val gattHandleGenerations = mutableMapOf<String, Long>()
+  // On some Android vendor stacks a central and server GATT session to the
+  // same remote device share one ACL. Closing the redundant central session
+  // immediately can disconnect the server session LPC selected. Park those
+  // client handles until the server link ends, then release them normally.
+  private val deferredCentralCloseEndpoints = mutableSetOf<String>()
   // The Android BluetoothGatt API exposes the negotiated MTU only through
   // onMtuChanged; retain it until the matching service-bound event is emitted.
   private val gattClientMtuByEndpoint = mutableMapOf<String, Int>()
@@ -297,6 +302,22 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
             emitSuccess(mapOf("type" to "gattDisconnected", "endpointId" to endpointId,
               "connectionGeneration" to generation))
           }
+          // A parked duplicate central handle is deliberately not closed
+          // while this server link is alive because both may share the same
+          // vendor ACL. Once the selected server link is gone, it is safe to
+          // release the parked client and allow normal reconnect probing.
+          val deferred = deferredCentralCloseEndpoints.filter { candidate ->
+            gattHandles[candidate]?.device?.address == device.address
+          }
+          for (candidate in deferred) {
+            deferredCentralCloseEndpoints.remove(candidate)
+            val client = gattClients.remove(candidate)
+            val gatt = gattHandles.remove(candidate) ?: client?.gatt
+            gattHandleGenerations.remove(candidate)
+            gattClientMtuByEndpoint.remove(candidate)
+            gatt?.let { closeGattSafely(it) }
+            Log.d(logTag, "released parked redundant central handle endpoint=$candidate address=${device.address}")
+          }
         }
       }
       override fun onCharacteristicWriteRequest(device: BluetoothDevice, requestId: Int,
@@ -436,6 +457,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     gattHandleGenerations.clear()
     gattClientMtuByEndpoint.clear()
     gattClients.clear()
+    deferredCentralCloseEndpoints.clear()
     if (clearRequest) {
       requestedGattService = null
     }
@@ -468,6 +490,18 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
           closeGattSafely(gatt)
           return
         }
+        if (deferredCentralCloseEndpoints.contains(endpointId)) {
+          // The runtime has selected a same-device server link. Do not start
+          // service discovery or emit a second logical connection when this
+          // parked duplicate's asynchronous callback arrives.
+          if (newState == BluetoothProfile.STATE_CONNECTED) {
+            Log.d(logTag, "parked redundant central connected endpoint=$endpointId")
+          } else {
+            deferredCentralCloseEndpoints.remove(endpointId)
+            removeGattHandle(endpointId, gatt)
+          }
+          return
+        }
         if (status != BluetoothGatt.GATT_SUCCESS || newState != BluetoothProfile.STATE_CONNECTED) {
           removeGattHandle(endpointId, gatt)
           // Cancel before close. Older Android stacks otherwise retain a
@@ -493,6 +527,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         }
       }
       override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+        if (deferredCentralCloseEndpoints.contains(endpointId)) return
         Log.d(logTag, "client MTU changed endpoint=$endpointId mtu=$mtu status=$status")
         if (gattHandles[endpointId] != null && gattHandles[endpointId] !== gatt) return
         if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -504,6 +539,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         }
       }
       override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+        if (deferredCentralCloseEndpoints.contains(endpointId)) return
         Log.d(logTag, "client services discovered endpoint=$endpointId status=$status")
         if (gattHandles[endpointId] != null && gattHandles[endpointId] !== gatt) return
         val service = gatt.getService(serviceUuid.uuid) ?: run {
@@ -529,6 +565,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         Log.d(logTag, "client CCCD write requested endpoint=$endpointId")
       }
       override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+        if (deferredCentralCloseEndpoints.contains(endpointId)) return
         Log.d(logTag, "client descriptor written endpoint=$endpointId uuid=${descriptor.uuid} status=$status")
         if (gattHandles[endpointId] != null && gattHandles[endpointId] !== gatt) return
         if (descriptor.uuid != CLIENT_CONFIGURATION_UUID) return
@@ -556,6 +593,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
       }
       override fun onCharacteristicWrite(gatt: BluetoothGatt,
           characteristic: BluetoothGattCharacteristic, status: Int) {
+        if (deferredCentralCloseEndpoints.contains(endpointId)) return
         Log.d(logTag, "client fragment written endpoint=$endpointId uuid=${characteristic.uuid} status=$status")
         if (gattHandles[endpointId] != null && gattHandles[endpointId] !== gatt) return
         if (characteristic.uuid == rxUuid) {
@@ -569,6 +607,7 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         }
       }
       override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+        if (deferredCentralCloseEndpoints.contains(endpointId)) return
         if (gattHandles[endpointId] != null && gattHandles[endpointId] !== gatt) return
         if (characteristic.uuid == txUuid) {
           Log.d(logTag, "client notification endpoint=$endpointId bytes=${characteristic.value?.size ?: 0}")
@@ -655,11 +694,31 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
       Log.d(logTag, "ignore stale close endpoint=$endpointId generation=$requestedGeneration current=$currentGeneration")
       return
     }
-    val client = gattClients.remove(endpointId)
-    val gatt = gattHandles.remove(endpointId) ?: client?.gatt
+    val client = gattClients[endpointId]
+    val gatt = gattHandles[endpointId] ?: client?.gatt
+    val sharesServerLink = gatt?.device?.address?.let { address ->
+      gattServerEndpointByAddress.containsKey(address)
+    } == true
+    if (sharesServerLink) {
+      // Some Android vendor stacks represent simultaneous central/server
+      // connections to one remote device on a shared ACL. Sending
+      // BluetoothGatt.disconnect() (or even closing this handle immediately)
+      // while releasing the losing central candidate can tear down the
+      // server-side link that LPC already selected. Keep this redundant
+      // native handle parked and suppress its callbacks until the server link
+      // ends; at that point closeGattSafely() is safe and reconnect can retry.
+      deferredCentralCloseEndpoints.add(endpointId)
+      Log.d(logTag, "parking redundant central close endpoint=$endpointId address=${gatt.device.address}")
+      return
+    }
+    deferredCentralCloseEndpoints.remove(endpointId)
+    gattClients.remove(endpointId)
+    gattHandles.remove(endpointId)
     gattHandleGenerations.remove(endpointId)
     gattClientMtuByEndpoint.remove(endpointId)
-    gatt?.let { closeGattSafely(it) }
+    gatt?.let {
+      closeGattSafely(it)
+    }
     val serverDevice = gattServerPeers.remove(endpointId)
     gattServerReady.remove(endpointId)
     clearServerNotifications(endpointId)

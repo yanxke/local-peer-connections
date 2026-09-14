@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:math';
 import 'dart:typed_data';
 import 'types.dart';
+import 'backend.dart';
 import 'protocol/checkpoint.dart';
 import 'protocol/checkpoint_publication.dart';
 import 'protocol/group_dedup.dart';
@@ -110,6 +111,15 @@ class CommittedMembershipChanged extends GroupEvent {
   final int version;
   final List<GroupMember> members;
   final Set<PeerId> joined, left;
+}
+
+class GroupTransportChanged extends GroupEvent {
+  GroupTransportChanged(super.sequence, super.at, this.peerId,
+      this.previousTransport, this.currentTransport, this.transportGeneration);
+  final PeerId peerId;
+  final TransportType? previousTransport;
+  final TransportType currentTransport;
+  final int transportGeneration;
 }
 
 typedef CoordinatorCheckpointValidator = FutureOr<bool> Function(
@@ -424,6 +434,28 @@ class GroupSession {
     ..sort((a, b) => _comparePeerIds(a.peerId, b.peerId)));
   int get effectiveMaxPeers =>
       _members.values.map((m) => m.maxPeers).reduce(min);
+
+  /// Notifies applications that an existing committed member is usable again
+  /// on a fresh physical transport generation. This is intentionally separate
+  /// from CommittedMembershipChanged: a reconnect does not alter membership or
+  /// its version, but current-state applications still need a bounded latest
+  /// state/checkpoint catch-up trigger.
+  void notifyTransportChanged(
+    PeerId peerId, {
+    TransportType? previousTransport,
+    required TransportType currentTransport,
+    required int transportGeneration,
+  }) =>
+      _enqueue(() {
+        if (_state != GroupState.ready || !_members.containsKey(peerId)) {
+          return;
+        }
+        if (transportGeneration < 1 || transportGeneration > 0xffffffff) {
+          throw const LpcException(LpcErrorCode.protocolMismatch);
+        }
+        _emit((s, a) => GroupTransportChanged(s, a, peerId, previousTransport,
+            currentTransport, transportGeneration));
+      });
   Uint8List? latestCoordinatorCheckpoint() =>
       _latestCoordinatorCheckpoint == null
           ? null
@@ -855,6 +887,41 @@ class GroupSession {
     }
   }
 
+  /// Backend/core hook for an authenticated same-group authority refresh.
+  /// Recreated sessions can start with the singleton's provisional term while
+  /// the already-committed group is at a newer term.  Updating only authority
+  /// metadata keeps membershipVersion stable and prevents application packets
+  /// from being rejected as stale after process restart.
+  void adoptCoordinatorAuthority({
+    required PeerId coordinator,
+    required int coordinatorTerm,
+  }) =>
+      _enqueue(() {
+        if (_state == GroupState.closed || coordinatorTerm <= _coordinatorTerm)
+          return;
+        if (!_members.containsKey(coordinator)) {
+          throw const LpcException(LpcErrorCode.protocolMismatch);
+        }
+        final previous = _coordinator;
+        _coordinator = coordinator;
+        _coordinatorTerm = coordinatorTerm;
+        if (previous == _localPeerId && coordinator != _localPeerId) {
+          checkpointAuthorityLost();
+          _checkpointTransport(_routeTransport)?.checkpointAuthorityLost();
+        }
+        if (previous != coordinator) {
+          _emit((s, a) => CoordinatorChanged(
+              s,
+              a,
+              previous,
+              coordinator,
+              isCoordinator,
+              _coordinatorTerm,
+              _membershipVersion,
+              _latestCoordinatorCheckpoint));
+        }
+      });
+
   /// Backend/core hook for a committed nonterminal group error. The event is
   /// serialized with all other GroupSession callbacks and does not mutate
   /// group membership or public send state.
@@ -898,6 +965,15 @@ class GroupSession {
           _members.remove(id);
           checkpointPeerLeft(id);
           _emit((s, a) => MemberLeft(s, a, id));
+        }
+        // MEMBERSHIP_SNAPSHOT is authoritative for the complete member
+        // records, not only for the PeerId set.  Replacing existing records
+        // is essential when a peer learned a different maxPeers value during
+        // bootstrap: retaining the old record makes GROUP_INFO appear split
+        // forever, which causes reconciliation terms and snapshots to churn
+        // and starves application traffic with stale coordinator terms.
+        for (final entry in next.entries) {
+          _members[entry.key] = entry.value;
         }
         final previous = _coordinator;
         _coordinator = coordinator;
