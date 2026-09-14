@@ -535,6 +535,16 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
         if (status != BluetoothGatt.GATT_SUCCESS) {
           rejectGatt(endpointId, gatt, "LPC TX subscription failed"); return
         }
+        // Android can deliver a duplicate descriptor callback while a stale
+        // reconnect candidate is closing. Publish one gattConnected event per
+        // native link; two events for one endpoint would create concurrent
+        // handshakes and make the second READY look like application data.
+        val client = gattClients[endpointId]
+        if (client?.connectedEmitted == true) {
+          Log.w(logTag, "duplicate client connected callback ignored endpoint=$endpointId generation=$generation")
+          return
+        }
+        if (client != null) client.connectedEmitted = true
         // See the peripheral-side explanation above: MTU - 3 may be 514,
         // but Android's characteristic API rejects a 514-byte value.
         val platformSafeWriteSize =
@@ -896,7 +906,8 @@ class LocalPeerConnectionsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     val rx: BluetoothGattCharacteristic,
     val tx: BluetoothGattCharacteristic,
     val control: BluetoothGattCharacteristic,
-    var writeInFlight: Boolean = false
+    var writeInFlight: Boolean = false,
+    var connectedEmitted: Boolean = false
   )
 
   private fun loadOrCreateSeed(): ByteArray {

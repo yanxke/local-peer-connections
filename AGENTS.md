@@ -248,3 +248,63 @@ When fixing bugs in the implementation or when there are platform (Android/iOS/B
 Deployments on iOS could take a while to complete.
 
 Applications should not be hot restarted because it can cause duplicate endpoints.
+
+## Platform deployment and physical-test caveats
+
+These are operational rules for deploying and testing the bindings. They do not
+change LPC wire semantics or replace the normative requirements in the spec.
+
+- Preserve the installed application and its data during automated physical
+  testing. Do not uninstall, clear application data, reboot a test device, or
+  hot restart the app unless the test explicitly requires a clean environment
+  and a person is available to approve permissions again. A fresh install can
+  require manual Bluetooth, Keychain, and automation approvals and can make
+  the test run appear to be a connection failure.
+- On Android, prefer an in-place debug update, for example
+  `adb -s <serial> install -r build/app/outputs/flutter-apk/app-debug.apk`,
+  then relaunch the package if the update stopped it. Preserve the existing
+  `adb reverse`/forward control-port setup. A runtime reset means stopping and
+  starting LPC presence and sessions; it is not an uninstall or device reboot.
+- On iOS, allow extra time for `flutter run` and CoreDevice. If installation
+  or launch is stuck, inspect for stale `flutter`, `devicectl`, or
+  `Runner.app` processes and terminate only the stale deployment/Runner
+  process before retrying. `ps aux | rg 'flutter run|devicectl|Runner.app|iproxy'`
+  is sufficient to identify candidates; use the matching device and process
+  ID with `xcrun devicectl device process terminate` when necessary. Do not
+  reboot the device or broadly kill the CoreDevice service. Keep the `iproxy`
+  control-port forward alive. If Flutter reports an Automation permission
+  request, approve it in macOS Settings.
+  An in-place `xcrun devicectl device install app` followed by
+  `xcrun devicectl device process launch` is a useful fallback when Flutter's
+  deploy wrapper is the stale process.
+- On macOS, build with `flutter build macos --debug` and keep the application
+  open while the user approves the LPC identity's Keychain access. Prefer
+  “Always Allow” for the test identity. A pending Keychain dialog can leave
+  the control API up while the runtime is not ready; that is an authorization
+  wait, not evidence that Bluetooth discovery failed. Do not bypass the
+  prompt by returning success from a permission channel or by moving platform
+  authorization into a mobile-only path. Keychain seed access must stay off
+  the Flutter main thread so the control API and permission UI remain
+  responsive.
+- Do not start a second Flutter launch session over an already-running app,
+  and do not stop a successful deployment session merely to inspect it. A
+  stale launch wrapper can outlive Ctrl-C and continue holding CoreDevice or
+  the app process; clean up that specific wrapper/Runner process before the
+  next deployment.
+- If a macOS/iOS run reports `MissingPluginException` for
+  `loadOrCreateEd25519Seed`, verify that the platform plugin implementation is
+  included in the current build and rebuild/relaunch in place. Do not mask the
+  missing registration or a pending Keychain authorization with a fake seed or
+  a successful no-op.
+- When a run stalls, collect the LPC diagnostics and native BLE/GATT logs
+  before changing the environment. In particular, repeated Android
+  `ENDPOINT_BUSY` errors indicate a stale/duplicate GATT client link; fix the
+  teardown/duplicate-callback or bounded probe backoff, rather than starting
+  an unbounded retry loop. Automatic known-peer probes must remain bounded and
+  must not starve an application reconnect.
+- For each physical multi-device run, record device roles, start/end times,
+  connection/reconnection events, message counts, bytes per second, and loss.
+  Save failure evidence for stalls or unstable links. Clean up all
+  test-created sessions/games through the harness UI on every participating
+  device before the next scenario so persisted state does not contaminate
+  discovery or reconnect tests.

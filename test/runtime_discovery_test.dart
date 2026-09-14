@@ -863,6 +863,52 @@ void main() {
     await runtime.close();
   });
 
+  test('UT-244 busy native GATT probe backs off while endpoint closes',
+      () async {
+    const methods = MethodChannel('runtime-known-probe-busy-backoff-test');
+    final events = StreamController<PlatformBleEvent>();
+    final runtimeEvents = <RuntimeEvent>[];
+    var connects = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'connectGatt') {
+        connects++;
+        throw PlatformException(
+          code: 'ENDPOINT_BUSY',
+          message: 'GATT endpoint already has a client link',
+        );
+      }
+      return null;
+    });
+    final runtime = await createRuntime(
+      config: RuntimeConfig(
+        autoConnectKnownPeers: true,
+        knownPeerResolver: _KnownPeerResolver(),
+      ),
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(
+        methods: methods,
+        eventStream: events.stream,
+      ),
+    );
+    final subscription = runtime.events.listen(runtimeEvents.add);
+    final discovery = await runtime.startDiscovery();
+    events.add(const PlatformEndpointFound('busy-endpoint', rssi: -40));
+    await _waitUntil(
+        () => runtimeEvents.whereType<KnownPeerProbeFailed>().isNotEmpty);
+    for (var index = 0; index < 20; index++) {
+      events.add(const PlatformEndpointFound('busy-endpoint', rssi: -41));
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(connects, 1);
+    expect(runtimeEvents.whereType<KnownPeerProbeStarted>(), hasLength(1));
+
+    await subscription.cancel();
+    await discovery.stop();
+    await runtime.close();
+    await events.close();
+  });
+
   test('UT-171 HostSession validates credentials for its trust-mode override',
       () async {
     final runtime = await createRuntime(

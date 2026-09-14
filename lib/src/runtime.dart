@@ -750,10 +750,17 @@ void _validateTrustCredentialsFor(
 }
 
 class _GattReconnect {
-  _GattReconnect(this.peer, this.endpointId, this.schedule);
+  _GattReconnect(this.peer, this.endpointId, this.schedule,
+      {this.discoveryCandidate = false});
   final PeerConnection peer;
   final String endpointId;
   final ReconnectSchedule schedule;
+  // A discovery candidate is a fresh endpoint observed while the last
+  // authenticated link was locally peripheral-side. It is not the endpoint
+  // being retried by the normal central-side schedule, so a failed candidate
+  // must be released and rediscovered later instead of being retried forever
+  // against a possibly unrelated nearby device.
+  final bool discoveryCandidate;
   Timer? timer;
   // A keepalive/protocol failure can move the logical peer to RECONNECTING
   // before the native central has released its old client handle.  Serialize
@@ -859,6 +866,23 @@ class NearbyRuntime {
   final Set<String> _closingGattEndpoints = <String>{};
   final Map<String, Future<void>> _gattCloseOperations =
       <String, Future<void>>{};
+  // A native close can cause a delayed disconnect callback on both sides of
+  // the physical link. Remember that the current generation has already had
+  // its idempotent native close requested so a late echoed callback cannot
+  // start a close ping-pong between two runtimes.
+  final Set<String> _nativeCloseRequestedEndpoints = <String>{};
+  static const _maxNativeCloseGuards = 256;
+
+  void _rememberNativeCloseRequested(String endpointId,
+      {int? connectionGeneration}) {
+    _nativeCloseRequestedEndpoints
+        .add('$endpointId:${connectionGeneration ?? 'unknown'}');
+    while (_nativeCloseRequestedEndpoints.length > _maxNativeCloseGuards) {
+      _nativeCloseRequestedEndpoints
+          .remove(_nativeCloseRequestedEndpoints.first);
+    }
+  }
+
   // Android can deliver more than one readiness callback for a physical GATT
   // link (for example, repeated CCCD writes).  Serialize handshake startup
   // per endpoint so a duplicate platform event cannot replace the first
@@ -869,6 +893,13 @@ class NearbyRuntime {
   final Map<PeerConnection, Timer> _gattReconnectExpiryTimers = {};
   final Map<PeerConnection, Timer> _unknownPeerReleaseTimers = {};
   final Map<PeerConnection, _GattLink> _gattLinks = {};
+  // A peripheral-side link has no local connectable endpoint. Keep the
+  // logical peer eligible while the shared scan is running so either device
+  // can produce the next physical candidate; upper layers never choose a
+  // reconnect initiator.
+  final Set<PeerConnection> _reconnectWaitingForDiscovery = <PeerConnection>{};
+  final Map<PeerConnection, ReconnectSchedule> _reconnectWaitingSchedules =
+      <PeerConnection, ReconnectSchedule>{};
   final Map<PeerConnection, List<int>> _connectionRanks = {};
   final Set<PeerConnection> _peers = <PeerConnection>{};
   final Set<PeerId> _directRetainedPeers = <PeerId>{};
@@ -876,6 +907,13 @@ class NearbyRuntime {
   final Set<String> _automaticProbeEndpoints = <String>{};
   final Set<String> _pendingKnownPeerProbes = <String>{};
   final Map<String, Timer> _knownPeerProbeTimers = <String, Timer>{};
+  // A winning READY owner can race a probe started from another transient
+  // platform endpoint for the same peer. Keep that endpoint suppressed while
+  // the logical owner is usable. This is separate from _gattPeersByEndpoint:
+  // the observed discovery endpoint is not necessarily the endpoint that
+  // delivered the winning inbound connection.
+  final Map<String, PeerConnection> _knownProbeSuppressedByOwner =
+      <String, PeerConnection>{};
   // A failed native probe can be reported while the endpoint is still
   // advertising. Do not start another GATT allocation on every advertisement
   // (Android vendor stacks can otherwise exhaust their native TCB table).
@@ -1088,6 +1126,7 @@ class NearbyRuntime {
         _log(
             'endpoint found endpoint=${event.endpointId} rssi=${event.rssi} name=${event.localName == null ? 'none' : 'present'}');
       }
+      _scheduleReconnectProbe(event.endpointId);
       _scheduleKnownPeerProbe(event.endpointId);
       return;
     }
@@ -1099,6 +1138,7 @@ class NearbyRuntime {
             'gatt disconnected ignored stale generation endpoint=${event.endpointId} eventGeneration=${event.connectionGeneration} currentGeneration=${binding.connectionGeneration}');
         return;
       }
+      final reconnect = _gattReconnects[event.endpointId];
       _log(
           'gatt disconnected endpoint=${event.endpointId} generation=${event.connectionGeneration} status=${event.status ?? 'none'} hasBinding=${_gattBindings.containsKey(event.endpointId)} hasAttempt=${_attempts.containsKey(event.endpointId)}');
       // A duplicate READY candidate can be closed by the remote runtime while
@@ -1116,7 +1156,18 @@ class NearbyRuntime {
       // connection-scoped binding was already replaced by a duplicate probe.
       _gattPeersByEndpoint[event.endpointId]?._platformTransportLost();
       _startingGattEndpoints.remove(event.endpointId);
-      unawaited(_closeGattBinding(event.endpointId));
+      final closeKey =
+          '${event.endpointId}:${event.connectionGeneration ?? 'unknown'}';
+      final closeAlreadyRequested =
+          _nativeCloseRequestedEndpoints.contains(closeKey) ||
+              (event.connectionGeneration == null &&
+                  !_gattBindings.containsKey(event.endpointId) &&
+                  _nativeCloseRequestedEndpoints
+                      .any((key) => key.startsWith('${event.endpointId}:')));
+      if (!closeAlreadyRequested) {
+        unawaited(_closeGattBinding(event.endpointId,
+            connectionGeneration: event.connectionGeneration));
+      }
       _connectionAttemptTimers.remove(event.endpointId)?.cancel();
       final attempt = _attempts.remove(event.endpointId);
       if (attempt != null && !automaticHandshakeDisconnect) {
@@ -1129,9 +1180,20 @@ class NearbyRuntime {
           _startNextKnownPeerProbe();
         }
       }
+      // A reconnect candidate can fail before the RESUME handshake starts, so
+      // there may be no ConnectionAttempt to report the transport loss. Feed
+      // that native callback into the same bounded reconnect schedule instead
+      // of leaving it permanently marked as attempting.
+      if (reconnect != null &&
+          reconnect.attempting &&
+          !automaticHandshakeDisconnect) {
+        _reconnectAttemptFailed(reconnect);
+      }
       return;
     }
     if (event is! PlatformGattConnected) return;
+    _nativeCloseRequestedEndpoints
+        .removeWhere((key) => key.startsWith('${event.endpointId}:'));
     _log(
         'gatt connected endpoint=${event.endpointId} role=${event.localRole} writeSize=${event.platformSafeWriteSize} reconnect=${_gattReconnects[event.endpointId] != null}');
     final reconnect = _gattReconnects[event.endpointId];
@@ -1189,11 +1251,13 @@ class NearbyRuntime {
   /// stops Dart from consuming callbacks; it does not release the native GATT
   /// client.  This distinction matters when a reconnect candidate is still
   /// handshaking while the logical reconnect deadline expires.
-  Future<void> _closeGattBinding(String endpointId) {
+  Future<void> _closeGattBinding(String endpointId,
+      {int? connectionGeneration}) {
     final existing = _gattCloseOperations[endpointId];
     if (existing != null) return existing;
     _closingGattEndpoints.add(endpointId);
-    final cleanup = _performGattBindingClose(endpointId);
+    final cleanup = _performGattBindingClose(endpointId,
+        connectionGeneration: connectionGeneration);
     _gattCloseOperations[endpointId] = cleanup;
     unawaited(cleanup.then<void>((_) {
       if (_gattCloseOperations[endpointId] == cleanup) {
@@ -1204,12 +1268,29 @@ class NearbyRuntime {
     return cleanup;
   }
 
-  Future<void> _performGattBindingClose(String endpointId) async {
+  Future<void> _performGattBindingClose(String endpointId,
+      {int? connectionGeneration}) async {
     final binding = _gattBindings.remove(endpointId);
-    if (binding == null) return;
+    final generation = connectionGeneration ?? binding?.connectionGeneration;
+    final closeKey = '$endpointId:${generation ?? 'unknown'}';
+    if (_nativeCloseRequestedEndpoints.contains(closeKey)) return;
+    _rememberNativeCloseRequested(endpointId, connectionGeneration: generation);
     try {
-      await binding.close();
-      await binding.connection.close();
+      if (binding != null) {
+        await binding.close();
+        await binding.connection.close();
+      } else {
+        // The platform callback can race the handshake/binding cleanup and
+        // remove the Dart binding first. Native client/server objects are
+        // still independently owned by the plugin in that case. An
+        // idempotent close is required to release Android BluetoothGatt
+        // handles that otherwise make the next connectGatt return
+        // ENDPOINT_BUSY. The native implementations also use the generation
+        // guard where the platform exposes one, so this cannot close a newer
+        // replacement generation accidentally.
+        await _platformBleBackend?.closeGattConnection(endpointId,
+            connectionGeneration: generation);
+      }
     } on Object catch (error) {
       _log(
           'GATT binding transport close failed endpoint=$endpointId error=$error');
@@ -1276,7 +1357,10 @@ class NearbyRuntime {
               backend: backend,
               endpointId: event.endpointId,
               platformSafeWriteSize: event.platformSafeWriteSize,
-              connectionGeneration: event.connectionGeneration),
+              connectionGeneration: event.connectionGeneration,
+              onCloseRequested: () => _rememberNativeCloseRequested(
+                  event.endpointId,
+                  connectionGeneration: event.connectionGeneration)),
           localRole: event.localRole == 'central'
               ? GattLinkRole.central
               : GattLinkRole.peripheral,
@@ -1427,16 +1511,11 @@ class NearbyRuntime {
       _attempts.remove(event.endpointId);
       attempt._failed(lpcError);
       try {
-        await _gattBindings.remove(event.endpointId)?.close();
+        await _closeGattBinding(event.endpointId,
+            connectionGeneration: event.connectionGeneration);
       } on Object catch (cleanupError) {
         _log(
             'handshake binding cleanup failed endpoint=${event.endpointId} error=$cleanupError');
-      }
-      try {
-        await backend.closeGattConnection(event.endpointId);
-      } on Object catch (cleanupError) {
-        _log(
-            'handshake platform close failed endpoint=${event.endpointId} error=$cleanupError');
       }
       if (_automaticProbeEndpoints.remove(event.endpointId)) {
         _startNextKnownPeerProbe();
@@ -1445,6 +1524,14 @@ class NearbyRuntime {
   }
 
   void _scheduleKnownPeerProbe(String endpointId) {
+    final suppressedOwner = _knownProbeSuppressedByOwner[endpointId];
+    if (suppressedOwner != null) {
+      if (suppressedOwner.state == PeerConnectionState.ready ||
+          suppressedOwner.state == PeerConnectionState.reconnecting) {
+        return;
+      }
+      _knownProbeSuppressedByOwner.remove(endpointId);
+    }
     final notBefore = _knownPeerProbeNotBeforeMs[endpointId];
     if (notBefore != null && _monotonicMs < notBefore) {
       return;
@@ -1452,6 +1539,7 @@ class NearbyRuntime {
     final existingPeer = _gattPeersByEndpoint[endpointId];
     if (!config.autoConnectKnownPeers ||
         _closingGattEndpoints.contains(endpointId) ||
+        _gattReconnects.containsKey(endpointId) ||
         (existingPeer != null &&
             (existingPeer.state == PeerConnectionState.ready ||
                 existingPeer.state == PeerConnectionState.reconnecting)) ||
@@ -1471,6 +1559,63 @@ class NearbyRuntime {
       return;
     }
     _startKnownPeerProbe(endpointId);
+  }
+
+  /// Starts a fresh central candidate for a logical peer whose previous link
+  /// was locally peripheral-side. The endpoint is only an observation from
+  /// the shared BLE scan; its identity is established by the candidate HELLO
+  /// and Section 26 proof, never by a platform identifier. Keep one such
+  /// candidate at a time per reconnecting peer so nearby devices cannot create
+  /// an unbounded set of physical links.
+  void _scheduleReconnectProbe(String endpointId) {
+    final mappedPeer = _gattPeersByEndpoint[endpointId];
+    final mappedReady = mappedPeer?.state == PeerConnectionState.ready;
+    final mappedReconnecting =
+        mappedPeer?.state == PeerConnectionState.reconnecting;
+    if (!config.autoReconnect ||
+        _state != RuntimeState.ready ||
+        _closingGattEndpoints.contains(endpointId) ||
+        _gattReconnects.containsKey(endpointId) ||
+        (mappedReady && !mappedReconnecting) ||
+        (mappedPeer != null &&
+            !mappedReconnecting &&
+            !_reconnectWaitingForDiscovery.contains(mappedPeer))) {
+      return;
+    }
+    final notBefore = _knownPeerProbeNotBeforeMs[endpointId];
+    if (notBefore != null && _monotonicMs < notBefore) return;
+    final peer = _reconnectWaitingForDiscovery
+        .where((candidate) =>
+            candidate.state == PeerConnectionState.reconnecting &&
+            !_gattReconnects.values
+                .any((reconnect) => identical(reconnect.peer, candidate)))
+        .firstOrNull;
+    if (peer == null) return;
+    final schedule = _reconnectWaitingSchedules[peer];
+    if (schedule == null ||
+        schedule.expiredAt(peer._core.monotonicNowMs) ||
+        !schedule.attemptDue(peer._core.monotonicNowMs)) {
+      return;
+    }
+    final backend = _platformBleBackend;
+    if (backend == null) return;
+
+    final reconnect =
+        _GattReconnect(peer, endpointId, schedule, discoveryCandidate: true)
+          ..attempting = true
+          ..staleGenerationCleanupComplete = true;
+    _gattReconnects[endpointId] = reconnect;
+    _log(
+        'reconnect discovery candidate endpoint=$endpointId peer=${peer.peerId} timeoutMs=${config.reconnectTimeoutMs}');
+    unawaited(() async {
+      try {
+        await backend.connectGatt(endpointId);
+      } on Object catch (error) {
+        _log(
+            'reconnect discovery candidate failed endpoint=$endpointId peer=${peer.peerId} error=$error');
+        _reconnectAttemptFailed(reconnect);
+      }
+    }());
   }
 
   void _startKnownPeerProbe(String endpointId) {
@@ -1522,10 +1667,22 @@ class NearbyRuntime {
     }
   }
 
-  bool _shouldBackoffKnownPeerProbe(LpcException error) =>
-      error.code == LpcErrorCode.endpointLost ||
-      error.code == LpcErrorCode.transportClosed ||
-      error.code == LpcErrorCode.connectionTimeout;
+  bool _shouldBackoffKnownPeerProbe(LpcException error) {
+    if (error.code == LpcErrorCode.endpointLost ||
+        error.code == LpcErrorCode.transportClosed ||
+        error.code == LpcErrorCode.connectionTimeout) {
+      return true;
+    }
+    // Android and some vendor BLE stacks can report a locally closing GATT
+    // object as an immediate platform error ("endpoint already has a client
+    // link"). Discovery continues during that short native teardown window;
+    // without the same bounded backoff used for transport failures, each
+    // advertisement starts another probe and starves the real reconnect.
+    return error.code == LpcErrorCode.platformError &&
+        error.message
+            .toLowerCase()
+            .contains('endpoint already has a client link');
+  }
 
   void _deferKnownPeerProbe(String endpointId) {
     _knownPeerProbeNotBeforeMs[endpointId] =
@@ -1548,7 +1705,10 @@ class NearbyRuntime {
   /// not a second representation of that peer. Stop those probes here; the
   /// dedicated logical reconnect scheduler remains independent and resumes
   /// after the READY peer enters RECONNECTING.
-  void _cancelCompetingKnownPeerProbes({String? exceptEndpointId}) {
+  void _cancelCompetingKnownPeerProbes({
+    String? exceptEndpointId,
+    PeerConnection? owner,
+  }) {
     final endpointIds = _automaticProbeEndpoints
         .where((endpointId) => endpointId != exceptEndpointId)
         .toList(growable: false);
@@ -1558,6 +1718,16 @@ class NearbyRuntime {
       _connectionAttemptTimers.remove(endpointId)?.cancel();
       final attempt = _attempts.remove(endpointId);
       if (attempt != null) unawaited(attempt.cancel().catchError((_) {}));
+      // Cancelling the Dart ConnectionAttempt alone is not sufficient once
+      // the platform has already delivered GATT_CONNECTED.  In that race
+      // the candidate handshake owns a live binding, while Android can keep
+      // the native client handle reserved until that binding is explicitly
+      // closed.  Leaving it alive causes the next automatic probe to loop on
+      // ENDPOINT_BUSY and can tear down the otherwise healthy inbound link.
+      // Close the candidate binding as part of the same duplicate-link
+      // arbitration; the generation guard makes late callbacks harmless.
+      unawaited(_closeGattBinding(endpointId));
+      if (owner != null) _knownProbeSuppressedByOwner[endpointId] = owner;
       _log('known probe cancelled as competing endpoint=$endpointId');
     }
     _pendingKnownPeerProbes.clear();
@@ -1770,6 +1940,7 @@ class NearbyRuntime {
         resumedBackend: connection);
     _log(
         'inbound resume state ready endpoint=${event.endpointId} peer=${peer.peerId}');
+    _finishGattResume(peer, event.endpointId);
     _gattReconnectExpiryTimers.remove(peer)?.cancel();
     try {
       await Future.wait<void>([
@@ -1795,19 +1966,10 @@ class NearbyRuntime {
     }
     _gattLinks[peer] =
         _GattLink(event.endpointId, event.localRole == 'central');
+    _reconnectWaitingForDiscovery.remove(peer);
+    _reconnectWaitingSchedules.remove(peer);
     if (previousEndpoint != null && previousEndpoint != event.endpointId) {
       await _gattBindings.remove(previousEndpoint)?.close();
-    }
-    _GattReconnect? reconnect;
-    for (final value in _gattReconnects.values) {
-      if (identical(value.peer, peer)) {
-        reconnect = value;
-        break;
-      }
-    }
-    if (reconnect != null) {
-      _gattReconnects.remove(reconnect.endpointId);
-      reconnect.dispose();
     }
     // RESUME completed a new physical generation. The expiry timer belongs
     // only to the failed generation; leaving it armed would disconnect this
@@ -1822,11 +1984,19 @@ class NearbyRuntime {
       return;
     }
     final link = _gattLinks[peer];
-    // An inbound peripheral-side link exposes the remote central identifier,
-    // not a discovery endpoint.  The remote central owns the next attempt.
+    // An inbound peripheral-side link exposes no local connectable endpoint.
+    // Keep recovery active and let the shared scanner supply a fresh
+    // candidate. This is deliberately symmetric: the runtime does not make
+    // Android, iOS, or an LPGE layer the permanent reconnect initiator.
     if (link == null || !link.localCanInitiateReconnect) {
+      _reconnectWaitingForDiscovery.add(peer);
+      _reconnectWaitingSchedules.putIfAbsent(
+          peer,
+          () => ReconnectSchedule(
+              startedAtMs: peer._core.monotonicNowMs,
+              timeoutMs: config.reconnectTimeoutMs));
       _log(
-          'reconnect not scheduled peer=${peer.peerId} reason=${link == null ? 'no-gatt-link' : 'remote-initiates'}');
+          'reconnect awaiting discovery peer=${peer.peerId} reason=${link == null ? 'no-gatt-link' : 'local-peripheral'}');
       return;
     }
     final endpointId = link.endpointId;
@@ -1937,6 +2107,7 @@ class NearbyRuntime {
       await binding.close();
       await binding.connection.close();
     } else {
+      _rememberNativeCloseRequested(endpointId);
       await _platformBleBackend?.closeGattConnection(endpointId);
     }
     _log(
@@ -1949,11 +2120,45 @@ class NearbyRuntime {
       return;
     }
     reconnect.attempting = false;
+    if (reconnect.discoveryCandidate) {
+      // A scanned endpoint is not known to belong to this PeerId until the
+      // candidate handshake authenticates it. Do not keep retrying the same
+      // nearby endpoint at the reconnect timer rate after a failed identity
+      // or transport attempt; wait for a later advertisement instead.
+      _gattReconnects.remove(reconnect.endpointId);
+      final nowMs = reconnect.peer._core.monotonicNowMs;
+      if (reconnect.schedule.attemptDue(nowMs)) {
+        reconnect.schedule.attemptFailed(nowMs);
+      }
+      reconnect.dispose();
+      _deferKnownPeerProbe(reconnect.endpointId);
+      _log(
+          'reconnect discovery candidate released endpoint=${reconnect.endpointId} peer=${reconnect.peer.peerId}');
+      return;
+    }
     _log(
         'reconnect attempt failed endpoint=${reconnect.endpointId} peer=${reconnect.peer.peerId}');
     final nowMs = reconnect.peer._core.monotonicNowMs;
     if (reconnect.schedule.attemptDue(nowMs)) {
       reconnect.schedule.attemptFailed(nowMs);
+    }
+  }
+
+  void _finishGattResume(PeerConnection peer, String retainedEndpointId) {
+    _reconnectWaitingForDiscovery.remove(peer);
+    _reconnectWaitingSchedules.remove(peer);
+    final candidates = _gattReconnects.entries
+        .where((entry) => identical(entry.value.peer, peer))
+        .toList(growable: false);
+    for (final entry in candidates) {
+      _gattReconnects.remove(entry.key);
+      entry.value.dispose();
+      if (entry.key != retainedEndpointId) {
+        // Another candidate may have reached native connected or even begun
+        // candidate RESUME before this one won. Close that physical link so
+        // its task cannot later race the already READY logical session.
+        unawaited(_closeGattBinding(entry.key));
+      }
     }
   }
 
@@ -1993,7 +2198,10 @@ class NearbyRuntime {
               backend: backend,
               endpointId: event.endpointId,
               platformSafeWriteSize: event.platformSafeWriteSize,
-              connectionGeneration: event.connectionGeneration),
+              connectionGeneration: event.connectionGeneration,
+              onCloseRequested: () => _rememberNativeCloseRequested(
+                  event.endpointId,
+                  connectionGeneration: event.connectionGeneration)),
           localRole: event.localRole == 'central'
               ? GattLinkRole.central
               : GattLinkRole.peripheral,
@@ -2070,6 +2278,7 @@ class NearbyRuntime {
           resumedBackend: connection);
       _log(
           'resume state ready endpoint=${event.endpointId} peer=${peer.peerId}');
+      _finishGattResume(peer, event.endpointId);
       // RESUME commits the logical state before replay. Replay is best-effort
       // transport work and must not hold the reconnect watchdog hostage when
       // a native write future stalls during a flaky handoff.
@@ -2097,6 +2306,8 @@ class NearbyRuntime {
       }
       _gattLinks[peer] =
           _GattLink(event.endpointId, event.localRole == 'central');
+      _reconnectWaitingForDiscovery.remove(peer);
+      _reconnectWaitingSchedules.remove(peer);
       _gattPeersByEndpoint[event.endpointId] = peer;
       if (previousEndpoint != null && previousEndpoint != event.endpointId) {
         if (_gattPeersByEndpoint[previousEndpoint] == peer) {
@@ -2104,22 +2315,16 @@ class NearbyRuntime {
         }
         await _gattBindings.remove(previousEndpoint)?.close();
       }
-      _gattReconnects.remove(event.endpointId);
       reconnect.dispose();
     } on Object catch (error) {
       _log(
           'resume failed endpoint=${event.endpointId} peer=${peer.peerId} error=$error');
       try {
-        await _gattBindings.remove(event.endpointId)?.close();
+        await _closeGattBinding(event.endpointId,
+            connectionGeneration: event.connectionGeneration);
       } on Object catch (cleanupError) {
         _log(
             'resume binding cleanup failed endpoint=${event.endpointId} error=$cleanupError');
-      }
-      try {
-        await backend.closeGattConnection(event.endpointId);
-      } on Object catch (cleanupError) {
-        _log(
-            'resume platform close failed endpoint=${event.endpointId} error=$cleanupError');
       }
       _reconnectAttemptFailed(reconnect);
     }
@@ -2567,6 +2772,9 @@ class NearbyRuntime {
           'peer disconnected peer=${core.remotePeerId} endpoint=${gattEndpointId ?? 'none'}');
       _peers.remove(peer);
       _connectionRanks.remove(peer);
+      _reconnectWaitingForDiscovery.remove(peer);
+      _reconnectWaitingSchedules.remove(peer);
+      _knownProbeSuppressedByOwner.removeWhere((_, owner) => owner == peer);
       _unknownPeerReleaseTimers.remove(peer)?.cancel();
       final link = _gattLinks.remove(peer);
       final endpointId = link?.endpointId ?? gattEndpointId;
@@ -2607,7 +2815,10 @@ class NearbyRuntime {
     // tear down this owner (notably during Android/iOS scan/connect races).
     // Reconnects are tracked separately by _gattReconnects and are not
     // cancelled by this cleanup.
-    _cancelCompetingKnownPeerProbes(exceptEndpointId: gattEndpointId);
+    _cancelCompetingKnownPeerProbes(
+      exceptEndpointId: gattEndpointId,
+      owner: peer,
+    );
     final gattRole = core.backend is GattBackendConnection
         ? (core.backend as GattBackendConnection).localRole?.name
         : null;

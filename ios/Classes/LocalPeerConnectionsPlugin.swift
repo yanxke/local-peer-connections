@@ -31,6 +31,13 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   private var central: CBCentralManager!
   private var peripheral: CBPeripheralManager!
   private var eventSink: FlutterEventSink?
+  // Keychain access can display a macOS authorization prompt and can block
+  // inside Security.framework until that prompt is answered. Never perform
+  // identity storage on Flutter's main thread: a pending prompt must not
+  // freeze the control API, diagnostics, or the app's permission UI.
+  private let identityQueue = DispatchQueue(
+    label: "dev.localpeerconnections.identity-storage",
+    qos: .userInitiated)
   private var gattService: CBMutableService?
   private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
   private var expectedGattServices: [UUID: CBUUID] = [:]
@@ -76,10 +83,19 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     }
     switch call.method {
     case "loadOrCreateEd25519Seed":
-      do { result(try loadOrCreateSeed()) }
-      catch {
-        // Never replace a malformed or unavailable existing identity silently.
-        result(FlutterError(code: "IDENTITY_STORAGE", message: "Unable to access protected identity", details: nil))
+      identityQueue.async { [weak self] in
+        guard let self else { return }
+        do {
+          let seed = try self.loadOrCreateSeed()
+          // Method-channel results are delivered on the engine's main queue;
+          // only the protected storage operation is kept off that queue.
+          DispatchQueue.main.async { result(seed) }
+        } catch {
+          // Never replace a malformed or unavailable existing identity silently.
+          DispatchQueue.main.async {
+            result(FlutterError(code: "IDENTITY_STORAGE", message: "Unable to access protected identity", details: nil))
+          }
+        }
       }
     case "queryCapabilities":
       var capabilities: [String] = []
@@ -285,10 +301,19 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
       print("[LocalPeerConnections] ignore stale connect failure endpoint=\(peripheral.identifier.uuidString) generation=\(closingGeneration) replacement=\(replacementGeneration)")
       return
     }
+    let failedGeneration = closingGattGenerations[peripheral.identifier]
+      ?? expectedGattGenerations[peripheral.identifier]
     closingGattGenerations.removeValue(forKey: peripheral.identifier)
     expectedGattServices.removeValue(forKey: peripheral.identifier)
     expectedGattGenerations.removeValue(forKey: peripheral.identifier)
-    eventSink?(FlutterError(code: "ENDPOINT_LOST", message: error?.localizedDescription, details: nil))
+    // didFailToConnect is an asynchronous transport event, not a method-call
+    // result. Sending FlutterError through the EventChannel terminates the
+    // shared stream for every Runtime listener and leaves reconnect/probe
+    // state stranded. Translate it to the same generation-scoped disconnect
+    // event used by Android and by the normal CoreBluetooth disconnect path.
+    print("[LocalPeerConnections] client connection failed endpoint=\(peripheral.identifier.uuidString) error=\(error?.localizedDescription ?? "none")")
+    eventSink?(["type": "gattDisconnected", "endpointId": peripheral.identifier.uuidString,
+                "connectionGeneration": failedGeneration as Any])
   }
   public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
     guard error == nil, let expected = expectedGattServices[peripheral.identifier],
@@ -337,10 +362,21 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   }
   public func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic,
                          error: Error?) {
-    guard error == nil, let client = gattClients[peripheral.identifier],
+    guard error == nil, var client = gattClients[peripheral.identifier],
           characteristic.uuid == client.tx.uuid, characteristic.isNotifying else {
       rejectGatt(peripheral, message: error?.localizedDescription ?? "LPC TX subscription failed"); return
     }
+    // CoreBluetooth may report the same CCCD/notification state more than
+    // once while a reconnect is being unwound. Only the first callback may
+    // publish the connection generation; duplicate gattConnected events can
+    // otherwise start a second handshake on the same physical link and make
+    // the peer parse READY as application data.
+    if client.connectedEmitted {
+      print("[LocalPeerConnections] duplicate client connected callback ignored endpoint=\(peripheral.identifier.uuidString) generation=\(client.generation)")
+      return
+    }
+    client.connectedEmitted = true
+    gattClients[peripheral.identifier] = client
     eventSink?(["type": "gattConnected", "endpointId": peripheral.identifier.uuidString,
                 "localRole": "central", "platformSafeWriteSize": peripheral.maximumWriteValueLength(for: .withoutResponse),
                 "connectionGeneration": client.generation])
@@ -600,7 +636,13 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     gattClients.removeValue(forKey: peripheral.identifier)
     if let generation { closingGattGenerations[peripheral.identifier] = generation }
     central.cancelPeripheralConnection(peripheral)
-    eventSink?(FlutterError(code: "PLATFORM_ERROR", message: message, details: nil))
+    // This callback is reached after a GATT readiness event, so report a
+    // transport failure on the event stream. An EventChannel FlutterError
+    // would poison the shared stream and prevent later auto-reconnect
+    // candidates from being observed.
+    print("[LocalPeerConnections] client GATT rejected endpoint=\(peripheral.identifier.uuidString) reason=\(message)")
+    eventSink?(["type": "gattDisconnected", "endpointId": peripheral.identifier.uuidString,
+                "connectionGeneration": generation as Any])
   }
   private func requirePoweredOn(_ state: CBManagerState) throws {
     // Include the numeric CoreBluetooth state in diagnostics.  In particular,
@@ -662,5 +704,6 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     let control: CBCharacteristic
     let generation: Int64
     var writeInFlight: Bool = false
+    var connectedEmitted: Bool = false
   }
 }

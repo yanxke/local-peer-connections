@@ -360,6 +360,75 @@ void main() {
     await link.close();
   });
 
+  test('UT-242 late disconnect does not repeat native GATT cleanup', () async {
+    final link = await _RuntimeLink.create(
+      configA: const RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: false,
+      ),
+    );
+    final host = link.b.createHostSession(HostConfig(autoAccept: true));
+    await host.startAdvertising();
+    await _connectedPeer(link.a.connect('link'));
+
+    // The first callback removes the binding and requests the native close.
+    // A second callback models the delayed/echoed platform callback that can
+    // follow after the Dart binding has already gone away.
+    link._aEvents
+        .add(const PlatformGattDisconnected('link', connectionGeneration: 1));
+    await _waitFor(() => link.aCloseCalls == 1);
+    link._aEvents
+        .add(const PlatformGattDisconnected('link', connectionGeneration: 1));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(link.aCloseCalls, 1);
+    await link.close();
+  });
+
+  test('UT-243 peripheral-side loss recovers from a local discovery candidate',
+      () async {
+    final link = await _RuntimeLink.create(
+      configA: const RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: true,
+        reconnectTimeoutMs: 4000,
+      ),
+      // Disable the remote central-side scheduler so this test proves that
+      // the locally peripheral-side runtime can recover without an
+      // application-selected reconnect direction.
+      configB: const RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: false,
+        reconnectTimeoutMs: 4000,
+      ),
+    );
+    final hostA = link.a.createHostSession(HostConfig(autoAccept: true));
+    final hostB = link.b.createHostSession(HostConfig(autoAccept: true));
+    await hostA.startAdvertising();
+    await hostB.startAdvertising();
+    final initial = await _connectedPeer(link.b.connect('link'));
+    final hostPeer = await _hostPeer(hostA);
+    final sessionId = hostPeer.sessionId;
+    final discovery = await link.a.startDiscovery();
+
+    link.dropBoth();
+    await _waitForState(hostPeer, PeerConnectionState.reconnecting);
+    // The old endpoint is still present in the logical index while native
+    // teardown completes. The later observation must be allowed to start a
+    // fresh central candidate only after that cleanup has run.
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    link.discoverA('link');
+    await _waitForState(hostPeer, PeerConnectionState.ready,
+        timeout: const Duration(seconds: 3));
+
+    expect(hostPeer.sessionId, sessionId);
+    expect(initial.state, PeerConnectionState.ready);
+    expect(link.aGattConnected, greaterThanOrEqualTo(1));
+
+    await discovery.stop();
+    await link.close();
+  });
+
   test('reconnect releases a stale native client before retrying connectGatt',
       () async {
     final link = await _RuntimeLink.create(
@@ -567,6 +636,12 @@ void main() {
     expect(link.aCloseCalls, greaterThan(closeCallsBeforeOwner));
     expect(resolver.lookups, 0);
     expect(connection.state, PeerConnectionState.ready);
+
+    // Repeated advertisement of the losing endpoint must not reopen another
+    // GATT probe while the authenticated owner is still usable.
+    link.discoverA('competing-endpoint');
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(runtimeEvents.whereType<KnownPeerProbeStarted>(), hasLength(1));
 
     // Probe suppression is independent from the logical reconnect scheduler.
     // Losing the central-side transport must still move the same peer through

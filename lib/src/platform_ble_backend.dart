@@ -213,6 +213,7 @@ class PlatformGattFragmentPlatform implements GattFragmentPlatform {
     required this.endpointId,
     required this.platformSafeWriteSize,
     this.connectionGeneration,
+    this.onCloseRequested,
   }) : _backend = backend {
     if (platformSafeWriteSize <= 7) {
       throw const LpcException(LpcErrorCode.resourceExhausted,
@@ -223,6 +224,7 @@ class PlatformGattFragmentPlatform implements GattFragmentPlatform {
   final PlatformBleBackend _backend;
   final String endpointId;
   final int? connectionGeneration;
+  final void Function()? onCloseRequested;
   @override
   final int platformSafeWriteSize;
 
@@ -235,8 +237,16 @@ class PlatformGattFragmentPlatform implements GattFragmentPlatform {
           connectionGeneration: connectionGeneration);
 
   @override
-  Future<void> close() => _backend.closeGattConnection(endpointId,
-      connectionGeneration: connectionGeneration);
+  Future<void> close() {
+    // GattBackendConnection may close its transport as part of a local
+    // terminal transition before the Runtime receives the platform's echoed
+    // disconnect event. Let the owner record that native close first so the
+    // later cleanup only detaches Dart listeners and does not submit a second
+    // close to the native stack.
+    onCloseRequested?.call();
+    return _backend.closeGattConnection(endpointId,
+        connectionGeneration: connectionGeneration);
+  }
 }
 
 /// Connects native connection-scoped fragment events to one portable GATT

@@ -572,6 +572,18 @@ advertise window:   800 ms
 
 and repeat continuously until connected or stopped.
 
+Reconnect MUST NOT assign an application-level reconnect initiator or require
+an upper layer to choose one.  While a Runtime has an active reconnecting
+PeerConnection, it MUST continue any already-active advertising and discovery
+demand.  A Runtime that owns only the peripheral side of the failed physical
+link MUST remain eligible to recover by accepting an inbound candidate or, when
+it observes a new compatible discovery endpoint, by opening a fresh central
+candidate.  The first authenticated candidate that completes the Section 26
+RESUME proof wins; other candidates are handled by the duplicate-physical-link
+rules in Section 10.2.  This rule does not change the central/peripheral role
+of an individual physical link and does not make the LPC coordinator a BLE
+role.
+
 ## 10.2 Duplicate Physical Connections
 
 Because both peers advertise and scan, opposite-direction GATT connections may be created simultaneously.
@@ -3039,6 +3051,15 @@ attempt 3: 500 ms after attempt 2 fails
 attempt 4: 1000 ms after attempt 3 fails
 attempt 5+: 2000 ms after previous failure
 ```
+
+The schedule applies to the logical PeerConnection, not to a particular BLE
+central or peripheral role.  A Runtime MUST NOT suppress automatic recovery
+solely because the failed link was locally peripheral-side.  In that case it
+MUST keep the PeerConnection in `RECONNECTING` while the Runtime's active
+discovery/advertising demand provides fresh physical candidates; a candidate
+opened by either side uses the Section 26 lifecycle.  Candidate attempts are
+bounded by the same reconnect deadline and MUST NOT create an unbounded queue
+of discovery endpoints or physical connections.
 
 Stop when:
 
@@ -8302,6 +8323,9 @@ expected parser result
 - [x] UT-238 Terminal checkpoint publication result is immutable and completion fires exactly once under duplicate ACK, timeout, leave, and close races.
 - [x] UT-239 Checkpoint publication mutable bookkeeping remains bounded and superseded never-transmitted publications are released without retaining unbounded history.
 - [x] UT-240 publicationId exhausts after UINT64_MAX and subsequent publication fails RESOURCE_EXHAUSTED until a new GroupSession.
+- [x] UT-242 A platform disconnect that races Dart binding removal still issues one generation-safe native close and a late echoed disconnect cannot create a close loop.
+- [x] UT-243 A locally peripheral-side PeerConnection remains eligible for bounded automatic RESUME through a fresh discovered central candidate without an application-selected reconnect initiator.
+- [x] UT-244 A native GATT endpoint-busy teardown failure applies bounded known-peer probe backoff so repeated advertisements do not create a probe storm.
 
 # 55. Mandatory Physical Integration Tests
 
