@@ -9,6 +9,29 @@ import 'package:local_peer_connections/local_peer_connections.dart';
 
 import 'known_peers.dart';
 
+// Keep the LPC fixture on its own BLE service namespace. The library default
+// remains interoperable for normal applications, but the LPC, LPM, and LPGE
+// harnesses are independent test applications and must not discover one
+// another's endpoints. RX/TX/control UUIDs are derived by LPC from this value.
+const _lpcHarnessServiceUuid = <int>[
+  0x83,
+  0xf2,
+  0x0a,
+  0x10,
+  0x8c,
+  0x5a,
+  0x4f,
+  0x5a,
+  0x9a,
+  0x3a,
+  0x2f,
+  0x0d,
+  0x7a,
+  0x96,
+  0xb1,
+  0x00,
+];
+
 /// Raw LPC device fixture controller.
 ///
 /// This class intentionally has no messenger concepts. Its HTTP API is meant
@@ -125,6 +148,7 @@ class DeviceTestController extends ChangeNotifier {
       );
       final localRuntime = await createRuntime(
         config: RuntimeConfig(
+          serviceUuid: _lpcHarnessServiceUuid,
           discoveryDisplayName: displayName,
           applicationMetadata: utf8.encode(displayName),
           trustMode: testTrustMode,
