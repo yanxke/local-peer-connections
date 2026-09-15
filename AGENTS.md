@@ -265,8 +265,8 @@ change LPC wire semantics or replace the normative requirements in the spec.
   then relaunch the package if the update stopped it. Preserve the existing
   `adb reverse`/forward control-port setup. A runtime reset means stopping and
   starting LPC presence and sessions; it is not an uninstall or device reboot.
-- On iOS, allow extra time for `flutter run` and CoreDevice. If installation
-  or launch is stuck, inspect for stale `flutter`, `devicectl`, or
+- On iOS, allow extra time for `flutter run` and CoreDevice. If `flutter run`
+  or installation hangs, inspect for stale `flutter`, `devicectl`, or
   `Runner.app` processes and terminate only the stale deployment/Runner
   process before retrying. `ps aux | rg 'flutter run|devicectl|Runner.app|iproxy'`
   is sufficient to identify candidates; use the matching device and process
@@ -274,6 +274,11 @@ change LPC wire semantics or replace the normative requirements in the spec.
   reboot the device or broadly kill the CoreDevice service. Keep the `iproxy`
   control-port forward alive. If Flutter reports an Automation permission
   request, approve it in macOS Settings.
+  `flutter build ios --debug --no-codesign` produces only an unsigned
+  compile artifact; CoreDevice rejects it for physical deployment. Use
+  `flutter run` with automatic development signing, an IDE with the Flutter
+  plugin, or Xcode to deploy the debug harness. Keep `--no-codesign` for
+  compile-only checks and CI artifacts, not installation.
   On iOS 14+, debug Flutter apps must be launched through `flutter run`, an
   IDE with the Flutter plugin, or Xcode; direct `devicectl device process
   launch` is rejected. An in-place `xcrun devicectl device install app` is
