@@ -1473,7 +1473,14 @@ class NearbyRuntime {
           remoteApplicationMetadata:
               handshake.exchange.result!.remoteHello.applicationMetadata);
       if (automaticProbe) {
-        await _classifyKnownPeer(peer, event.endpointId);
+        final classified = await _classifyKnownPeer(peer, event.endpointId);
+        if (!classified) {
+          _connectionAttemptTimers.remove(event.endpointId)?.cancel();
+          _attempts.remove(event.endpointId);
+          attempt._failed(const LpcException(LpcErrorCode.transportClosed,
+              'known-peer candidate disconnected before classification'));
+          return;
+        }
       } else {
         _directRetainedPeers.add(peer.peerId);
       }
@@ -1733,7 +1740,7 @@ class NearbyRuntime {
     _pendingKnownPeerProbes.clear();
   }
 
-  Future<void> _classifyKnownPeer(
+  Future<bool> _classifyKnownPeer(
       PeerConnection peer, String endpointId) async {
     _knownPeerProbeNotBeforeMs.remove(endpointId);
     bool known = _knownPeerCache[peer.peerId] ?? false;
@@ -1751,6 +1758,20 @@ class NearbyRuntime {
         }
         _knownPeerCache[peer.peerId] = known;
       }
+    }
+    // Resolver work is application-owned and may outlive the physical
+    // candidate. A classification result is not a connection result: do not
+    // publish KnownPeerConnected, retain, or complete the probe with a
+    // terminal PeerConnection after the candidate link is gone. A reconnecting
+    // logical peer remains owned by the runtime and is intentionally not
+    // treated as terminal here.
+    if (peer.state == PeerConnectionState.disconnected) {
+      _log(
+          'known probe discarded endpoint=$endpointId peer=${peer.peerId} state=${peer.state.name}');
+      _knownPeerProbeTimers.remove(endpointId)?.cancel();
+      _automaticProbeEndpoints.remove(endpointId);
+      _startNextKnownPeerProbe();
+      return false;
     }
     if (known) {
       _log(
@@ -1823,6 +1844,7 @@ class NearbyRuntime {
     }
     _automaticProbeEndpoints.remove(endpointId);
     _startNextKnownPeerProbe();
+    return true;
   }
 
   int get _monotonicMs => DateTime.now().microsecondsSinceEpoch ~/ 1000;

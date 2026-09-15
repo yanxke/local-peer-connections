@@ -252,11 +252,16 @@ void main() {
     final resolver = _CountingKnownPeerResolver();
     final link = await _RuntimeLink.create(
         configA: RuntimeConfig(
-      trustMode: HandshakeTrustMode.tofu,
-      autoConnectKnownPeers: true,
-      knownPeerResolver: resolver,
-      reconnectTimeoutMs: 1000,
-    ));
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: false,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          reconnectTimeoutMs: 1000,
+        ),
+        configB: const RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: false,
+        ));
     final host = link.b.createHostSession(HostConfig(autoAccept: true));
     await host.startAdvertising();
     final discovery = await link.a.startDiscovery();
@@ -791,6 +796,43 @@ void main() {
     await link.close();
   });
 
+  test(
+      'UT-249 resolver completion after candidate loss does not publish connected',
+      () async {
+    final resolver = _SlowKnownPeerResolver();
+    final link = await _RuntimeLink.create(
+      configA: RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoConnectKnownPeers: true,
+        knownPeerResolver: resolver,
+        reconnectTimeoutMs: 1000,
+      ),
+    );
+    final host = link.b.createHostSession(HostConfig(autoAccept: true));
+    await host.startAdvertising();
+    final discovery = await link.a.startDiscovery();
+    final events = <RuntimeEvent>[];
+    final subscription = link.a.events.listen(events.add);
+
+    link.discoverA('resolver-disconnect-endpoint');
+    await _waitFor(() => resolver.started);
+    link.suppressReconnects = true;
+
+    // The candidate can lose its physical transport while application-owned
+    // resolver work is still pending. Let the bounded reconnect probe expire
+    // so the candidate is terminal before the lookup completes.
+    link._aEvents
+        .add(const PlatformGattDisconnected('resolver-disconnect-endpoint'));
+    await Future<void>.delayed(const Duration(milliseconds: 1100));
+    resolver.complete();
+    await _waitFor(() => events.whereType<KnownPeerProbeFailed>().isNotEmpty);
+    expect(events.whereType<KnownPeerConnected>(), isEmpty);
+
+    await subscription.cancel();
+    await discovery.stop();
+    await link.close();
+  });
+
   test('known peer can be rediscovered through a new endpoint', () async {
     final resolver = _CountingKnownPeerResolver();
     final link = await _RuntimeLink.create(
@@ -1002,6 +1044,7 @@ class _RuntimeLink {
         return 'submitted';
       case 'closeGattConnection':
         final generation = fromA ? _aGeneration : _bGeneration;
+        final requestedGeneration = arguments['connectionGeneration'] as int?;
         if (fromA) _aNativeLinkOpen = false;
         if (fromA) {
           aCloseCalls++;
@@ -1009,7 +1052,7 @@ class _RuntimeLink {
           bCloseCalls++;
         }
         peerEvents.add(PlatformGattDisconnected(endpoint ?? 'link',
-            connectionGeneration: generation));
+            connectionGeneration: requestedGeneration ?? generation));
         return null;
       default:
         return null;
@@ -1054,9 +1097,13 @@ class _ThrowingKnownPeerResolver implements KnownPeerResolver {
 
 class _SlowKnownPeerResolver implements KnownPeerResolver {
   final Completer<bool> _result = Completer<bool>();
+  bool started = false;
 
   @override
-  Future<bool> isKnownPeer(PeerId peerId) => _result.future;
+  Future<bool> isKnownPeer(PeerId peerId) {
+    started = true;
+    return _result.future;
+  }
 
   void complete() {
     if (!_result.isCompleted) _result.complete(true);

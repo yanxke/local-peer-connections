@@ -8371,6 +8371,7 @@ expected parser result
 - [x] UT-246 GroupSession emits GroupTransportChanged when a committed member returns READY on a new transport generation without changing membership.
 - [ ] UT-247 A fresh compatible same-PeerId READY connection replaces a RECONNECTING logical owner, cancels its old expiry, and preserves GroupSession ownership.
 - [x] UT-248 An authenticated same-group GROUP_INFO with a higher coordinator term refreshes authority without changing membership version, before application traffic is admitted.
+- [x] UT-249 A known-peer candidate that disconnects while KnownPeerResolver is pending is not published as KnownPeerConnected and completes as a failed probe.
 
 # 55. Mandatory Physical Integration Tests
 
