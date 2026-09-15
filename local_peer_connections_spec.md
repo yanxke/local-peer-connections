@@ -526,6 +526,14 @@ A Runtime configured for automatic known-peer connection MUST bound both active 
 
 Repeated observations of one active `DiscoveryEndpointId` MUST NOT create duplicate concurrent candidate probes.
 
+An endpoint-scoped completed-probe suppression entry is valid only while the
+authenticated logical owner associated with that endpoint remains active
+(`READY` or `RECONNECTING`).  If the owner has no active association, or has
+reached terminal `DISCONNECTED`, the Runtime MUST clear the suppression entry
+and MUST allow a later observation of the same endpoint to start a fresh
+bounded candidate probe.  Cleanup MUST be idempotent and MUST tolerate a
+platform that omits or reorders duplicate disconnect callbacks.
+
 If a pending endpoint is lost before probing starts, the SDK SHOULD discard that pending probe.
 
 If a previously known PeerId later appears through a different discovery/platform identifier, the Runtime MUST treat it as the same known peer once the new connection establishes the same authenticated PeerId.
@@ -605,6 +613,18 @@ discovery endpoints or authenticated PeerIds; known-peer probe concurrency is
 bounded by Section 33.1.2.
 
 After authentication, if two physical links are redundant candidates for the same PeerId pair and the same LPC logical/security session requirement, retain exactly one.
+
+An existing READY logical PeerConnection is a stale owner when its negotiated
+keepalive dead timeout has elapsed without a valid authenticated encrypted
+frame, even if the platform has not delivered a transport-disconnect callback.
+When a fresh, fully authenticated candidate for the same PeerId and compatible
+security profile arrives on a different physical transport, the Runtime MUST
+move the stale owner through the normal transport-loss/reconnect path and MUST
+allow the fresh candidate to replace it. The stale READY owner MUST NOT win
+duplicate rank arbitration solely because it still reports READY. The candidate
+remains subject to the authentication, security-profile, and single-owner
+rules in this section; this rule does not permit two logical sessions to
+coexist.
 
 A Runtime MAY intentionally maintain distinct LPC logical/security sessions to the same PeerId only when required by incompatible security profiles as defined in Section 33.5.1. Such distinct logical/security sessions are not duplicates merely because their PeerIds match. Implementations SHOULD multiplex distinct logical sessions over one physical transport where the backend permits it.
 
@@ -5823,6 +5843,16 @@ the peer or close the replacement transport. GroupSession routing attached to
 the peer MUST observe the replacement as a new usable transport and preserve
 the committed membership set and version.
 
+The same replacement behavior MUST apply when the previous PeerConnection is
+still marked READY but its negotiated keepalive dead timeout has elapsed
+without a valid authenticated encrypted frame. Platform disconnect callbacks
+are not required for this liveness decision. The Runtime MUST first retire the
+stale owner through transport-loss handling, cancel its reconnect/expiry
+machinery as applicable, and then attach compatible logical owners to the fresh
+authenticated connection. A fresh candidate on the same physical endpoint
+must still be coalesced according to the per-endpoint and duplicate rules; a
+different peer's candidate MUST NOT be cancelled by this stale-owner rule.
+
 ### Incompatible security requirements
 
 An existing PeerConnection MUST NOT be treated as satisfying a stronger or different authentication profile merely because the remote PeerId is the same.
@@ -8381,6 +8411,8 @@ expected parser result
 - [ ] UT-247 A fresh compatible same-PeerId READY connection replaces a RECONNECTING logical owner, cancels its old expiry, and preserves GroupSession ownership.
 - [x] UT-248 An authenticated same-group GROUP_INFO with a higher coordinator term refreshes authority without changing membership version, before application traffic is admitted.
 - [x] UT-249 A known-peer candidate that disconnects while KnownPeerResolver is pending is not published as KnownPeerConnected and completes as a failed probe.
+- [x] UT-255 A fresh authenticated compatible candidate replaces a READY logical owner whose negotiated keepalive dead timeout has elapsed, even when the platform omitted its disconnect callback; candidates for different PeerIds remain independent.
+- [x] UT-256 A completed known-peer probe is eligible for a fresh probe after its logical owner is terminal, including when disconnect cleanup is duplicated or reordered.
 
 # 55. Mandatory Physical Integration Tests
 

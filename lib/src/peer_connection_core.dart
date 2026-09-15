@@ -99,6 +99,12 @@ class PeerConnectionCore {
   int get monotonicNowMs => _monotonicNowMs();
   Uint8List get sessionId => Uint8List.fromList(_sessionId);
 
+  /// True only when keepalive has proved that no authenticated encrypted
+  /// frame arrived within the negotiated dead timeout. This is intentionally
+  /// separate from platform disconnect callbacks: BLE stacks can retain a
+  /// stale logical link after an app restart.
+  bool get livenessExpired => _keepalive?.isDead(_monotonicNowMs()) ?? false;
+
   /// The retained Section 26 secret for this logical SessionId. It is present
   /// only for handshake-owned cores, never synthesized for test/manual cores.
   Uint8List get resumeSecret {

@@ -994,6 +994,42 @@ void main() {
     await discovery.stop();
     await link.close();
   });
+
+  test(
+      'UT-256 completed known-peer probe is reusable after terminal disconnect',
+      () async {
+    final resolver = _CountingKnownPeerResolver();
+    final link = await _RuntimeLink.create(
+      configA: RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: false,
+        autoConnectKnownPeers: true,
+        knownPeerResolver: resolver,
+      ),
+    );
+    final host = link.b.createHostSession(HostConfig(autoAccept: true));
+    await host.startAdvertising();
+    final discovery = await link.a.startDiscovery();
+    final events = <RuntimeEvent>[];
+    final subscription = link.a.events.listen(events.add);
+
+    link.discoverA('reusable-endpoint');
+    await _waitFor(() => events.whereType<KnownPeerConnected>().length == 1);
+    final first = events.whereType<KnownPeerConnected>().single;
+    await link.a.releasePeerRetention(first.connection.peerId);
+    await _waitForState(first.connection, PeerConnectionState.disconnected);
+
+    // A late duplicate native callback must not leave the endpoint's
+    // completed-probe suppression in an unrecoverable state.
+    link._aEvents.add(const PlatformGattDisconnected('reusable-endpoint'));
+    link.discoverA('reusable-endpoint');
+    await _waitFor(() => events.whereType<KnownPeerConnected>().length == 2);
+    expect(resolver.lookups, 2);
+
+    await subscription.cancel();
+    await discovery.stop();
+    await link.close();
+  });
 }
 
 GroupConfig _groupConfig() => GroupConfig(

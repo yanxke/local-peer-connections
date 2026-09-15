@@ -90,6 +90,12 @@ class KeepaliveController {
   final List<int> Function() _nextPingId;
   PingPayload? _pendingPing;
 
+  /// Exposes the Section 24 liveness predicate to the runtime's authenticated
+  /// duplicate-owner arbitration. A platform may fail to deliver a native
+  /// disconnect callback, so a fresh authenticated transport must be able to
+  /// replace a READY owner whose receive-side dead timeout has elapsed.
+  bool isDead(int nowMs) => _tracker.dead(nowMs);
+
   KeepaliveDecision poll({required int nowMs, required int monotonicUs}) {
     if (_tracker.dead(nowMs)) return const KeepaliveDecision.reconnect();
     if (_pendingPing != null || !_tracker.pingDue(nowMs)) {

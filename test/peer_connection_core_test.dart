@@ -705,7 +705,9 @@ void main() {
         remotePeerId: PeerId(List.filled(16, 6)),
         keepaliveTiming: KeepaliveTiming.negotiate(2000, 2000),
         monotonicNowMs: () => nowMs);
+    expect(lost.livenessExpired, isFalse);
     nowMs = 6000;
+    expect(lost.livenessExpired, isTrue);
     await lost.pollKeepalive();
     expect(lost.state, PeerConnectionState.reconnecting);
   });

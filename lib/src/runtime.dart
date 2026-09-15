@@ -1549,6 +1549,7 @@ class NearbyRuntime {
   }
 
   void _scheduleKnownPeerProbe(String endpointId) {
+    _clearStaleKnownPeerProbeState(endpointId);
     final suppressedOwner = _knownProbeSuppressedByOwner[endpointId];
     if (suppressedOwner != null) {
       if (suppressedOwner.state == PeerConnectionState.ready ||
@@ -1590,6 +1591,56 @@ class NearbyRuntime {
       return;
     }
     _startKnownPeerProbe(endpointId);
+  }
+
+  /// Discovery identifiers are ephemeral, but some platform backends can
+  /// omit or reorder the disconnect callback that normally clears the
+  /// endpoint-scoped probe cache.  Do not let that callback race turn a
+  /// completed probe into a permanent black hole: suppression is valid only
+  /// while an authenticated logical owner is still READY or RECONNECTING.
+  /// This is especially important on mobile BLE stacks where a stale native
+  /// GATT client may remain visible after the app-level PeerConnection has
+  /// already become terminal.
+  void _clearStaleKnownPeerProbeState(String endpointId) {
+    final mappedPeer = _gattPeersByEndpoint[endpointId];
+    if (mappedPeer?.state == PeerConnectionState.disconnected) {
+      _gattPeersByEndpoint.remove(endpointId);
+    }
+
+    final suppressedOwner = _knownProbeSuppressedByOwner[endpointId];
+    if (suppressedOwner != null &&
+        suppressedOwner.state != PeerConnectionState.ready &&
+        suppressedOwner.state != PeerConnectionState.reconnecting) {
+      _knownProbeSuppressedByOwner.remove(endpointId);
+    }
+
+    var activeAssociatedOwner = false;
+    final staleAssociations = <PeerConnection>[];
+    for (final entry in _knownPeerProbeEndpointsByPeer.entries) {
+      if (!entry.value.contains(endpointId)) continue;
+      if (entry.key.state == PeerConnectionState.ready ||
+          entry.key.state == PeerConnectionState.reconnecting) {
+        activeAssociatedOwner = true;
+      } else {
+        staleAssociations.add(entry.key);
+      }
+    }
+    for (final peer in staleAssociations) {
+      final endpoints = _knownPeerProbeEndpointsByPeer[peer];
+      endpoints?.remove(endpointId);
+      if (endpoints != null && endpoints.isEmpty) {
+        _knownPeerProbeEndpointsByPeer.remove(peer);
+      }
+    }
+
+    final hasActiveOwner =
+        _gattPeersByEndpoint.containsKey(endpointId) || activeAssociatedOwner;
+    if (!hasActiveOwner &&
+        ((_completedKnownPeerProbeEndpoints.remove(endpointId) ?? false) ||
+            _knownProbeSuppressedByOwner.remove(endpointId) != null)) {
+      _authenticatedAutomaticProbePeers.remove(endpointId);
+      _log('cleared stale known probe state endpoint=$endpointId');
+    }
   }
 
   /// Starts a fresh central candidate for a logical peer whose previous link
@@ -2812,6 +2863,31 @@ class NearbyRuntime {
       String? gattEndpointId,
       List<int>? connectionRank,
       List<int> remoteApplicationMetadata = const []}) async {
+    // Some mobile BLE stacks do not report a disconnect when the remote app
+    // is killed. In that case the old object can remain READY while its
+    // authenticated receive-side keepalive deadline has expired. Compare the
+    // physical endpoint before retiring it so a different peer's probe stays
+    // independent, and so a duplicate callback for the same endpoint is still
+    // handled by the normal per-endpoint coalescing path.
+    final staleReady = _peers.where((peer) {
+      if (peer.peerId != core.remotePeerId ||
+          peer.state != PeerConnectionState.ready ||
+          peer.securityLevel != securityLevel ||
+          !peer._core.livenessExpired) {
+        return false;
+      }
+      if (gattEndpointId == null) return false;
+      final oldEndpoint = _gattLinks[peer]?.endpointId;
+      return oldEndpoint == null || oldEndpoint != gattEndpointId;
+    }).toList(growable: false);
+    for (final old in staleReady) {
+      _log(
+          'retiring stale READY peer=${old.peerId} oldEndpoint=${_gattLinks[old]?.endpointId ?? 'none'} candidateEndpoint=${gattEndpointId ?? 'none'} reason=keepalive-dead-timeout');
+      // This transitions the old logical owner into the existing reconnecting
+      // replacement path below. It deliberately does not close the new,
+      // authenticated candidate or affect any other PeerId.
+      old._platformTransportLost();
+    }
     // A process restart cannot present the previous RESUME secret, so the
     // restarted peer may arrive as a fresh authenticated READY connection
     // while the old logical owner is still RECONNECTING.  Keep one logical
