@@ -434,6 +434,92 @@ void main() {
     await link.close();
   });
 
+  test(
+      'UT-254 central-side loss can recover through a rotated discovery endpoint',
+      () async {
+    final link = await _RuntimeLink.create(
+      configA: const RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: true,
+        reconnectTimeoutMs: 4000,
+      ),
+      configB: const RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: true,
+        reconnectTimeoutMs: 4000,
+      ),
+    );
+    final host = link.b.createHostSession(HostConfig(autoAccept: true));
+    await host.startAdvertising();
+    final connection = await _connectedPeer(link.a.connect('link'));
+    await _hostPeer(host);
+    final discovery = await link.a.startDiscovery();
+
+    // Keep the old central endpoint unavailable after the physical loss.
+    // A real iOS/Android address rotation has the same effect even though a
+    // scan now reports the peer through a different DiscoveryEndpointId.
+    link.stallAEndpoint('link');
+    link.dropBoth();
+    await _waitForState(connection, PeerConnectionState.reconnecting);
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    link.discoverA('rotated-endpoint');
+    await _waitForState(connection, PeerConnectionState.ready,
+        timeout: const Duration(seconds: 3));
+
+    expect(connection.state, PeerConnectionState.ready);
+    expect(connection.sessionId, isNotEmpty);
+    expect(host.peers(), hasLength(1));
+
+    await discovery.stop();
+    await link.close();
+  });
+
+  test('UT-253 reconnect discovery defers to an active known-peer probe',
+      () async {
+    final resolver = _CountingKnownPeerResolver();
+    final link = await _RuntimeLink.create(
+      configA: RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: true,
+        autoConnectKnownPeers: true,
+        knownPeerResolver: resolver,
+        reconnectTimeoutMs: 2000,
+      ),
+      configB: const RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: false,
+        reconnectTimeoutMs: 2000,
+      ),
+    );
+    final host = link.a.createHostSession(HostConfig(autoAccept: true));
+    await host.startAdvertising();
+    final connection = await _connectedPeer(link.b.connect('link'));
+    final hostPeer = await _hostPeer(host);
+    final discovery = await link.a.startDiscovery();
+    final runtimeEvents = <RuntimeEvent>[];
+    final subscription = link.a.events.listen(runtimeEvents.add);
+
+    // Reserve an unrelated endpoint with a known-peer probe and leave its
+    // handshake open. Then the existing peripheral-side logical peer enters
+    // reconnecting state. A repeated advertisement for the reserved endpoint
+    // must not make the reconnect scheduler open a second physical link.
+    link.discoverA('probe');
+    await _waitFor(
+        () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 1);
+    link.dropBoth();
+    await _waitForState(hostPeer, PeerConnectionState.reconnecting);
+    link.discoverA('probe');
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(runtimeEvents.whereType<KnownPeerProbeStarted>(), hasLength(1));
+    expect(link.aGattConnected, 1);
+    expect(connection.state, isNot(PeerConnectionState.ready));
+
+    await subscription.cancel();
+    await discovery.stop();
+    await link.close();
+  });
+
   test('reconnect releases a stale native client before retrying connectGatt',
       () async {
     final link = await _RuntimeLink.create(
@@ -603,8 +689,7 @@ void main() {
     await link.close();
   });
 
-  test('READY peer cancels competing probes without disabling reconnect',
-      () async {
+  test('READY peer leaves unauthenticated probes independent', () async {
     final resolver = _CountingKnownPeerResolver();
     final link = await _RuntimeLink.create(
       configA: RuntimeConfig(
@@ -628,8 +713,9 @@ void main() {
     final discovery = await link.a.startDiscovery();
 
     // Hold one automatic candidate open, then complete a different explicit
-    // connection. The newly authenticated owner must cancel the candidate so
-    // it cannot race the logical session or tear down its transport.
+    // connection. The candidate has not authenticated a PeerId yet, so it
+    // cannot be classified as a duplicate. It must remain independent for a
+    // possible unrelated nearby peer.
     link.discoverA('competing-endpoint');
     await _waitFor(
         () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 1);
@@ -638,7 +724,7 @@ void main() {
     await _hostPeer(host);
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(runtimeEvents.whereType<KnownPeerProbeStarted>(), hasLength(1));
-    expect(link.aCloseCalls, greaterThan(closeCallsBeforeOwner));
+    expect(link.aCloseCalls, closeCallsBeforeOwner);
     expect(resolver.lookups, 0);
     expect(connection.state, PeerConnectionState.ready);
 
@@ -657,6 +743,47 @@ void main() {
         timeout: const Duration(seconds: 3));
     expect(connection.state, PeerConnectionState.ready);
     expect(link.aGattConnected, greaterThanOrEqualTo(2));
+
+    await subscription.cancel();
+    await discovery.stop();
+    await link.close();
+  });
+
+  test('UT-252 authenticated duplicate probes for one PeerId are arbitrated',
+      () async {
+    final resolver = _CountingKnownPeerResolver();
+    final link = await _RuntimeLink.create(
+      configA: RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoConnectKnownPeers: true,
+        knownPeerResolver: resolver,
+        maxConcurrentKnownPeerProbes: 2,
+      ),
+      configB: const RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: true,
+      ),
+    );
+    final host = link.b.createHostSession(HostConfig(autoAccept: true));
+    await host.startAdvertising();
+    final events = <RuntimeEvent>[];
+    final subscription = link.a.events.listen(events.add);
+    final discovery = await link.a.startDiscovery();
+
+    // Both transient endpoints resolve to the same authenticated PeerId in
+    // this fixture. They may race independently through authentication, but
+    // only one logical peer may remain owned by the runtime.
+    link.discoverA('duplicate-a');
+    await _waitFor(() => events.whereType<KnownPeerConnected>().length == 1);
+    link.discoverA('duplicate-b');
+    await _waitFor(() => link.aCloseCalls > 0);
+    await _hostPeer(host);
+
+    // The duplicate is rejected by authenticated ownership/rank arbitration
+    // before it needs a second known-peer lookup.
+    expect(resolver.lookups, 1);
+    expect(host.peers(), hasLength(1));
+    expect(events.whereType<KnownPeerConnected>(), hasLength(2));
 
     await subscription.cancel();
     await discovery.stop();
@@ -938,6 +1065,8 @@ class _RuntimeLink {
     _aEvents.add(PlatformEndpointFound(endpointId, rssi: -40));
   }
 
+  void stallAEndpoint(String endpointId) => stalledAEndpoints.add(endpointId);
+
   void failNextAFragment() => _failNextAFragment = true;
 
   static Future<_RuntimeLink> create(
@@ -975,7 +1104,7 @@ class _RuntimeLink {
 
   _RuntimeLink._(this.duplicateGattCallbacks, Set<String> stalledAEndpoints,
       this.rejectAConnectWhileNativeLinkOpen, this.stallAReconnectHandshake)
-      : stalledAEndpoints = Set.unmodifiable(stalledAEndpoints);
+      : stalledAEndpoints = Set.from(stalledAEndpoints);
 
   Future<Object?> _handleA(MethodCall call) => _handle(call, true);
   Future<Object?> _handleB(MethodCall call) => _handle(call, false);

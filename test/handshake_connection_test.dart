@@ -8,12 +8,13 @@ import 'package:local_peer_connections/local_peer_connections.dart';
 const _uuid = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 class _Backend implements BackendConnection {
-  _Backend(this.connectionId);
+  _Backend(this.connectionId, {this.forwardWrites = true});
 
   @override
   final String connectionId;
   _Backend? remote;
   bool closed = false;
+  final bool forwardWrites;
   final List<Uint8List> writes = <Uint8List>[];
   final StreamController<BackendConnectionEvent> _events =
       StreamController<BackendConnectionEvent>.broadcast();
@@ -36,10 +37,14 @@ class _Backend implements BackendConnection {
   TransportWrite write(Uint8List frame) {
     writes.add(frame);
     final write = TransportWrite()..submittedToPlatform();
-    Future<void>.microtask(
-        () => remote!._events.add(BackendBytesReceived(frame)));
+    if (forwardWrites) {
+      Future<void>.microtask(
+          () => remote!._events.add(BackendBytesReceived(frame)));
+    }
     return write;
   }
+
+  void emit(Uint8List frame) => _events.add(BackendBytesReceived(frame));
 }
 
 Future<HandshakeExchange> _exchange(int identitySeed, int ephemeralSeed,
@@ -285,6 +290,31 @@ void main() {
 
     await Future.wait([a.start(), b.start()]);
     await Future.wait([a.ready, b.ready]).timeout(const Duration(seconds: 2));
+  });
+
+  test('UT-180 serializes HELLO and AUTH received in one GATT burst', () async {
+    final backend = _Backend('burst', forwardWrites: false);
+    final exchangeA = await _exchange(61, 63);
+    final exchangeB = await _exchange(62, 64);
+    final a = HandshakeConnection(
+        backend: backend,
+        exchange: exchangeA,
+        localPeerId: exchangeA.localHello.peerId,
+        candidateOnly: true);
+
+    await a.start();
+    final helloA = LpcFrame.decode(backend.writes.single);
+    final helloResponse = await exchangeB.receivePlaintext(helloA);
+    expect(helloResponse, isNull);
+    final authB = await exchangeB.createAuth();
+
+    // The platform preserves notification order, but both callbacks can be
+    // delivered before the first asynchronous HELLO parse completes.
+    backend.emit(plaintextHelloFrame(exchangeB.localHello).encode());
+    backend.emit(authB.encode());
+
+    await a.authenticated.timeout(const Duration(seconds: 2));
+    expect(exchangeA.state, HandshakeExchangeState.authenticated);
   });
 }
 

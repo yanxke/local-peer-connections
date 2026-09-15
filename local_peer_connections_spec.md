@@ -584,6 +584,15 @@ rules in Section 10.2.  This rule does not change the central/peripheral role
 of an individual physical link and does not make the LPC coordinator a BLE
 role.
 
+If the last central-side reconnect endpoint is stale, unavailable, or a
+platform address rotation exposes a different compatible discovery endpoint,
+the Runtime MUST also remain eligible to open a fresh central candidate for
+that reconnecting PeerConnection.  It MUST NOT wait indefinitely for the old
+endpoint or require the upper layer to restart LPC.  The candidate is still
+authenticated and completed through Section 26 before it can replace the
+logical connection, and the existing bounded reconnect deadline and
+duplicate-link arbitration remain in force.
+
 ## 10.2 Duplicate Physical Connections
 
 Because both peers advertise and scan, opposite-direction GATT connections may be created simultaneously.

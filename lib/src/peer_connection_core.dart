@@ -121,7 +121,9 @@ class PeerConnectionCore {
   Stream<Uint8List> get acknowledgedMessageIds =>
       _acknowledgedMessageIds.stream;
   Future<TransportWriteState> submitEncrypted(FrameType type, List<int> payload,
-      {int flags = 0, List<int>? messageId}) async {
+      {int flags = 0,
+      List<int>? messageId,
+      SendPriority priority = SendPriority.interactive}) async {
     if (state != PeerConnectionState.ready)
       throw const LpcException(LpcErrorCode.invalidState);
     if (type == FrameType.ping || type == FrameType.pong) {
@@ -143,10 +145,18 @@ class PeerConnectionCore {
     final protected =
         await const FrameProtector().encrypt(frame, await key.extractBytes());
     final encoded = protected.encode();
-    final write = type == FrameType.realtimeDatagram &&
-            backend is RealtimeBackendConnection
-        ? (backend as RealtimeBackendConnection).writeRealtime(encoded)
-        : backend.write(encoded);
+    late final TransportWrite write;
+    if (type == FrameType.realtimeDatagram &&
+        backend is RealtimeBackendConnection) {
+      write = (backend as RealtimeBackendConnection).writeRealtime(encoded);
+    } else if (backend is PrioritizedBackendConnection) {
+      write = (backend as PrioritizedBackendConnection).writeWithPriority(
+        encoded,
+        priority: priority,
+      );
+    } else {
+      write = backend.write(encoded);
+    }
     _pendingWrites.add(write);
     // A backend completion is the only authority for SENT_TO_TRANSPORT.  In
     // particular, a terminal failure is a generation-wide transport loss,
@@ -337,6 +347,7 @@ class PeerConnectionCore {
         chunk.encode(),
         flags: operation.deliveryMode == DeliveryMode.reliableAcked ? 1 : 0,
         messageId: operation.messageId,
+        priority: operation.priority,
       );
       results.add(result);
       if (operation.cancelled) return results;
@@ -839,7 +850,8 @@ class _ReliableDataOperation {
     this.handleController,
   })  : messageId = Uint8List.fromList(messageId),
         chunks = List.unmodifiable(chunks),
-        deliveryMode = chunks.first.deliveryMode {
+        deliveryMode = chunks.first.deliveryMode,
+        priority = chunks.first.priority {
     if (this.messageId.length != 8 || chunks.isEmpty) {
       throw ArgumentError('invalid reliable DATA operation');
     }
@@ -848,6 +860,7 @@ class _ReliableDataOperation {
   final Uint8List messageId;
   final List<DataChunk> chunks;
   final DeliveryMode deliveryMode;
+  final SendPriority priority;
   final SendHandleController? handleController;
   bool cancelled = false;
 }

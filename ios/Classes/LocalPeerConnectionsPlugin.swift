@@ -122,6 +122,15 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
         try self.requirePoweredOn(self.central.state)
         let serviceUuid = try self.serviceUuid(arguments)
         self.activeServiceUuid = serviceUuid
+        // A runtime reset recreates the GATT service while CoreBluetooth may
+        // still retain CBPeripheral wrappers from the previous service
+        // generation. Reusing those wrappers can report didConnect and then
+        // tear down immediately after the first HELLO, especially when two
+        // Apple runtimes probe each other at once. Active gattClients retain
+        // their own references, so invalidate only discovery candidates for
+        // this new scan generation.
+        self.discoveredPeripherals.removeAll()
+        self.lastDiscoveryLog.removeAll()
         // Request duplicate advertisements so callers can maintain a live
         // endpoint/TTL view and RSSI updates instead of expiring entries while
         // the peripheral is still advertising.
@@ -159,6 +168,11 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
       gattServerEndpointByCentral.removeAll()
       gattServerCentralByEndpoint.removeAll()
       gattServerGenerations.removeAll()
+      // Do not carry a CBPeripheral discovered for the old local service
+      // generation into a later runtime start. The wrapper is not an
+      // authenticated LPC identity and can retain stale GATT service state.
+      discoveredPeripherals.removeAll()
+      lastDiscoveryLog.removeAll()
       result(nil)
     case "connectGatt":
       backend(call, result) { arguments in

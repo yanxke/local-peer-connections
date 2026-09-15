@@ -284,6 +284,22 @@ change LPC wire semantics or replace the normative requirements in the spec.
   launch` is rejected. An in-place `xcrun devicectl device install app` is
   still allowed for installation, but CoreDevice must not be used to launch
   the debug Flutter app as a fallback when Flutter's deploy wrapper is stale.
+  When replacing an already-running debug build, stop the matching old
+  `flutter run`/`devicectl` wrapper and `Runner.app` process first, then run
+  `flutter run -d <UDID> --debug --no-pub`. If the matching CoreDevice install
+  child remains stuck for five minutes with no result, terminate only that
+  stale deployment session and retry once; do not uninstall or reboot the
+  device.
+  If the app remains frozen on the device after a termination signal, stop
+  every stale Flutter launch session for that device, not only the last
+  `devicectl` child. Inspect `flutter_tools.snapshot run -d <UDID>`, the
+  project-specific `xcode_debug.js`, and matching `devicectl` install/launch
+  children; old Flutter sessions can relaunch or retain the visible process.
+  Then terminate the app PID from `xcrun devicectl device info processes` and
+  start exactly one `flutter run -d <UDID> --debug --no-pub` session. Preserve
+  the other apps and the control-port forward. If that forward accepts TCP
+  connections but does not answer, restart only its matching `iproxy
+  <local-port>:<control-port>` process after the new app is running.
 - On macOS, build with `flutter build macos --debug` and keep the application
   open while the user approves the LPC identity's Keychain access. Prefer
   “Always Allow” for the test identity. A pending Keychain dialog can leave
@@ -292,7 +308,17 @@ change LPC wire semantics or replace the normative requirements in the spec.
   prompt by returning success from a permission channel or by moving platform
   authorization into a mobile-only path. Keychain seed access must stay off
   the Flutter main thread so the control API and permission UI remain
-  responsive.
+  responsive. Do not check a developer-specific `DEVELOPMENT_TEAM` into the
+  macOS project. Keep automatic Apple Development signing enabled and provide
+  the local team through Xcode or the local `xcodebuild` invocation. The
+  integration app has an optional ignored
+  `macos/Runner/Configs/Local.xcconfig`; copy its
+  `Local.xcconfig.example` and set the local team there before building.
+  Verify the built app with `codesign -dv --verbose=4`; it must have an Apple
+  Development authority and team identifier, not `Signature=adhoc`. Switching
+  from an ad-hoc build to a stable signing identity may require one final
+  Keychain/Bluetooth approval; subsequent in-place builds with that identity
+  should reuse it.
 - Do not start a second Flutter launch session over an already-running app,
   and do not stop a successful deployment session merely to inspect it. A
   stale launch wrapper can outlive Ctrl-C and continue holding CoreDevice or

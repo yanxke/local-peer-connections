@@ -35,7 +35,8 @@ enum GattFragmentSubmission {
 /// Portable Section 12/44 GATT backend. Native code forwards received GATT
 /// fragments to [receiveGattFragment], invokes [writable] on flow-control
 /// recovery, and invokes [terminalFailure] when the physical link dies.
-class GattBackendConnection implements RealtimeBackendConnection {
+class GattBackendConnection
+    implements RealtimeBackendConnection, PrioritizedBackendConnection {
   GattBackendConnection({
     required this.connectionId,
     required GattFragmentPlatform platform,
@@ -95,8 +96,15 @@ class GattBackendConnection implements RealtimeBackendConnection {
 
   @override
   TransportWrite write(Uint8List completeSerializedLpcFrame) {
+    return writeWithPriority(completeSerializedLpcFrame,
+        priority: SendPriority.interactive);
+  }
+
+  @override
+  TransportWrite writeWithPriority(Uint8List completeSerializedLpcFrame,
+      {required SendPriority priority}) {
     return _write(completeSerializedLpcFrame,
-        transmission: GattFragmentTransmission.normal);
+        transmission: GattFragmentTransmission.normal, priority: priority);
   }
 
   /// Maps realtime GATT traffic exactly by BLE direction: central writes RX
@@ -114,12 +122,14 @@ class GattBackendConnection implements RealtimeBackendConnection {
       transmission: role == GattLinkRole.central
           ? GattFragmentTransmission.writeWithoutResponse
           : GattFragmentTransmission.notify,
+      priority: SendPriority.interactive,
     );
   }
 
   TransportWrite _write(
     Uint8List completeSerializedLpcFrame, {
     required GattFragmentTransmission transmission,
+    required SendPriority priority,
   }) {
     if (_state != TransportConnectionState.open) {
       throw const LpcException(LpcErrorCode.transportClosed);
@@ -131,11 +141,12 @@ class GattBackendConnection implements RealtimeBackendConnection {
     if (_queuedBytes + byteCount > maxQueuedBytes) {
       throw const LpcException(LpcErrorCode.sendQueueFull);
     }
-    final pending = _PendingGattWrite(encoded, byteCount, transmission);
+    final pending =
+        _PendingGattWrite(encoded, byteCount, transmission, priority);
     _writes.add(pending);
     _queuedBytes += byteCount;
     _log(
-        'queued frame bytes=${completeSerializedLpcFrame.length} fragments=${encoded.length} transmission=${transmission.name} queueBytes=$_queuedBytes queueFrames=${_writes.length}');
+        'queued frame bytes=${completeSerializedLpcFrame.length} fragments=${encoded.length} transmission=${transmission.name} priority=${priority.name} queueBytes=$_queuedBytes queueFrames=${_writes.length}');
     unawaited(_drain());
     return pending.write;
   }
@@ -200,7 +211,7 @@ class GattBackendConnection implements RealtimeBackendConnection {
     _draining = true;
     try {
       while (_writes.isNotEmpty && _state == TransportConnectionState.open) {
-        final pending = _writes.first;
+        final pending = _takeNext();
         final result = await _platform.submitGattFragment(
             pending.fragments[pending.nextFragment],
             transmission: pending.transmission);
@@ -244,13 +255,37 @@ class GattBackendConnection implements RealtimeBackendConnection {
       _draining = false;
     }
   }
+
+  /// Selects the highest-priority complete frame while preserving FIFO order
+  /// among frames with the same priority. Selection happens between complete
+  /// LPC frames, never in the middle of a fragmented frame, so one operation
+  /// cannot be interleaved with another at the wire-fragment level.
+  _PendingGattWrite _takeNext() {
+    if (_writes.length < 2) return _writes.first;
+    // Once a fragmented frame has reached the platform, finish its remaining
+    // fragments before selecting another frame. Reordering is only legal
+    // between complete LPC frames.
+    if (_writes.first.nextFragment != 0) return _writes.first;
+    var selected = _writes.first;
+    for (final candidate in _writes.skip(1)) {
+      if (candidate.priority.index < selected.priority.index) {
+        selected = candidate;
+      }
+    }
+    if (identical(selected, _writes.first)) return selected;
+    _writes.remove(selected);
+    _writes.addFirst(selected);
+    return selected;
+  }
 }
 
 class _PendingGattWrite {
-  _PendingGattWrite(this.fragments, this.byteCount, this.transmission);
+  _PendingGattWrite(
+      this.fragments, this.byteCount, this.transmission, this.priority);
   final List<Uint8List> fragments;
   final int byteCount;
   final GattFragmentTransmission transmission;
+  final SendPriority priority;
   final TransportWrite write = TransportWrite();
   int nextFragment = 0;
 }

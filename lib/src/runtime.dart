@@ -905,6 +905,13 @@ class NearbyRuntime {
   final Set<PeerId> _directRetainedPeers = <PeerId>{};
   final Set<PeerId> _knownRetainedPeers = <PeerId>{};
   final Set<String> _automaticProbeEndpoints = <String>{};
+  // An endpoint becomes comparable to an existing logical owner only after
+  // its HELLO/AUTH exchange has authenticated the remote PeerId. Keep this
+  // short-lived classification so duplicate-link arbitration can suppress a
+  // probe for the same peer without suppressing probes for unrelated peers.
+  // DiscoveryEndpointId values are ephemeral and are never used as identity.
+  final Map<String, PeerId> _authenticatedAutomaticProbePeers =
+      <String, PeerId>{};
   final Set<String> _pendingKnownPeerProbes = <String>{};
   final Map<String, Timer> _knownPeerProbeTimers = <String, Timer>{};
   // A winning READY owner can race a probe started from another transient
@@ -1131,6 +1138,7 @@ class NearbyRuntime {
       return;
     }
     if (event is PlatformGattDisconnected) {
+      _authenticatedAutomaticProbePeers.remove(event.endpointId);
       final binding = _gattBindings[event.endpointId];
       if (binding != null &&
           !binding.acceptsGeneration(event.connectionGeneration)) {
@@ -1466,6 +1474,13 @@ class NearbyRuntime {
       // becoming a failed direct connection.
       final automaticProbe =
           _automaticProbeEndpoints.contains(event.endpointId);
+      if (automaticProbe) {
+        // Before this point every endpoint is only a service-UUID
+        // observation. Do not cancel another probe until this candidate has
+        // authenticated a PeerId; otherwise a third nearby device can win
+        // the race and starve an unrelated peer.
+        _authenticatedAutomaticProbePeers[event.endpointId] = core.remotePeerId;
+      }
       final peer = await _ownPeer(core,
           securityLevel: handshake.exchange.result!.createReady().securityLevel,
           gattEndpointId: event.endpointId,
@@ -1474,6 +1489,7 @@ class NearbyRuntime {
               handshake.exchange.result!.remoteHello.applicationMetadata);
       if (automaticProbe) {
         final classified = await _classifyKnownPeer(peer, event.endpointId);
+        _authenticatedAutomaticProbePeers.remove(event.endpointId);
         if (!classified) {
           _connectionAttemptTimers.remove(event.endpointId)?.cancel();
           _attempts.remove(event.endpointId);
@@ -1484,6 +1500,7 @@ class NearbyRuntime {
       } else {
         _directRetainedPeers.add(peer.peerId);
       }
+      _authenticatedAutomaticProbePeers.remove(event.endpointId);
       _connectionAttemptTimers.remove(event.endpointId)?.cancel();
       _attempts.remove(event.endpointId);
       attempt._connected(peer);
@@ -1493,6 +1510,7 @@ class NearbyRuntime {
           'handshake failed endpoint=${event.endpointId} code=${lpcError.code.name} detail=$error');
       final automaticProbe =
           _automaticProbeEndpoints.contains(event.endpointId);
+      _authenticatedAutomaticProbePeers.remove(event.endpointId);
       final exchange = handshake?.exchange;
       // A duplicate authenticated candidate may lose the physical-link rank
       // race after HELLO/AUTH but before this side publishes READY.  The
@@ -1547,6 +1565,12 @@ class NearbyRuntime {
     if (!config.autoConnectKnownPeers ||
         _closingGattEndpoints.contains(endpointId) ||
         _gattReconnects.containsKey(endpointId) ||
+        // A transport endpoint may be in an explicit or inbound handshake
+        // even before it has an owned PeerConnection. Do not open a second
+        // GATT client for that same endpoint while iOS/macOS is still
+        // negotiating the first one.
+        _startingGattEndpoints.contains(endpointId) ||
+        _gattBindings.containsKey(endpointId) ||
         (existingPeer != null &&
             (existingPeer.state == PeerConnectionState.ready ||
                 existingPeer.state == PeerConnectionState.reconnecting)) ||
@@ -1583,6 +1607,16 @@ class NearbyRuntime {
         _state != RuntimeState.ready ||
         _closingGattEndpoints.contains(endpointId) ||
         _gattReconnects.containsKey(endpointId) ||
+        // A discovery callback can arrive while an automatic known-peer
+        // probe is already opening this same physical endpoint. Do not issue
+        // a second connectGatt: the two handshake modes can consume each
+        // other's HELLO/AUTH frames and leave both logical links retrying.
+        // The existing probe authenticates the PeerId; _ownPeer then replaces
+        // a reconnecting logical owner with that fresh authenticated transport.
+        _automaticProbeEndpoints.contains(endpointId) ||
+        _attempts.containsKey(endpointId) ||
+        _startingGattEndpoints.contains(endpointId) ||
+        _gattBindings.containsKey(endpointId) ||
         (mappedReady && !mappedReconnecting) ||
         (mappedPeer != null &&
             !mappedReconnecting &&
@@ -1591,19 +1625,37 @@ class NearbyRuntime {
     }
     final notBefore = _knownPeerProbeNotBeforeMs[endpointId];
     if (notBefore != null && _monotonicMs < notBefore) return;
-    final peer = _reconnectWaitingForDiscovery
-        .where((candidate) =>
-            candidate.state == PeerConnectionState.reconnecting &&
-            !_gattReconnects.values
-                .any((reconnect) => identical(reconnect.peer, candidate)))
+    // A central-side reconnect normally retries its last endpoint.  That
+    // endpoint can be a stale platform handle after an iOS/Android address
+    // rotation, however, while discovery is already reporting the replacement
+    // endpoint.  Do not leave the logical peer dependent on the old handle:
+    // any reconnecting peer without an active discovery candidate may adopt
+    // this newly observed endpoint.  RESUME/duplicate arbitration still
+    // chooses the first authenticated candidate, so this does not assign a
+    // permanent reconnect direction or create an unbounded set of links.
+    final peer = <PeerConnection>{
+      ..._reconnectWaitingForDiscovery,
+      ..._peers.where(
+        (candidate) => candidate.state == PeerConnectionState.reconnecting,
+      ),
+    }
+        .where((candidate) => !_gattReconnects.values.any((reconnect) =>
+            identical(reconnect.peer, candidate) &&
+            reconnect.discoveryCandidate))
         .firstOrNull;
     if (peer == null) return;
-    final schedule = _reconnectWaitingSchedules[peer];
+    final schedule = _reconnectWaitingSchedules[peer] ??
+        _gattReconnects.values
+            .where((reconnect) => identical(reconnect.peer, peer))
+            .map((reconnect) => reconnect.schedule)
+            .firstOrNull;
     if (schedule == null ||
         schedule.expiredAt(peer._core.monotonicNowMs) ||
         !schedule.attemptDue(peer._core.monotonicNowMs)) {
       return;
     }
+    _reconnectWaitingForDiscovery.add(peer);
+    _reconnectWaitingSchedules[peer] = schedule;
     final backend = _platformBleBackend;
     if (backend == null) return;
 
@@ -1708,16 +1760,19 @@ class NearbyRuntime {
 
   /// A platform endpoint is only a local observation and may change across
   /// Android BLE privacy-address rotations. Once one authenticated peer is
-  /// READY, another automatic identity probe is a competing physical link,
-  /// not a second representation of that peer. Stop those probes here; the
-  /// dedicated logical reconnect scheduler remains independent and resumes
-  /// after the READY peer enters RECONNECTING.
+  /// READY, another automatic identity probe is a competing physical link
+  /// only when its authenticated PeerId matches that owner. Probes that have
+  /// not authenticated yet remain independent candidates for other nearby
+  /// peers. The dedicated logical reconnect scheduler remains independent.
   void _cancelCompetingKnownPeerProbes({
     String? exceptEndpointId,
     PeerConnection? owner,
   }) {
+    if (owner == null) return;
     final endpointIds = _automaticProbeEndpoints
-        .where((endpointId) => endpointId != exceptEndpointId)
+        .where((endpointId) =>
+            endpointId != exceptEndpointId &&
+            _authenticatedAutomaticProbePeers[endpointId] == owner.peerId)
         .toList(growable: false);
     for (final endpointId in endpointIds) {
       _automaticProbeEndpoints.remove(endpointId);
@@ -1734,10 +1789,12 @@ class NearbyRuntime {
       // Close the candidate binding as part of the same duplicate-link
       // arbitration; the generation guard makes late callbacks harmless.
       unawaited(_closeGattBinding(endpointId));
-      if (owner != null) _knownProbeSuppressedByOwner[endpointId] = owner;
+      _knownProbeSuppressedByOwner[endpointId] = owner;
       _log('known probe cancelled as competing endpoint=$endpointId');
     }
-    _pendingKnownPeerProbes.clear();
+    // Pending endpoints have not authenticated a PeerId and therefore cannot
+    // yet be known duplicates. They stay within the configured bounded queue
+    // and perform their own PeerId comparison when probed.
   }
 
   Future<bool> _classifyKnownPeer(
@@ -2727,6 +2784,7 @@ class NearbyRuntime {
       await _closeGattBinding(endpointId);
     }
     _startingGattEndpoints.clear();
+    _authenticatedAutomaticProbePeers.clear();
     for (final timer in _unknownPeerReleaseTimers.values) {
       timer.cancel();
     }
@@ -2848,6 +2906,9 @@ class NearbyRuntime {
       _unknownPeerReleaseTimers.remove(peer)?.cancel();
       final link = _gattLinks.remove(peer);
       final endpointId = link?.endpointId ?? gattEndpointId;
+      if (endpointId != null) {
+        _authenticatedAutomaticProbePeers.remove(endpointId);
+      }
       _gattPeersByEndpoint.removeWhere((_, value) => value == peer);
       _gattReconnectExpiryTimers.remove(peer)?.cancel();
       // A completed automatic probe is only a duplicate-scan suppression
@@ -4018,7 +4079,8 @@ class _RuntimeGroupRouteTransport
       final result = await peer._core.submitEncrypted(
           FrameType.groupReliable, chunk.encode(),
           flags: mode == DeliveryMode.reliableAcked ? 1 : 0,
-          messageId: messageId);
+          messageId: messageId,
+          priority: priority);
       if (result != TransportWriteState.submittedToPlatform) {
         logger(
             'group submit hop failed peer=${peer.peerId} message=${_debugId(groupMessageId.bytes)} pairwise=${_debugId(messageId)} result=$result state=${peer.state}');
@@ -4098,7 +4160,9 @@ class _RuntimeGroupRouteTransport
         for (final chunk in hop.chunks) {
           await peer._core.submitEncrypted(
               FrameType.groupReliable, chunk.encode(),
-              flags: 1, messageId: hop.messageId);
+              flags: 1,
+              messageId: hop.messageId,
+              priority: hop.chunks.first.priority);
         }
         peer._core.ackRetention.finalFrameSubmitted(hop.messageId,
             nowMs: peer._core.monotonicNowMs);
@@ -4119,7 +4183,9 @@ class _RuntimeGroupRouteTransport
           for (final chunk in hop.chunks) {
             final submitted = await peer._core.submitEncrypted(
                 FrameType.coordinatorCheckpoint, chunk.encode(),
-                flags: 1, messageId: hop.messageId);
+                flags: 1,
+                messageId: hop.messageId,
+                priority: SendPriority.interactive);
             if (submitted != TransportWriteState.submittedToPlatform) {
               throw const LpcException(LpcErrorCode.transportClosed);
             }
@@ -4303,7 +4369,9 @@ class _RuntimeGroupRouteTransport
           for (final chunk in hop.chunks) {
             final submitted = await peer._core.submitEncrypted(
                 FrameType.coordinatorCheckpoint, chunk.encode(),
-                flags: 1, messageId: hop.messageId);
+                flags: 1,
+                messageId: hop.messageId,
+                priority: SendPriority.interactive);
             if (submitted != TransportWriteState.submittedToPlatform) {
               throw const LpcException(LpcErrorCode.transportClosed);
             }
@@ -4329,7 +4397,9 @@ class _RuntimeGroupRouteTransport
           for (final chunk in hop.chunks) {
             final submitted = await peer._core.submitEncrypted(
                 FrameType.groupReliable, chunk.encode(),
-                flags: 1, messageId: hop.messageId);
+                flags: 1,
+                messageId: hop.messageId,
+                priority: hop.chunks.first.priority);
             if (submitted != TransportWriteState.submittedToPlatform) {
               throw const LpcException(LpcErrorCode.transportClosed);
             }

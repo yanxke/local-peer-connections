@@ -33,7 +33,7 @@ class StreamTerminalFailure extends StreamWriteSubmission {
 
 /// Portable ordered-stream backend for L2CAP and TCP. It never fragments LPC
 /// itself: the platform reports acceptance of the exact serialized bytes.
-class StreamBackendConnection implements BackendConnection {
+class StreamBackendConnection implements PrioritizedBackendConnection {
   StreamBackendConnection({
     required this.connectionId,
     required this.transportType,
@@ -69,13 +69,20 @@ class StreamBackendConnection implements BackendConnection {
 
   @override
   TransportWrite write(Uint8List completeSerializedLpcFrame) {
+    return writeWithPriority(completeSerializedLpcFrame,
+        priority: SendPriority.interactive);
+  }
+
+  @override
+  TransportWrite writeWithPriority(Uint8List completeSerializedLpcFrame,
+      {required SendPriority priority}) {
     if (_state != TransportConnectionState.open) {
       throw const LpcException(LpcErrorCode.transportClosed);
     }
     if (_queuedBytes + completeSerializedLpcFrame.length > maxQueuedBytes) {
       throw const LpcException(LpcErrorCode.sendQueueFull);
     }
-    final pending = _PendingStreamWrite(completeSerializedLpcFrame);
+    final pending = _PendingStreamWrite(completeSerializedLpcFrame, priority);
     _writes.add(pending);
     _queuedBytes += completeSerializedLpcFrame.length;
     unawaited(_drain());
@@ -112,7 +119,7 @@ class StreamBackendConnection implements BackendConnection {
     _draining = true;
     try {
       while (_writes.isNotEmpty && _state == TransportConnectionState.open) {
-        final pending = _writes.first;
+        final pending = _takeNext();
         final bytes = pending.bytes.sublist(pending.offset);
         final result = await _platform.write(bytes);
         switch (result) {
@@ -140,11 +147,31 @@ class StreamBackendConnection implements BackendConnection {
       _draining = false;
     }
   }
+
+  _PendingStreamWrite _takeNext() {
+    if (_writes.length < 2) return _writes.first;
+    // A byte stream cannot interleave two partially accepted serialized LPC
+    // frames. Priority selection is therefore only between frames that have
+    // not started physical submission.
+    if (_writes.first.offset != 0) return _writes.first;
+    var selected = _writes.first;
+    for (final candidate in _writes.skip(1)) {
+      if (candidate.priority.index < selected.priority.index) {
+        selected = candidate;
+      }
+    }
+    if (identical(selected, _writes.first)) return selected;
+    _writes.remove(selected);
+    _writes.addFirst(selected);
+    return selected;
+  }
 }
 
 class _PendingStreamWrite {
-  _PendingStreamWrite(List<int> bytes) : bytes = Uint8List.fromList(bytes);
+  _PendingStreamWrite(List<int> bytes, this.priority)
+      : bytes = Uint8List.fromList(bytes);
   final Uint8List bytes;
+  final SendPriority priority;
   final TransportWrite write = TransportWrite();
   int offset = 0;
 }

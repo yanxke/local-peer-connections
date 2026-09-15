@@ -59,4 +59,33 @@ void main() {
     expect(await write.completion, TransportWriteState.submittedToPlatform);
     expect(platform.writes.map((bytes) => bytes.length), [3, 2]);
   });
+
+  test('UT-251 stream selects interactive control before queued bulk data',
+      () async {
+    final platform = _StreamPlatform([
+      const StreamTemporarilyUnavailable(),
+      const StreamBytesAccepted(1),
+      const StreamBytesAccepted(64),
+    ]);
+    final backend = StreamBackendConnection(
+      connectionId: 'tcp',
+      transportType: TransportType.lanTcp,
+      platform: platform,
+    );
+
+    final bulk = backend.writeWithPriority(
+      Uint8List.fromList(List<int>.filled(64, 1)),
+      priority: SendPriority.bulk,
+    );
+    await Future<void>.delayed(Duration.zero);
+    final control = backend.writeWithPriority(
+      Uint8List.fromList([2]),
+      priority: SendPriority.interactive,
+    );
+    backend.writable();
+
+    expect(await control.completion, TransportWriteState.submittedToPlatform);
+    expect(await bulk.completion, TransportWriteState.submittedToPlatform);
+    expect(platform.writes[1].length, lessThan(platform.writes[0].length));
+  });
 }

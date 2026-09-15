@@ -34,6 +34,7 @@ abstract interface class BackendConnection {
   TransportType get transportType;
   TransportConnectionState get state;
   int get maxWriteSize;
+
   TransportWrite write(Uint8List completeSerializedLpcFrame);
   Future<void> close();
   Stream<BackendConnectionEvent> get events;
@@ -45,6 +46,18 @@ abstract interface class BackendConnection {
 abstract interface class RealtimeBackendConnection
     implements BackendConnection {
   TransportWrite writeRealtime(Uint8List completeSerializedLpcFrame);
+}
+
+/// Optional backend capability for Section 37 priority scheduling. Keeping
+/// this separate preserves source compatibility for custom backends that only
+/// implement the original FIFO [BackendConnection] contract.
+abstract interface class PrioritizedBackendConnection
+    implements BackendConnection {
+  /// Queues one complete LPC frame. The backend must preserve FIFO order
+  /// within a priority, but may select a higher-priority queued frame before
+  /// a lower-priority one.
+  TransportWrite writeWithPriority(Uint8List completeSerializedLpcFrame,
+      {required SendPriority priority});
 }
 
 sealed class BackendConnectionEvent {

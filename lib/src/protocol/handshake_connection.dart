@@ -59,6 +59,13 @@ class HandshakeConnection {
       Completer<HandshakeResult>();
   final Completer<List<int>> _candidateInitialFrame = Completer<List<int>>();
   StreamSubscription<BackendConnectionEvent>? _subscription;
+  // GATT notifications are delivered in order, but parsing and cryptographic
+  // verification are asynchronous. Serialize receive work as well as the
+  // platform callbacks: otherwise a fast link can start processing AUTH
+  // while the preceding HELLO is still being decoded, yielding the misleading
+  // "AUTH before HELLO exchange" failure. This is especially likely during
+  // crossed reconnect candidates, where both sides submit frames back-to-back.
+  Future<void> _inbound = Future<void>.value();
   bool _started = false;
   bool _localReadySubmitted = false;
   bool _remoteReadyAuthenticated = false;
@@ -102,7 +109,9 @@ class HandshakeConnection {
     _log(
         'start candidateOnly=$candidateOnly acceptCandidateResume=$acceptCandidateResume');
     _subscription = backend.events.listen((event) {
-      if (event is BackendBytesReceived) unawaited(_receive(event.bytes));
+      if (event is BackendBytesReceived) {
+        _inbound = _inbound.then((_) => _receive(event.bytes));
+      }
       if (event is BackendClosed) {
         if (!_ready.isCompleted && !_remoteReadyFrameReceived) {
           _fail(const LpcException(LpcErrorCode.transportClosed));

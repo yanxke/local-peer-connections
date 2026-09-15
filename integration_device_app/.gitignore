@@ -32,6 +32,7 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+/macos/Runner/Configs/Local.xcconfig
 
 # Symbolication related
 app.*.symbols

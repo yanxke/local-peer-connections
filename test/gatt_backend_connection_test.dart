@@ -82,6 +82,35 @@ void main() {
     expect(write.state, TransportWriteState.pending);
   });
 
+  test('UT-250 GATT selects interactive control before queued bulk data',
+      () async {
+    final platform = _GattPlatform([
+      GattFragmentSubmission.temporarilyUnavailable,
+      GattFragmentSubmission.submitted,
+      GattFragmentSubmission.submitted,
+    ], safeWriteSize: 20000);
+    final backend =
+        GattBackendConnection(connectionId: 'gatt', platform: platform);
+
+    final bulk = backend.writeWithPriority(
+      Uint8List.fromList(List<int>.filled(64, 1)),
+      priority: SendPriority.bulk,
+    );
+    await _turn();
+    final control = backend.writeWithPriority(
+      Uint8List.fromList([2]),
+      priority: SendPriority.interactive,
+    );
+    backend.writable();
+
+    expect(await control.completion, TransportWriteState.submittedToPlatform);
+    expect(await bulk.completion, TransportWriteState.submittedToPlatform);
+    // The first attempt was the already-selected bulk frame and the next
+    // attempt must be the shorter interactive frame, before bulk resumes.
+    expect(
+        platform.submitted[1].length, lessThan(platform.submitted[0].length));
+  });
+
   test('UT-064/068 GATT write remains pending until final fragment submission',
       () async {
     final platform = _GattPlatform([
