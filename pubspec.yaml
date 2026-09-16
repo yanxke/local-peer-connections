@@ -3,8 +3,8 @@ description: Offline, coordinator-routed proximity networking for Flutter.
 version: 0.1.0
 homepage: https://example.invalid/local_peer_connections
 environment:
-  sdk: '>=3.3.0 <4.0.0'
-  flutter: '>=3.19.0'
+  sdk: '>=3.12.0 <4.0.0'
+  flutter: '>=3.44.0'
 dependencies:
   flutter:
     sdk: flutter
