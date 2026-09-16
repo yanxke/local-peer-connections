@@ -4005,6 +4005,16 @@ If authenticated GROUP_INFO records have the same GroupId but different membersh
 - both complete `GroupMemberRecord` lists are available from GROUP_INFO;
 - the capacity rule in Section 31.4 MUST be applied.
 
+An authenticated GROUP_INFO from the current coordinator with a coordinator
+term lower than the receiver's committed term and a strict subset
+of the receiver's committed member records is a stale bootstrap view, not a
+second coordinator view.  The receiver MUST NOT create a reconciliation term
+for that subset.  It MUST retain its current committed membership and may
+re-send current GROUP_INFO.  The coordinator MUST also send the current
+committed MEMBERSHIP_SNAPSHOT to that authenticated peer specifically; a
+recreated GroupSession has no prior snapshot retry state, and GROUP_INFO alone
+cannot expand its stale subset view.
+
 If the union exceeds effective_max_peers, the winner MUST NOT silently evict arbitrary peers.
 
 Instead:
