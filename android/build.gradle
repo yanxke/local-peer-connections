@@ -1,0 +1,30 @@
+group 'dev.localpeerconnections.local_peer_connections'
+version '1.0-SNAPSHOT'
+
+buildscript {
+  ext.kotlin_version = '2.4.0'
+  repositories { google(); mavenCentral() }
+  dependencies {
+    classpath 'com.android.tools.build:gradle:9.1.0'
+    classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+  }
+}
+rootProject.allprojects { repositories { google(); mavenCentral() } }
+apply plugin: 'com.android.library'
+
+android { namespace 'dev.localpeerconnections.local_peer_connections'; compileSdk 34
+  defaultConfig { minSdk 23 }
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+}
+
+// AGP 9 provides Kotlin compilation through built-in Kotlin. Applying the
+// legacy Kotlin Android plugin here makes host Flutter builds fail in future
+// Flutter releases, so keep compiler configuration on the supported DSL.
+kotlin {
+  compilerOptions {
+    jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+  }
+}

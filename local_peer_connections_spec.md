@@ -1,9 +1,9 @@
 # Local Peer Connections
 ## Normative Cross-Platform Offline Proximity Networking Specification
 
-**Specification version:** 0.9.6-coordinator-authority-loss-stale-routing  
+**Specification version:** 0.9.15-application-validated-checkpoints
 **Wire protocol major:** 1  
-**Wire protocol minor:** 1  
+**Wire protocol minor:** 0  
 **Working project name:** `local_peer_connections`
 
 > This document is normative. An implementation claiming conformance MUST implement all MUST requirements for the declared version.  
@@ -25,7 +25,7 @@ The initial application target is local multiplayer for 2 to 8 nearby phones.
 
 # 2. Required User-Visible Behavior
 
-Protocol minor 1 changes the primary application model from explicit host/client selection to an automatically coordinated peer group.
+Protocol minor 0 changes the primary application model from explicit host/client selection to an automatically coordinated peer group.
 
 A normal application MUST NOT require the user to choose "Host" or "Client".
 
@@ -153,13 +153,13 @@ A BLE Baseline implementation MUST implement:
 - cross-platform Android/iOS interoperation;
 - no required OS-level bonding.
 
-## 3.3 Full V1.1 Mobile Conformance
+## 3.3 Full V1.0 Mobile Conformance
 
-A product claiming **Full V1.1 Mobile Conformance** MUST implement all of the following:
+A product claiming **Full V1.0 Mobile Conformance** MUST implement all of the following:
 
 - Core Protocol Conformance;
 - BLE Baseline Conformance;
-- protocol major 1, minor 1;
+- protocol major 1, minor 0;
 - `GroupSession` and `AUTO_GROUP`;
 - automatic group formation and deterministic merge behavior;
 - automatic coordinator election;
@@ -171,7 +171,7 @@ A product claiming **Full V1.1 Mobile Conformance** MUST implement all of the fo
 - Android implementation;
 - iOS implementation;
 - required diagnostics and conformance events;
-- all mandatory protocol-1.1 unit, coordinator, backend, integration, and binary-vector tests applicable to implemented capabilities.
+- all mandatory protocol-1.0 unit, coordinator, backend, integration, and binary-vector tests applicable to implemented capabilities.
 
 The following remain optional capability extensions unless another conformance profile explicitly requires them:
 
@@ -179,9 +179,9 @@ The following remain optional capability extensions unless another conformance p
 - Wi-Fi LAN TCP transport;
 - Wi-Fi LAN UDP realtime sidecar.
 
-A product MUST NOT claim Full V1.1 Mobile Conformance if it omits any required item above.
+A product MUST NOT claim Full V1.0 Mobile Conformance if it omits any required item above.
 
-## 3.4 Minor-1-Only Baseline
+## 3.4 Minor-0-Only Baseline
 
 This specification intentionally defines no backwards compatibility with any earlier unimplemented protocol draft.
 
@@ -189,12 +189,12 @@ A conforming wire implementation MUST support:
 
 ```text
 protocol major = 1
-protocol minor = 1
+protocol minor = 0
 ```
 
-and MUST NOT claim protocol-minor-0 support.
+and MUST NOT claim protocol-minor-1 support.
 
-Protocol minor 1 is the first frozen, implementation-targeted wire baseline for this project.
+Protocol minor 0 is the first frozen, implementation-targeted wire baseline for this project.
 
 
 ---
@@ -206,7 +206,7 @@ The following values are REQUIRED for this specification:
 ```text
 Protocol magic:          ASCII "LPC1"
 Protocol major:          1
-Current specification minor: 1
+Current specification minor: 0
 
 Default service UUID:    83F20A00-8C5A-4F5A-9A3A-2F0D7A96B100
 RX characteristic UUID:  83F20A01-8C5A-4F5A-9A3A-2F0D7A96B100
@@ -218,19 +218,19 @@ A conforming implementation of this specification MUST advertise this supported 
 
 ```text
 supported_major = 1
-min_minor = 1
-max_minor = 1
+min_minor = 0
+max_minor = 0
 ```
 
-This specification defines only protocol major 1, minor 1.
+This specification defines only protocol major 1, minor 0.
 
-There is no normative protocol-minor-0 wire compatibility requirement.
+There is no normative protocol-minor-1 wire compatibility requirement.
 
 Minor negotiation machinery remains in the wire format so future protocol-major-1 minor versions can coexist, but an implementation conforming to this specification MUST advertise:
 
 ```text
-min_minor = 1
-max_minor = 1
+min_minor = 0
+max_minor = 0
 ```
 
 until a later specification explicitly adds another supported minor.
@@ -240,10 +240,16 @@ Applications MAY override the service UUID namespace, but both peers MUST use th
 If overridden:
 
 ```text
-RX UUID      = service UUID with final byte + 1
-TX UUID      = service UUID with final byte + 2
-Control UUID = service UUID with final byte + 3
+RX UUID      = service UUID with byte offset 3 + 1
+TX UUID      = service UUID with byte offset 3 + 2
+Control UUID = service UUID with byte offset 3 + 3
 ```
+
+Here, byte offset 3 is the least-significant byte of the UUID's leading
+big-endian 32-bit field. All other UUID bytes are unchanged. This rule is
+fixed by the default UUIDs above: `83F20A00-...` derives
+`83F20A01-...`, `83F20A02-...`, and `83F20A03-...`. An override whose byte at
+offset 3 is greater than `0xFC` cannot use this arithmetic.
 
 If UUID arithmetic is unavailable in a binding, the application MUST provide all four UUIDs explicitly.
 
@@ -374,14 +380,40 @@ CBAdvertisementDataServiceUUIDsKey = [configured LPC service UUID]     // iOS co
 service UUID = configured LPC service UUID                            // Android concept
 ```
 
-A local name MAY also be advertised as a non-authoritative UI hint, but:
+An application using user-visible nearby discovery MUST configure a user-facing `discoveryDisplayName`. Its purpose is to let nearby users distinguish discovered LPC applications before LPC identity authentication completes.
 
-- it MUST NOT be required for discovery;
+`discoveryDisplayName` MUST be:
+
+- valid UTF-8;
+- non-empty after trimming application-defined surrounding whitespace;
+- human-readable;
+- selected by the user or generated by the application as a human-readable alias;
+- stable for the installation until the application or user explicitly changes it;
+- independent from Bluetooth addresses, platform GUIDs, `DiscoveryEndpointId`, PeerId, IP address, or other transport identifiers.
+
+An application MAY generate a display name automatically when the user has not supplied one. An automatically generated value MUST be a human-readable alias such as:
+
+```text
+Silver Otter 4827
+Quiet Maple 1934
+Blue Falcon 7201
+```
+
+It MUST NOT be an opaque random string, UUID, hexadecimal identifier, PeerId fragment, BLE address, or platform GUID.
+
+When configured, the backend SHOULD request advertisement of `discoveryDisplayName` as the platform local name wherever the platform permits. The backend MAY truncate or omit the advertised local-name bytes when required by platform advertisement limits or operating-system behavior.
+
+A local name, including `discoveryDisplayName`, is always a non-authoritative UI hint before authentication and:
+
+- it MUST NOT be required for transport discovery;
 - it MUST NOT contain protocol-critical fields;
 - it MUST NOT contain PeerId;
 - it MUST NOT contain security material;
-- it MAY be truncated or absent;
-- applications MUST treat it as unauthenticated.
+- applications MUST clearly indicate that it is unauthenticated/unverified when shown before LPC authentication. The literal UI word `Unauthenticated` is not required; equivalent user-facing wording such as `Unverified name` is conforming when it clearly communicates that the discovery name has not yet been authenticated.
+
+LPC MUST NOT invent a replacement visible identifier when the platform omits or truncates the local-name hint. In particular, LPC MUST NOT substitute a Bluetooth address, platform GUID, `DiscoveryEndpointId`, PeerId fragment, UUID, or random opaque value.
+
+Applications that expose unknown nearby peers to users SHOULD ensure the same logical application display name is also carried in authenticated application metadata after HELLO/AUTH so the pre-authentication label and the post-authentication self-declared label remain consistent. LPC does not define the application metadata schema and therefore cannot itself enforce byte-for-byte equality between those two application values.
 
 No V1 requirement depends on manufacturer data, service data, custom AD structures, or scan-response bytes.
 
@@ -441,6 +473,75 @@ A `DiscoveryEndpointId` remains connectable until either:
 
 After that, `connect()` MUST fail with `ENDPOINT_LOST`.
 
+## 9.1 Automatic Known-Peer Identification and Connection
+
+A Runtime MAY be configured to automatically identify discovered endpoints and retain connections to application-known peers.
+
+This facility exists because a `DiscoveryEndpointId`, Bluetooth address, `CBPeripheral` identifier, and other platform discovery identifiers are not persistent LPC identity. The same authenticated `PeerId` may later be observed through a different `DiscoveryEndpointId`.
+
+The application owns the persistent definition of which PeerIds are known. LPC owns discovery, bounded candidate probing, cryptographic PeerId establishment, lookup invocation, and automatic connection retention.
+
+The complete population of application-known PeerIds MUST NOT be represented as active `PeerConnection`, reconnect, queue, discovery, or other per-peer runtime objects merely because those PeerIds are known.
+
+Automatic known-peer processing is: 
+
+```text
+EndpointFound
+    |
+    v
+bounded candidate probe/authentication
+    |
+    v
+authenticated PeerId P established
+    |
+    v
+KnownPeerResolver.isKnownPeer(P)
+    |
+    +----------------------+
+    |                      |
+   true                   false
+    |                      |
+    v                      v
+retain connection      do not classify as known
+emit KnownPeerConnected    emit UnknownPeerIdentified when applicable
+```
+
+The SDK MUST NOT infer known-peer status from:
+
+- Bluetooth address;
+- `DiscoveryEndpointId`;
+- advertised local name;
+- IP address;
+- hostname;
+- RSSI;
+- previously cached platform peripheral identity.
+
+Only an authenticated LPC `PeerId` may be supplied to the known-peer resolver.
+
+Before authenticated PeerId establishment, a UI MAY represent the candidate using the observed local-name hint originating from the remote application's `discoveryDisplayName`. Such a label MUST remain explicitly unauthenticated.
+
+For applications that expose unknown peers to users, absence of a usable human-readable discovery name is an incomplete presentation state. The application SHOULD withhold that endpoint from the normal selectable unknown-peer list until a usable application-provided name is available. It MUST NOT substitute a generic repeated label, Bluetooth address, platform GUID, `DiscoveryEndpointId`, PeerId fragment, or random opaque identifier merely to fill the name field.
+
+A Runtime configured for automatic known-peer connection MUST bound both active candidate probes and pending probe work according to Section 33.1.2.
+
+Repeated observations of one active `DiscoveryEndpointId` MUST NOT create duplicate concurrent candidate probes.
+
+An endpoint-scoped completed-probe suppression entry is valid only while the
+authenticated logical owner associated with that endpoint remains active
+(`READY` or `RECONNECTING`).  If the owner has no active association, or has
+reached terminal `DISCONNECTED`, the Runtime MUST clear the suppression entry
+and MUST allow a later observation of the same endpoint to start a fresh
+bounded candidate probe.  Cleanup MUST be idempotent and MUST tolerate a
+platform that omits or reorders duplicate disconnect callbacks.
+
+If a pending endpoint is lost before probing starts, the SDK SHOULD discard that pending probe.
+
+If a previously known PeerId later appears through a different discovery/platform identifier, the Runtime MUST treat it as the same known peer once the new connection establishes the same authenticated PeerId.
+
+This facility does not change the configured LPC trust mode. If that trust mode requires user interaction, such as SAS confirmation for a first connection, automatic known-peer classification cannot complete until the trust requirements for that connection are satisfied. Applications requiring zero-interaction known-peer rediscovery SHOULD choose a trust profile compatible with that UX while accurately representing its security properties.
+
+`KnownPeerResolver` is an application relationship/connection policy. It is distinct from `KnownPeerPolicy` and `GroupTrustMode.KNOWN_PEERS`, which are LPC authentication/admission policies.
+
 ---
 
 # 10. BLE Physical Roles and Automatic Group Coordination
@@ -479,13 +580,55 @@ advertise window:   800 ms
 
 and repeat continuously until connected or stopped.
 
+Reconnect MUST NOT assign an application-level reconnect initiator or require
+an upper layer to choose one.  While a Runtime has an active reconnecting
+PeerConnection, it MUST continue any already-active advertising and discovery
+demand.  A Runtime that owns only the peripheral side of the failed physical
+link MUST remain eligible to recover by accepting an inbound candidate or, when
+it observes a new compatible discovery endpoint, by opening a fresh central
+candidate.  The first authenticated candidate that completes the Section 26
+RESUME proof wins; other candidates are handled by the duplicate-physical-link
+rules in Section 10.2.  This rule does not change the central/peripheral role
+of an individual physical link and does not make the LPC coordinator a BLE
+role.
+
+If the last central-side reconnect endpoint is stale, unavailable, or a
+platform address rotation exposes a different compatible discovery endpoint,
+the Runtime MUST also remain eligible to open a fresh central candidate for
+that reconnecting PeerConnection.  It MUST NOT wait indefinitely for the old
+endpoint or require the upper layer to restart LPC.  The candidate is still
+authenticated and completed through Section 26 before it can replace the
+logical connection, and the existing bounded reconnect deadline and
+duplicate-link arbitration remain in force.
+
 ## 10.2 Duplicate Physical Connections
 
 Because both peers advertise and scan, opposite-direction GATT connections may be created simultaneously.
 
-After authentication, if two physical links connect the same PeerId pair, retain exactly one.
+A binding/runtime MUST coalesce duplicate platform readiness callbacks for the
+same current `DiscoveryEndpointId`/physical endpoint so they do not start
+multiple concurrent handshake bindings for that endpoint. This per-endpoint
+coalescing MUST NOT globally suppress automatic probes for unrelated
+discovery endpoints or authenticated PeerIds; known-peer probe concurrency is
+bounded by Section 33.1.2.
 
-For each link compute:
+After authentication, if two physical links are redundant candidates for the same PeerId pair and the same LPC logical/security session requirement, retain exactly one.
+
+An existing READY logical PeerConnection is a stale owner when its negotiated
+keepalive dead timeout has elapsed without a valid authenticated encrypted
+frame, even if the platform has not delivered a transport-disconnect callback.
+When a fresh, fully authenticated candidate for the same PeerId and compatible
+security profile arrives on a different physical transport, the Runtime MUST
+move the stale owner through the normal transport-loss/reconnect path and MUST
+allow the fresh candidate to replace it. The stale READY owner MUST NOT win
+duplicate rank arbitration solely because it still reports READY. The candidate
+remains subject to the authentication, security-profile, and single-owner
+rules in this section; this rule does not permit two logical sessions to
+coexist.
+
+A Runtime MAY intentionally maintain distinct LPC logical/security sessions to the same PeerId only when required by incompatible security profiles as defined in Section 33.5.1. Such distinct logical/security sessions are not duplicates merely because their PeerIds match. Implementations SHOULD multiplex distinct logical sessions over one physical transport where the backend permits it.
+
+For each redundant link compute:
 
 ```text
 connection_rank =
@@ -513,7 +656,7 @@ joinOrCreateGroup(GroupConfig) -> GroupSession
 
 rather than separately choosing host/client roles.
 
-Low-level explicit `createHostSession()` MAY remain available as an advanced compatibility API, but it is NOT the primary V1.1 developer experience.
+Low-level explicit `createHostSession()` MAY remain available as an advanced compatibility API, but it is NOT the primary V1.0 developer experience.
 
 ## 10.4 Group Identifiers
 
@@ -614,7 +757,7 @@ Payload:
 
 ## 10.8 Canonical GroupMemberRecord and Membership Snapshot
 
-Protocol minor 1 defines one canonical committed membership record used everywhere group membership is serialized or hashed.
+Protocol minor 0 defines one canonical committed membership record used everywhere group membership is serialized or hashed.
 
 ```text
 GroupMemberRecord {
@@ -879,12 +1022,17 @@ CoordinatorChanged {
 
 The networking framework can automatically migrate the coordinator role and transport topology, but it cannot infer arbitrary game simulation state.
 
-To make game migration low-friction, `GroupSession` MUST provide an optional replicated coordinator checkpoint facility:
+To make application coordinator-state migration low-friction, `GroupSession` MUST provide an optional replicated coordinator checkpoint facility with application-visible replication acknowledgement:
 
 ```text
-publishCoordinatorCheckpoint(bytes)
+publishCoordinatorCheckpoint(bytes, CheckpointPublishOptions = default)
+    -> CoordinatorCheckpointHandle
+
 latestCoordinatorCheckpoint()
+    -> bytes optional
 ```
+
+The checkpoint bytes are opaque to LPC. This facility is generic application-state replication and MUST NOT interpret game state, document state, workflow state, caches, indexes, or any other application-specific schema.
 
 Constraints:
 
@@ -895,13 +1043,78 @@ wire delivery: ACK_REQUIRED checkpoint operation
 replication queue per target: 1 in-flight + 1 replaceable pending
 ```
 
-The framework retains the most recently published checkpoint and replicates checkpoint state to READY members using the bounded latest-pending policy defined in Section 31.
+The publish-rate limit is a rolling one-second acceptance window. If accepting
+`publishCoordinatorCheckpoint(...)` would make five accepted publishes in
+that window, the call MUST fail synchronously with `RESOURCE_EXHAUSTED`.
+The failed value MUST NOT allocate a publicationId, MUST NOT replace
+`latestCoordinatorCheckpoint`, and MUST NOT enter any target replication slot.
 
-Publishing faster than transport throughput MUST NOT create an unbounded checkpoint backlog.
+Every accepted publication allocates one GroupSession-local `publicationId`
+and returns a `CoordinatorCheckpointHandle`. The handle correlates that one
+application publication with the already-defined independent per-target
+`COORDINATOR_CHECKPOINT` ACK-required operations. `publicationId` is local API
+state only. It is not serialized and is not a replacement for per-target
+`checkpoint_sequence` or pairwise `MessageId`.
 
-When a local peer becomes coordinator, `CoordinatorChanged` MUST include the most recent fully received checkpoint, if any.
+By default, the handle's required acknowledgement set is an immutable snapshot
+of every other PeerId in the current committed membership at the instant the
+publication is accepted. The application MAY instead request `NONE` or an
+explicit subset of current committed non-local members as defined in Section
+31.11. An explicit required set affects only the publication's durability
+barrier. The checkpoint value continues to follow normal LPC checkpoint
+replication policy and MUST NOT be treated as access-control or confidentiality
+selection.
 
-Applications that do not require authoritative application-state migration MAY ignore this facility.
+`CoordinatorCheckpointHandle` reaches `DURABLE` only when every required peer
+has ACKed the exact publication after complete checkpoint reassembly and local
+checkpoint commit on that peer. Thus a `DURABLE` result is stronger than
+`SENT_TO_TRANSPORT` and stronger than local `latestCoordinatorCheckpoint`
+retention.
+
+The framework retains the most recently published checkpoint and replicates
+checkpoint state using the bounded latest-pending policy defined in Section 31.
+Publishing faster than transport throughput MUST NOT create an unbounded
+checkpoint backlog.
+
+When a local peer becomes coordinator, `CoordinatorChanged` MUST include the
+most recent fully received checkpoint available locally, if any. This promotion
+value is recovery data. Its presence alone MUST NOT be described as proof that
+the previous coordinator's application-visible durability barrier completed.
+Only the publisher-side `CoordinatorCheckpointHandle` has that aggregate ACK
+knowledge in protocol minor 0.
+
+Applications that do not require coordinator-state migration or a replication
+barrier MAY ignore this facility.
+
+### 10.12.1 Application-validated checkpoints (protocol minor 0 extension)
+
+`GroupSession.membershipView()` returns one immutable coherent committed view:
+
+```text
+MembershipView { version: uint64, members: sorted immutable GroupMember list }
+```
+
+`version` is local application transaction metadata. It increments for every
+authenticated committed-membership publication, including a publication whose
+PeerId set is unchanged. `CommittedMembershipChanged` carries that exact view
+and its joined/left PeerId sets after the getters have been updated. It is not
+a wire-visible match epoch and applications MUST NOT synthesize one.
+
+`CheckpointPublishOptions` additionally has:
+
+```text
+applicationValidationRequirement: NONE | REQUIRED
+```
+
+When `REQUIRED`, every recipient MUST successfully run its registered
+checkpoint-validation callback after complete reassembly and before committing
+the checkpoint or sending the generic ACK. A missing callback or a `false`/
+throwing callback rejects the checkpoint and produces no ACK. The sender's
+handle is `DURABLE` only when every required member has both committed the
+exact bytes and application-accepted them. The requirement is carried in each
+checkpoint chunk's formerly-reserved uint16 field; bit 0 means REQUIRED and
+all other bits remain zero. This is compatible with minor-0 decoders only when
+they implement this 0.9.15 contract.
 
 
 # 11. GATT Service Definition
@@ -954,6 +1167,15 @@ Properties:
 Read
 Write
 Notify
+```
+
+Permissions:
+
+```text
+Readable: yes
+Writable: yes
+Encryption-required: no
+Authentication-required: no
 ```
 
 CONTROL MAY be unused after initial LPC protocol negotiation, but MUST exist for protocol-major-1 BLE Baseline Conformance.
@@ -1060,7 +1282,7 @@ Rules:
 - For an ACK-required non-DATA control frame, the sender MUST allocate a MessageId according to Section 19.
 - For a non-ACK-required control frame, header `message_id` MUST be all zero.
 
-Protocol minor 1 defines the following control frames as ACK-required:
+Protocol minor 0 defines the following control frames as ACK-required:
 
 ```text
 MEMBERSHIP_SNAPSHOT
@@ -1073,7 +1295,7 @@ GROUP_RELAY_STATUS
 
 These frame types MUST always set `ACK_REQUIRED`.
 
-All other protocol-minor-1 control frames MUST leave `ACK_REQUIRED` clear unless a future negotiated minor explicitly changes their semantics.
+All other protocol-minor-0 control frames MUST leave `ACK_REQUIRED` clear unless a future negotiated minor explicitly changes their semantics.
 
 
 Limits:
@@ -1120,33 +1342,33 @@ Exact protocol-major-1 frame values:
 0x13 SWITCH_ACK
 0x14 CLOSE
 0x15 ERROR
-0x16 COORDINATOR_HEARTBEAT       // protocol minor >= 1
-0x17 MEMBERSHIP_SNAPSHOT          // protocol minor >= 1
-0x18 ELECTION_ANNOUNCE            // protocol minor >= 1
-0x19 COORDINATOR_CLAIM            // protocol minor >= 1
-0x1A COORDINATOR_RESIGN           // protocol minor >= 1
-0x1B REALTIME_DATAGRAM            // protocol minor >= 1
-0x1C GROUP_INFO                   // protocol minor >= 1
-0x1D GROUP_MERGE                  // protocol minor >= 1
-0x1E COORDINATOR_CHECKPOINT       // protocol minor >= 1
-0x1F UDP_OFFER                    // protocol minor >= 1
-0x20 UDP_ACCEPT                   // protocol minor >= 1
-0x21 UDP_CLOSE                    // protocol minor >= 1
-0x22 GROUP_MERGE_REJECT           // protocol minor >= 1
-0x23 GROUP_LEAVE                  // protocol minor >= 1
-0x24 GROUP_RELIABLE               // protocol minor >= 1
-0x25 GROUP_REALTIME_DATAGRAM      // protocol minor >= 1
-0x26 GROUP_DELIVERY_ACK           // protocol minor >= 1
-0x27 GROUP_RELAY_STATUS           // protocol minor >= 1
+0x16 COORDINATOR_HEARTBEAT       // protocol minor >= 0
+0x17 MEMBERSHIP_SNAPSHOT          // protocol minor >= 0
+0x18 ELECTION_ANNOUNCE            // protocol minor >= 0
+0x19 COORDINATOR_CLAIM            // protocol minor >= 0
+0x1A COORDINATOR_RESIGN           // protocol minor >= 0
+0x1B REALTIME_DATAGRAM            // protocol minor >= 0
+0x1C GROUP_INFO                   // protocol minor >= 0
+0x1D GROUP_MERGE                  // protocol minor >= 0
+0x1E COORDINATOR_CHECKPOINT       // protocol minor >= 0
+0x1F UDP_OFFER                    // protocol minor >= 0
+0x20 UDP_ACCEPT                   // protocol minor >= 0
+0x21 UDP_CLOSE                    // protocol minor >= 0
+0x22 GROUP_MERGE_REJECT           // protocol minor >= 0
+0x23 GROUP_LEAVE                  // protocol minor >= 0
+0x24 GROUP_RELIABLE               // protocol minor >= 0
+0x25 GROUP_REALTIME_DATAGRAM      // protocol minor >= 0
+0x26 GROUP_DELIVERY_ACK           // protocol minor >= 0
+0x27 GROUP_RELAY_STATUS           // protocol minor >= 0
 ```
 
 A sender MUST NOT transmit a frame type introduced after the negotiated minor version.
 
-For negotiated minor 1, valid reliable-stream frame types are 0x01 through 0x27.
+For negotiated minor 0, valid reliable-stream frame types are 0x01 through 0x27.
 
-This specification does not define protocol-minor-0 frame semantics.
+This specification does not define protocol-minor-1 frame semantics.
 
-A frame type invalid for negotiated minor 1 MUST cause encrypted ERROR `UNSUPPORTED_FRAME_TYPE`, followed by connection close.
+A frame type invalid for negotiated minor 0 MUST cause encrypted ERROR `UNSUPPORTED_FRAME_TYPE`, followed by connection close.
 
 ---
 
@@ -1233,8 +1455,8 @@ A conforming implementation of this specification MUST send:
 
 ```text
 supported_major = 1
-min_minor = 1
-max_minor = 1
+min_minor = 0
+max_minor = 0
 ```
 
 The generic negotiation algorithm remains:
@@ -1257,7 +1479,7 @@ negotiated_minor >= max(local_min_minor, remote_min_minor)
 For this specification, that means a successful connection MUST negotiate:
 
 ```text
-negotiated_minor = 1
+negotiated_minor = 0
 ```
 
 If the ranges do not intersect, send the exact pre-key plaintext `ERROR(PROTOCOL_MISMATCH)` defined below, then close the physical connection.
@@ -1270,12 +1492,12 @@ protocol_minor = negotiated_minor
 
 HELLO and AUTH headers use the sender's `max_minor`.
 
-A conforming implementation MUST NOT attempt to encode, decode, or emulate protocol-minor-0 DATA/control semantics.
+A conforming implementation MUST NOT attempt to encode, decode, or emulate protocol-minor-1 DATA/control semantics.
 
 A peer advertising:
 
 ```text
-max_minor = 0
+max_minor = 1
 ```
 
 has no compatible minor version with this specification and MUST fail version negotiation with `PROTOCOL_MISMATCH`.
@@ -1346,7 +1568,7 @@ Offset  Size  Field
 103     1     role
 104     1     trust_mode
 105     1     application_metadata_length N, 0..31
-106     2     reserved, MUST be zero
+106     2     keepalive_interval_ms uint16, 1000..10000
 108     4     max_application_message_bytes
 112     N     application_metadata
 ```
@@ -1356,7 +1578,7 @@ Topology:
 ```text
 0x01 POINT_TO_POINT
 0x02 EXPLICIT_STAR        // legacy/advanced API
-0x03 AUTO_GROUP           // protocol minor >= 1
+0x03 AUTO_GROUP           // protocol minor >= 0
 ```
 
 Role:
@@ -1384,17 +1606,40 @@ peer_id == first 16 bytes SHA256(identity_ed25519_public_key)
 
 Failure closes with `AUTHENTICATION_FAILED`.
 
+`keepalive_interval_ms` is the sender's configured local keepalive interval.
+It is authenticated by the HELLO transcript. After both HELLO payloads are
+parsed, both peers compute exactly:
+
+```text
+negotiated_keepalive_interval =
+    max(local HELLO keepalive_interval_ms,
+        remote HELLO keepalive_interval_ms)
+
+keepalive_dead_timeout =
+    max(6000, 3 * negotiated_keepalive_interval)
+```
+
+Both subsequent READY payloads MUST carry those same two derived values. This
+HELLO field is the only keepalive-configuration negotiation mechanism in
+protocol minor 0.
+
 ## 16.4 Peer Capability Bitmap
 
 The HELLO `peer_capability_bitmap` is the `PeerCapabilityBitmap` defined normatively in Section 49.
 
-For protocol minor 1, bits 0 through 8 are defined.
+For protocol minor 0, bits 0 through 8 are defined.
 
 Bits 9 through 31 are reserved and MUST be zero.
 
-Protocol minor 0 capability semantics are not defined by this specification.
+Protocol minor 1 capability semantics are not defined by this specification.
 
 This wire bitmap MUST NOT be confused with `LocalRuntimeCapabilityBitmap`.
+
+The negotiated peer capability bitmap carried by READY is exactly:
+
+```text
+local_hello.peer_capability_bitmap & remote_hello.peer_capability_bitmap
+```
 
 ## 16.5 Transcript
 
@@ -1648,6 +1893,14 @@ Offset Size Field
 
 Session becomes READY only after local READY is sent and remote READY is authenticated.
 
+The READY payload MUST equal the authenticated handshake agreement:
+
+- `session_id` equals the Section 16.12 derived SessionId;
+- `negotiated_peer_capabilities` is the Section 16.4 bitwise intersection;
+- `keepalive_interval_ms` and `keepalive_dead_timeout_ms` are the values
+  derived from the two HELLO payloads above; and
+- `security_level` maps exactly from the mutually encoded HELLO `trust_mode`.
+
 # 17. AEAD Nonce and Associated Data
 
 For encrypted session frames, ChaCha20-Poly1305 nonce is exactly:
@@ -1767,7 +2020,7 @@ MessageId uniqueness is per sender direction for the lifetime of the SessionId.
 
 # 20. Application Delivery Modes and DATA Framing
 
-Protocol minor 1 defines three delivery modes.
+Protocol minor 0 defines three delivery modes.
 
 ```text
 0x01 RELIABLE_ORDERED
@@ -2098,7 +2351,7 @@ Bytes already handed to the operating-system stream buffer cannot be withdrawn. 
 
 ## 22.4 Wi-Fi UDP Realtime Sidecar
 
-Protocol minor 1 defines an OPTIONAL authenticated UDP sidecar used only for `REALTIME_LATEST`.
+Protocol minor 0 defines an OPTIONAL authenticated UDP sidecar used only for `REALTIME_LATEST`.
 
 The UDP sidecar is NOT an LPC reliable transport and MUST NOT share:
 
@@ -2448,7 +2701,7 @@ Realtime falls back to the active reliable transport until the new UDP sidecar b
 
 ### 22.4.12 UDP Endpoint Rebinding
 
-Protocol minor 1 does NOT permit unauthenticated UDP source-address rebinding.
+Protocol minor 0 does NOT permit unauthenticated UDP source-address rebinding.
 
 A UDP packet received from an IP/port different from the endpoint negotiated by UDP_OFFER/UDP_ACCEPT MUST be discarded even if its AEAD verifies.
 
@@ -2467,7 +2720,7 @@ establish a fresh UDP sidecar if policy still allows it
 
 The reliable `PeerConnection`, logical `SessionId`, and reliable transport generation MUST remain unchanged solely because of UDP endpoint movement.
 
-This deterministic rule avoids silently accepting NAT/port rebinding in protocol minor 1 while preserving the reliable session.
+This deterministic rule avoids silently accepting NAT/port rebinding in protocol minor 0 while preserving the reliable session.
 
 
 # 23. Generic ACK, Retransmission, Duplicate Suppression, and RESUME Retention
@@ -2679,6 +2932,13 @@ After successful RESUME:
 - each uses fresh wire sequence numbers in the new transport generation;
 - each such retransmission consumes one retry attempt.
 
+RESUME commits the logical PeerConnection to `READY` before replaying retained
+operations. Replay is bounded by the reconnect deadline (and by the transport
+write completion); a stalled native write MUST NOT strand the peer in
+`RECONNECTING`. A replay that cannot complete is reported through the normal
+transport-loss/reconnect path, while the logical session remains usable for
+new operations once the resumed transport is ready.
+
 Therefore unacknowledged ACK-required operations including `MEMBERSHIP_SNAPSHOT`, `GROUP_MERGE`, `COORDINATOR_CHECKPOINT`, `GROUP_LEAVE`, `GROUP_RELIABLE`, `GROUP_DELIVERY_ACK`, and `GROUP_RELAY_STATUS` survive pairwise RESUME using the same generic reliability mechanism.
 
 ## 23.5 Frame-Specific Final ACK-Timeout Recovery
@@ -2761,7 +3021,7 @@ Default:
 2000
 ```
 
-Peers negotiate:
+Peers negotiate from their HELLO payloads:
 
 ```text
 negotiated_keepalive_interval =
@@ -2820,6 +3080,15 @@ attempt 3: 500 ms after attempt 2 fails
 attempt 4: 1000 ms after attempt 3 fails
 attempt 5+: 2000 ms after previous failure
 ```
+
+The schedule applies to the logical PeerConnection, not to a particular BLE
+central or peripheral role.  A Runtime MUST NOT suppress automatic recovery
+solely because the failed link was locally peripheral-side.  In that case it
+MUST keep the PeerConnection in `RECONNECTING` while the Runtime's active
+discovery/advertising demand provides fresh physical candidates; a candidate
+opened by either side uses the Section 26 lifecycle.  Candidate attempts are
+bounded by the same reconnect deadline and MUST NOT create an unbounded queue
+of discovery endpoints or physical connections.
 
 Stop when:
 
@@ -3023,7 +3292,7 @@ After `RESUME_READY`:
    - if the complete logical application message had reached `SendHandle.SENT_TO_TRANSPORT` before loss, it is not retransmitted automatically;
    - if one or more constituent DATA frames had not reached frame-level `SENT_TO_TRANSPORT`, the entire logical application message is retransmitted from chunk 0 with the same MessageId according to Section 21;
 
-3. every still-unacknowledged `ACK_REQUIRED` logical operation defined by negotiated protocol minor 1 is retransmitted according to Section 23, including:
+3. every still-unacknowledged `ACK_REQUIRED` logical operation defined by negotiated protocol minor 0 is retransmitted according to Section 23, including:
 
 ```text
 RELIABLE_ACKED DATA
@@ -3036,7 +3305,7 @@ GROUP_DELIVERY_ACK
 GROUP_RELAY_STATUS
 ```
 
-This list is exhaustive for protocol minor 1.
+This list is exhaustive for protocol minor 0.
 
 4. retransmitted ACK-required operations retain their original MessageId and logical content while using fresh reliable wire sequence numbers in the resumed transport generation;
 
@@ -3156,11 +3425,13 @@ Offset Size Field
 ACCEPT echoes:
 
 ```text
-upgrade_id
-target_transport
-target_generation
-accept_data_length
-accept_data
+Offset Size Field
+0      16   upgrade_id
+16     1    target_transport
+17     3    reserved = 0
+20     4    target_generation
+24     2    accept_data_length
+26     N    transport-specific accept_data
 ```
 
 REJECT:
@@ -3282,7 +3553,7 @@ Mandatory LAN/L2CAP fallback tests MUST use this behavior.
 
 # 29. Wi-Fi LAN Transport
 
-Protocol minor 1 supports two distinct LAN functions:
+Protocol minor 0 supports two distinct LAN functions:
 
 ```text
 WIFI_LAN_TCP
@@ -3354,11 +3625,18 @@ The L2CAP channel is not trusted until UPGRADE_BIND succeeds.
 Automatic group coordination runs only when:
 
 ```text
-negotiated_minor >= 1
+negotiated_minor >= 0
 AUTO_COORDINATOR capability is mutually set
 ```
 
 After the underlying PeerConnection reaches READY, each `GroupSession` bootstrap connection MUST immediately exchange `GROUP_INFO`.
+
+`GROUP_INFO` is an unacknowledged current-state control record. If a link
+enters RECONNECTING while a runtime is preparing or submitting it, the runtime
+MUST silently abandon that obsolete-generation send and transmit fresh current
+`GROUP_INFO` after the peer returns to READY. This normal transport race MUST
+NOT surface as an uncaught application exception or be treated as a group
+protocol violation.
 
 ## 31.1 Application Namespace and Group Join Scope
 
@@ -3492,8 +3770,14 @@ committed member list =
         max_peers = local GroupConfig.maxPeers
     )
 coordinator_term = 0
-coordinator_peer_id = all zero until election commits
+coordinator_peer_id = local PeerId
 ```
+
+The singleton's local PeerId is provisional coordinator authority for automatic
+merge only. It permits the deterministic winning singleton to originate its
+first `GROUP_MERGE`; it does not give the application authority to select a
+coordinator. Once a merge commits, the normal committed coordinator and term
+rules apply.
 
 
 ## 31.3 Merge Compatibility and Deterministic Evaluation Order
@@ -3641,6 +3925,61 @@ merged_member_count <= effective_max_peers
 
 The winning coordinator sends GROUP_MERGE with frame-header `ACK_REQUIRED=1` independently to all reachable members. Each recipient receives a distinct sender-allocated MessageId for that peer connection.
 
+### 31.6.1 Runtime Merge Dispatch and Admission
+
+`GROUP_INFO` and `GROUP_MERGE` are GroupSession control frames. A READY
+PeerConnection implementation MUST dispatch both to its GroupSession runtime
+owner; it MUST NOT discard them as unhandled peer application traffic.
+
+On each valid authenticated `GROUP_INFO`, the runtime MUST retain the complete
+record for that PeerConnection and evaluate Section 31.3 against its current
+committed local group state. If the local group is the deterministic winner and
+the local peer is its current coordinator, it MUST construct and commit the
+Section 31.6 merge. Before sending the ACK-required `GROUP_MERGE` to that
+peer, it MUST send current winning-group `GROUP_INFO` on the same ordered
+pairwise link. This refresh is required even if a prior generation sent
+`GROUP_INFO`, because the peer may have created its GroupSession only after
+that earlier record was received or discarded. The peer MUST receive that
+winning-group record before the corresponding `GROUP_MERGE`.
+
+If an authenticated `GROUP_INFO` has the same `GroupId` and the same complete
+committed member-record set as the local group, but advertises a strictly
+higher `coordinator_term`, the receiver MUST adopt that coordinator PeerId and
+term before routing any subsequent membership-dependent application traffic.
+The advertised coordinator MUST be one of the committed members. This
+same-group authority refresh MUST NOT change the committed member set or
+`membership_version`; it MUST emit the normal `CoordinatorChanged` event when
+the coordinator changes. An equal-or-lower term MUST NOT overwrite current
+authority metadata. If the receiver is the current coordinator and the
+authenticated peer advertises a lower term or different current coordinator,
+the receiver MUST send its current same-group `GROUP_INFO` back on that same
+ordered pairwise link before emitting the transport-ready/current-state
+catch-up signal for that peer. This response lets a process-restarted member
+adopt current authority before any queued application state is admitted; it
+MUST NOT change membership or create a new application-level reconnect role.
+
+Before applying an incoming `GROUP_MERGE`, the runtime MUST verify all of the
+following:
+
+1. the local current GroupId equals `losing_group_id`;
+2. the retained authenticated `GROUP_INFO` for the sending PeerConnection has
+   `group_id == winning_group_id`;
+3. that retained record names the authenticated sender PeerId as its current
+   `coordinator_peer_id`; and
+4. the payload itself passes the Section 31.6 canonical-membership and term
+   checks.
+
+On acceptance, the runtime MUST atomically commit the winning GroupId,
+membership, coordinator PeerId, and new coordinator term before routing any
+membership-dependent group application traffic. It MUST send the generic ACK
+for the received `GROUP_MERGE` MessageId and publish fresh `GROUP_INFO` for
+the committed state.
+
+A delayed pre-merge `GROUP_INFO` from the losing group MUST NOT cause a new
+merge term when the winning coordinator has already committed the identical
+member union. It may be retained only for normal authenticated stale/duplicate
+handling.
+
 Members receiving a valid merge:
 
 - replace GroupId with winning_group_id;
@@ -3665,6 +4004,16 @@ If authenticated GROUP_INFO records have the same GroupId but different membersh
 - reconciliation term is `max(term_A, term_B) + 1`;
 - both complete `GroupMemberRecord` lists are available from GROUP_INFO;
 - the capacity rule in Section 31.4 MUST be applied.
+
+An authenticated GROUP_INFO from the current coordinator with a coordinator
+term lower than the receiver's committed term and a strict subset
+of the receiver's committed member records is a stale bootstrap view, not a
+second coordinator view.  The receiver MUST NOT create a reconciliation term
+for that subset.  It MUST retain its current committed membership and may
+re-send current GROUP_INFO.  The coordinator MUST also send the current
+committed MEMBERSHIP_SNAPSHOT to that authenticated peer specifically; a
+recreated GroupSession has no prior snapshot retry state, and GROUP_INFO alone
+cannot expand its stale subset view.
 
 If the union exceeds effective_max_peers, the winner MUST NOT silently evict arbitrary peers.
 
@@ -4127,6 +4476,240 @@ Implementations MAY share immutable buffers between these references, but observ
 
 This rule is REQUIRED even if checkpoint publication occurs faster than transport throughput.
 
+### 31.11.8 Publication Identity and Required Acknowledgement Set
+
+Each accepted `publishCoordinatorCheckpoint(...)` call allocates exactly one:
+
+```text
+publication_id: uint64, GroupSession-local, starts at 1
+```
+
+Allocation is:
+
+```text
+allocated = next_checkpoint_publication_id
+if allocated == UINT64_MAX:
+    checkpoint_publication_id_exhausted = true
+else:
+    next_checkpoint_publication_id += 1
+```
+
+After allocating `UINT64_MAX`, another checkpoint publication MUST fail with
+`RESOURCE_EXHAUSTED` until a new GroupSession is created.
+
+`publication_id`:
+
+- identifies one accepted application publication only within the local GroupSession;
+- MUST NOT be serialized into `COORDINATOR_CHECKPOINT`;
+- MUST NOT be compared between peers;
+- MUST NOT be compared between GroupSession instances;
+- MUST NOT alter `checkpoint_sequence` allocation;
+- MUST NOT alter MessageId allocation.
+
+`CheckpointPublishOptions.acknowledgementRequirement` has exactly these conceptual values:
+
+```text
+NONE
+ALL_COMMITTED_MEMBERS
+EXPLICIT_PEERS(set<PeerId>)
+```
+
+Default:
+
+```text
+ALL_COMMITTED_MEMBERS
+```
+
+The required acknowledgement set is snapshotted atomically when the publication is accepted:
+
+```text
+NONE:
+    required_peer_ids = empty set
+
+ALL_COMMITTED_MEMBERS:
+    required_peer_ids =
+        current committed membership PeerIds
+        excluding local coordinator PeerId
+
+EXPLICIT_PEERS(S):
+    required_peer_ids = S
+```
+
+For `EXPLICIT_PEERS`, every PeerId MUST:
+
+- be in the current committed membership snapshot;
+- not equal the local PeerId;
+- appear at most once.
+
+Otherwise publication fails synchronously with `INVALID_ARGUMENT` and MUST NOT
+allocate `publication_id` or mutate checkpoint replication state.
+
+A later member join MUST NOT enlarge an existing publication's required set.
+A later member leave MUST NOT silently shrink it.
+
+The acknowledgement requirement is a completion condition only. LPC still
+replicates the opaque checkpoint according to normal checkpoint replication
+rules. Applications MUST NOT use `EXPLICIT_PEERS` as a confidentiality or
+access-control mechanism.
+
+### 31.11.9 Per-Peer Publication State
+
+For each required peer, the publisher tracks exactly one application-visible
+state for that publication:
+
+```text
+PENDING
+ACKNOWLEDGED
+SUPERSEDED
+ACK_TIMEOUT
+PEER_LEFT
+SESSION_TERMINATED
+AUTHORITY_LOST
+GROUP_CLOSED
+```
+
+State transitions are monotonic. A terminal state MUST NOT return to `PENDING`.
+
+`ACKNOWLEDGED` is set only when the generic ACK for the exact per-target
+checkpoint logical operation associated with this publication is authenticated
+and accepted by the publisher. A hop submission boundary, checkpoint chunk
+submission, peer READY state, or receipt of an ACK for another checkpoint MUST
+NOT produce `ACKNOWLEDGED`.
+
+A required peer that is temporarily not READY MAY remain `PENDING` while normal
+GroupSession reconnect/membership policy can still restore a route. If this
+publication remains the retained latest checkpoint when the peer becomes READY,
+it MUST be associated with the replication operation scheduled for that peer.
+
+If a newer checkpoint replaces this publication while it is still pending and
+untransmitted for a required peer, that peer's state for the older publication
+becomes `SUPERSEDED` immediately. The older publication can no longer become
+`DURABLE`.
+
+If this publication is already in-flight to a peer, a newer publication MUST
+NOT cancel it. The in-flight operation continues to its ordinary ACK or failure
+terminal result. This preserves Section 31.11.2 semantics.
+
+Final checkpoint ACK timeout maps to `ACK_TIMEOUT` for that required peer.
+Committed removal of a required PeerId before its acknowledgement maps to
+`PEER_LEFT`. Terminal loss of the relevant logical session where no normal
+GroupSession recovery path remains maps to `SESSION_TERMINATED`.
+
+If local coordinator authority is lost before the publication reaches terminal
+`DURABLE`, every still-`PENDING` required-peer result becomes `AUTHORITY_LOST`.
+If the GroupSession closes first, every still-`PENDING` result becomes
+`GROUP_CLOSED`.
+
+### 31.11.10 Publication Completion and Durability Semantics
+
+`CoordinatorCheckpointHandle` has conceptual status:
+
+```text
+PENDING
+DURABLE
+FAILED
+```
+
+A publication with an empty required set becomes `DURABLE` immediately after:
+
+1. the publication is accepted;
+2. the bytes pass checkpoint size validation; and
+3. `latestCoordinatorCheckpoint` is atomically updated locally.
+
+For a non-empty required set:
+
+```text
+DURABLE iff every required peer result == ACKNOWLEDGED
+```
+
+For a non-empty required set, the handle remains `PENDING` until every required
+peer has reached a terminal per-peer result. It then becomes:
+
+```text
+DURABLE  if every required peer == ACKNOWLEDGED
+FAILED   otherwise
+```
+
+Thus a failure on one required peer makes `DURABLE` impossible but does not
+freeze inaccurate per-peer results for other required peers that still have
+in-flight operations. Those operations continue to their own terminal results.
+Non-required best-effort replication does not delay handle completion.
+
+The terminal result is:
+
+```text
+CheckpointPublicationResult {
+    publicationId: uint64
+    coordinatorTerm: uint64
+    requiredPeerIds: immutable set<PeerId>
+    perPeerResults: immutable map<PeerId, CheckpointPeerResult>
+    status: DURABLE | FAILED
+}
+```
+
+The handle's completion future/terminal callback MUST fire exactly once.
+
+A `DURABLE` result means all required peers committed the exact checkpoint bytes
+to their LPC checkpoint storage and the publisher authenticated their ACKs. It
+does NOT mean:
+
+- the bytes are persisted across process termination or device reboot;
+- a storage medium was flushed to disk;
+- every future member has the checkpoint;
+- the application payload is semantically valid beyond LPC's opaque-byte rules;
+- the checkpoint is a distributed consensus decision;
+- a later promoted peer can infer from checkpoint bytes alone whether the old
+  publisher observed aggregate durability completion.
+
+Applications that require a state transition to be recoverable before exposing
+it externally SHOULD wait for `DURABLE` using a required set that includes every
+peer the application is willing to allow as a recovery successor.
+
+### 31.11.11 Membership and Publication Races
+
+Checkpoint publication, committed membership changes, coordinator changes, and
+handle state transitions MUST obey the GroupSession serialization rules in
+Section 52.
+
+Therefore a race is resolved by one total local commit order:
+
+```text
+publication accepted before membership removal:
+    removed peer remains in that publication's fixed required set
+    and removal before ACK produces PEER_LEFT
+
+membership removal committed before publication accepted:
+    removed peer is absent from ALL_COMMITTED_MEMBERS snapshot
+    and cannot appear in EXPLICIT_PEERS
+```
+
+A publication that fails because its fixed required set no longer matches the
+application's desired recovery population MUST NOT silently retarget itself.
+The application must publish a new checkpoint, which allocates a new
+`publication_id` and snapshots a new required set.
+
+### 31.11.12 Handle Retention Bound
+
+Application-visible checkpoint publication tracking MUST remain bounded.
+
+A GroupSession MUST retain full mutable per-publication tracking only for:
+
+```text
+1 current latest publication
++ publications that still own an in-flight per-target checkpoint operation
+```
+
+A terminal handle MAY retain its immutable terminal result while referenced by
+application code, but LPC protocol queues MUST release the handle's mutable
+replication bookkeeping once no in-flight operation still references it.
+
+A superseded publication that was never transmitted to any target MUST release
+all mutable replication bookkeeping immediately after its handle becomes
+terminal.
+
+Implementations MUST NOT retain an unbounded history of publication results
+inside GroupSession merely because the application published many checkpoints.
+
 
 ## 31.12 Group Ready Condition
 
@@ -4143,7 +4726,7 @@ A GroupSession enters READY only when:
 
 # 32. Automatic Group API
 
-`GroupSession` is the primary multi-peer application object for protocol minor 1.
+`GroupSession` is the primary multi-peer application object for protocol minor 0.
 
 It automates networking coordinator selection and migration. It does not imply strong first-contact peer authentication unless the application selects a trust mode that provides it.
 
@@ -4155,10 +4738,10 @@ joinOrCreateGroup(GroupConfig config) -> GroupSession
 
 `joinOrCreateGroup()` MUST:
 
-1. begin BLE advertising;
-2. begin BLE discovery;
+1. register logical demand for LPC BLE advertising with the Runtime;
+2. register logical demand for BLE discovery with the Runtime;
 3. discover compatible LPC peers;
-4. establish bootstrap connections as needed;
+4. establish or adopt compatible bootstrap connections as needed;
 5. apply the configured GroupTrustMode;
 6. exchange GROUP_INFO;
 7. join one compatible group or create a singleton group;
@@ -4166,6 +4749,8 @@ joinOrCreateGroup(GroupConfig config) -> GroupSession
 9. elect or adopt a coordinator;
 10. establish the coordinator star;
 11. emit GroupReady.
+
+Advertising and discovery in steps 1 and 2 are **logical Runtime demands**, not a requirement to create a second physical advertiser, GATT listener, or platform scan. Section 33.1.1 defines Runtime multiplexing. `joinOrCreateGroup()` MUST NOT fail merely because a `HostSession` on the same Runtime is already advertising the configured LPC service UUID or because a `DiscoverySession` on the same Runtime is already scanning that UUID.
 
 ## 32.2 GroupTrustMode
 
@@ -4256,6 +4841,43 @@ Rules:
 - For `GROUP_PSK_32`, the exact 32 bytes from `GroupConfig.groupPsk32` MUST be used as the pairwise `PSK_32` input.
 - For `KNOWN_PEERS`, GroupSession MUST configure pairwise `KnownPeerPolicy=ALLOWLIST` with exactly `GroupConfig.allowedPeerIds`; the authenticated remote `PeerId` MUST be present or the connection fails `AUTHENTICATION_FAILED`.
 - `OPEN_TOFU` provides encrypted first-contact continuity only. It MUST NOT be described as verified human/device identity.
+
+### 32.3.1 Shared-service AUTO_GROUP Profile Selection
+
+BLE advertising for protocol 1.0 exposes only the LPC service UUID.  An
+inbound physical connection therefore arrives before the remote group,
+application namespace, and join-token scope are known; those values first
+arrive in authenticated `GROUP_INFO`, after HELLO/AUTH.  The runtime MUST NOT
+guess a `GroupTrustMode` from an unauthenticated endpoint, Bluetooth identity,
+or application metadata.
+
+For this reason, all simultaneously active `GroupSession`s on one Runtime
+that accept automatic-group bootstrap connections MUST have one identical
+pre-HELLO group handshake profile:
+
+```text
+mapped HELLO trust_mode
+PSK bytes, when mapped mode is PSK_32
+complete allowed PeerId set, when mapped mode is KNOWN_PEER
+```
+
+`joinOrCreateGroup()` MUST fail with `INVALID_STATE` before advertising,
+scanning, or creating the new session when its profile differs from the
+already active Runtime AUTO_GROUP profile.  A Runtime with no active
+GroupSession has no AUTO_GROUP profile and MUST NOT accept an unsolicited
+AUTO_GROUP bootstrap connection.
+
+For an inbound AUTO_GROUP bootstrap connection, the Runtime selects this
+unique shared profile before sending local HELLO.  For an outbound AUTO_GROUP
+bootstrap connection, the initiating GroupSession selects the same profile.
+Only after authentication may `GROUP_INFO` determine namespace compatibility,
+join scope, and whether the connected peer is merged or remains in an
+independent group.
+
+This rule does not affect explicit `connect()` or `HostSession` connections:
+they continue to use `RuntimeConfig`/`HostConfig` as specified for those APIs.
+
+A simultaneously advertising `HostSession` does not by itself conflict with the shared AUTO_GROUP profile. The Runtime multiplexes their advertising/listener demand as defined in Section 33.1.1. If the active HostSession inbound handshake profile and the AUTO_GROUP pre-HELLO profile are compatible, the same Runtime ingress path MUST be able to serve both logical owners. If they are incompatible and the UUID-only inbound bootstrap cannot be safely disambiguated before selecting authentication parameters, `joinOrCreateGroup()` MAY fail with `INVALID_STATE` for that explicit security-profile incompatibility. It MUST NOT fail merely because the physical advertiser/listener is already active.
 
 
 ## 32.4 GroupConfig
@@ -4349,7 +4971,8 @@ broadcast(bytes, SendOptions) -> BroadcastHandle
 sendRealtime(peerId, channelId, bytes, RealtimeOptions) -> RealtimeSendHandle
 broadcastRealtime(channelId, bytes, RealtimeOptions) -> RealtimeBroadcastHandle
 
-publishCoordinatorCheckpoint(bytes)
+publishCoordinatorCheckpoint(bytes, CheckpointPublishOptions = default)
+    -> CoordinatorCheckpointHandle
 latestCoordinatorCheckpoint() -> bytes optional
 
 events()
@@ -4357,6 +4980,26 @@ leave()
 close()
 ```
 
+Checkpoint API structures:
+
+```text
+CheckpointPublishOptions {
+    acknowledgementRequirement = ALL_COMMITTED_MEMBERS
+}
+
+CoordinatorCheckpointHandle {
+    publicationId() -> uint64
+    coordinatorTerm() -> uint64
+    requiredPeerIds() -> immutable set<PeerId>
+    status() -> PENDING | DURABLE | FAILED
+    perPeerResults() -> immutable map<PeerId, CheckpointPeerResult>
+    completion() -> Future<CheckpointPublicationResult>
+}
+```
+
+Bindings MAY expose the completion primitive as a future, promise, callback,
+stream terminal event, or equivalent idiom, but MUST preserve the exact
+terminal semantics in Section 31.11.
 
 
 ### Method State Validity
@@ -4385,6 +5028,23 @@ send/broadcast accepted first:
 LEAVING commits first:
     new send/broadcast fails INVALID_STATE
 ```
+
+`publishCoordinatorCheckpoint(...)` is accepted only when all of the following are true:
+
+```text
+GroupState == READY
+local peer is the committed coordinator
+GroupConfig.coordinatorCheckpointing == true
+```
+
+Otherwise it fails synchronously with `INVALID_STATE` and MUST NOT allocate a
+publicationId or mutate retained/pending checkpoint state.
+
+`latestCoordinatorCheckpoint()` is a read-only snapshot getter and remains
+valid until CLOSED. It returns the bytes of the most recent checkpoint value
+available to this local GroupSession, if any. On a coordinator this includes
+the latest locally accepted publication. On a member or newly promoted
+coordinator it is the latest fully received checkpoint retained locally.
 
 `members()`, `state()`, coordinator getters, diagnostics, and event subscription remain valid until CLOSED according to their normal snapshot semantics.
 
@@ -4590,11 +5250,27 @@ CoordinatorCheckpointUpdated {
     bytes
 }
 
-CoordinatorCheckpointReplicationFailed {
+CoordinatorCheckpointReplicationAcknowledged {
     header
+    publicationId: uint64
     peerId
     checkpointSequence: uint64
+}
+
+CoordinatorCheckpointReplicationFailed {
+    header
+    publicationId: uint64
+    peerId
+    checkpointSequence: uint64 optional
     errorCode
+}
+
+CoordinatorCheckpointPublicationCompleted {
+    header
+    publicationId: uint64
+    status: DURABLE | FAILED
+    requiredPeerIds: immutable set<PeerId>
+    perPeerResults: immutable map<PeerId, CheckpointPeerResult>
 }
 
 ReliableMessageReceived {
@@ -4652,6 +5328,20 @@ Pairwise LPC `MessageId` values are protocol-internal and MUST NOT be substitute
 
 `MemberFound` is emitted only after a bootstrap PeerConnection has authenticated enough to establish the peer's PeerId and SecurityLevel. Raw unauthenticated BLE discovery remains a Runtime-level `EndpointFound` event and MUST NOT be exposed as an authenticated GroupSession MemberFound.
 
+When an authenticated PeerConnection for an already committed member returns
+to READY after reconnect/RESUME, or changes to a new transport generation
+without a committed membership change, the GroupSession MUST emit one
+`GroupTransportChanged` event for that member after the new transport is
+usable. If an application recreates its GroupSession after the authenticated
+transport is already READY, receipt of a same-group `GROUP_INFO` for the
+committed member MUST produce the same event so current-state replication is
+not lost in the process-restart ordering race. The event MUST carry the member
+PeerId, the current transport, and the new transport generation;
+`previousTransport` MAY be absent when the prior transport is not known. This
+event MUST NOT change the committed member set or membership version. It is
+the signal for applications with current-state replication to schedule only
+their latest state/checkpoint catch-up for that peer.
+
 
 ## 32.10 Coordinator Transparency
 
@@ -4669,13 +5359,15 @@ The framework migrates networking coordination automatically.
 
 Application authority can migrate automatically only if the application supplies recoverable state.
 
-For games using an authoritative simulation, the application SHOULD:
+Applications with coordinator-owned recoverable state MAY publish opaque serialized state periodically or at application-defined transaction boundaries:
 
 ```text
-publishCoordinatorCheckpoint(serializedAuthoritativeState)
+handle = publishCoordinatorCheckpoint(serializedCoordinatorState)
 ```
 
-at 1 to 4 Hz.
+Best-effort state migration may ignore `handle.completion()`. Applications that
+must know when a particular state value is replicated to a required recovery
+set use the handle's `DURABLE` / `FAILED` result.
 
 After local promotion, the application receives:
 
@@ -4686,9 +5378,12 @@ CoordinatorChanged(
 )
 ```
 
-The application restores its own authoritative state from that checkpoint.
+The application decides how to interpret or restore that checkpoint. LPC MUST
+NOT interpret application-specific checkpoint bytes.
 
-The framework MUST NOT interpret game-specific checkpoint bytes.
+Examples include authoritative game state, collaborative-document coordinator
+state, local workflow state, replicated indexes, session metadata, or another
+application-defined recovery snapshot.
 
 
 # 33. Low-Level Public API Contract and Ownership
@@ -4704,6 +5399,8 @@ Configuration:
 ```text
 RuntimeConfig {
     serviceUuid
+    discoveryDisplayName optional   // REQUIRED by applications exposing user-visible unknown-peer discovery
+    applicationMetadata = bytes <= 31   // default local HELLO application metadata for low-level/probe connections
     trustMode = SAS   // low-level explicit connection default; GroupSession overrides via GroupConfig
     expectedPeerId optional
     psk32 optional
@@ -4711,7 +5408,14 @@ RuntimeConfig {
     enableL2cap = true
     enableLan = true
     autoReconnect = true
+    autoConnectKnownPeers = false
+    knownPeerResolver optional
+    maxConcurrentKnownPeerProbes = 4
+    maxPendingKnownPeerProbes = 64
+    knownPeerLookupTimeoutMs = 2000
+    maxKnownPeerCacheEntries = 256
     keepaliveIntervalMs = 2000
+    gattFragmentInactivityTimeoutMs = 5000
     reconnectTimeoutMs = 15000
     maxQueuedBytesPerPeer = 262144
     maxQueuedMessagesPerPeer = 1024
@@ -4723,12 +5427,65 @@ Validation:
 
 - `PSK_32` requires exactly 32-byte `psk32`;
 - `KNOWN_PEER` connection requires either `EXPECT_EXACT_PEER(expectedPeerId)` or `ALLOWLIST(nonEmptyAllowedPeerIds)`;
+- `autoConnectKnownPeers=true` requires `knownPeerResolver`;
+- `maxConcurrentKnownPeerProbes` must be 1..16;
+- `maxPendingKnownPeerProbes` must be 0..1024;
+- `knownPeerLookupTimeoutMs` must be 100..10000;
+- `maxKnownPeerCacheEntries` must be 0..65536;
 - `keepaliveIntervalMs` must be 1000..10000;
+- `gattFragmentInactivityTimeoutMs` must be 1000..10000;
 - `reconnectTimeoutMs` must be 1000..60000.
+- `applicationMetadata` MUST be 0..31 bytes.
+- `discoveryDisplayName`, when present, MUST satisfy the human-readable/stability requirements of Section 8.1 and MUST NOT be treated as peer identity or authentication material.
+
+`applicationMetadata` is the Runtime default local HELLO application metadata for low-level outbound `connect()` operations and Runtime-owned automatic known-peer candidate probes. It is included in HELLO and becomes authenticated to the remote application only after AUTH succeeds. It MUST NOT be used by LPC itself as identity, trust, routing, or known-peer classification material.
+
+A `HostSession` uses `HostConfig.applicationMetadata` for connections owned by that HostSession. If a binding permits `HostConfig.applicationMetadata` to be omitted, omission means inherit `RuntimeConfig.applicationMetadata`; an explicitly supplied HostConfig value overrides the Runtime value.
+
+`GroupSession` membership, scoping, and trust MUST NOT depend on Runtime application metadata. A binding MAY use the same application metadata bytes for internally created group PeerConnections for presentation purposes, but GROUP_INFO and GroupConfig remain authoritative for group routing/admission semantics.
+
+`discoveryDisplayName` is application-selected presentation metadata for pre-authentication discovery only. A binding SHOULD use it as the requested BLE local name where supported. Platform truncation or omission MUST NOT affect discovery, authentication, known-peer resolution, or connection behavior.
+
+An application that presents unknown discovered endpoints directly to a user MUST supply `discoveryDisplayName`. The runtime MAY permit omission for headless, machine-to-machine, or otherwise non-user-visible discovery use cases.
+
+`RuntimeConfig.discoveryDisplayName` and `RuntimeConfig.applicationMetadata` are the initial local presentation values. They are not permanently immutable. A running Runtime MUST support atomically replacing both through `updateLocalPresentation()`.
+
+```text
+LocalPresentation {
+    discoveryDisplayName optional
+    applicationMetadata bytes 0..31
+}
+
+runtime.updateLocalPresentation(LocalPresentation) -> success / error
+```
+
+Validation is identical to the corresponding `RuntimeConfig` fields. On success:
+
+- the Runtime MUST atomically replace both current values for future use;
+- future low-level outbound handshakes and Runtime-owned automatic known-peer probes MUST use the new `applicationMetadata`;
+- a `HostSession` whose `HostConfig.applicationMetadata` was omitted MUST use the new Runtime metadata for future handshakes;
+- a `HostSession` with an explicit metadata override MUST remain unchanged;
+- existing READY or RECONNECTING `PeerConnection`s MUST NOT be re-handshaken, disconnected, or have their already-authenticated peer metadata retroactively rewritten merely because local presentation changes;
+- active Runtime-owned BLE advertising SHOULD be refreshed to request the new `discoveryDisplayName` where the platform supports doing so, without logically stopping child advertising owners;
+- PeerId, SessionId, GroupId, committed GroupSession membership, coordinator identity, and friendship/application relationship state MUST NOT change solely because of this update.
+
+If the platform requires an internal stop/start of its physical advertisement to refresh the local-name hint, that refresh MUST be treated as a Runtime backend operation and MUST NOT emit a logical `HostSession` stop or `GroupSession` leave.
+
+### Runtime diagnostics
+
+`RuntimeConfig` MAY accept an optional local diagnostic logger:
+
+```text
+logger(message: UTF-8 string)
+```
+
+When configured, the Runtime and its binding-owned transport/protocol components SHOULD emit lifecycle and failure diagnostics, including discovery observations, platform connection identifiers, GATT state changes, handshake phases, probe/reconnect attempts, duplicate-connection decisions, queue/backpressure outcomes, and terminal errors. Logger delivery is advisory: a logger failure MUST NOT change Runtime, connection, or protocol behavior.
+
+Platform transport identifiers such as Bluetooth addresses, platform GUIDs, and `DiscoveryEndpointId` values are non-secret correlation data and MAY appear verbatim in local diagnostic logs and the Diagnostics view. They MUST NOT be used as authenticated or persistent peer identity, sent as wire protocol identity, or persisted as relationship state. Diagnostic logs MUST NOT include private keys, PSKs, authentication secrets, or raw application payload contents; payloads SHOULD be summarized by frame/message type, length, and state.
 
 Ownership:
 
-- Runtime owns every GroupSession, HostSession, DiscoverySession, ConnectionAttempt, and PeerConnection created from it.
+- Runtime owns every GroupSession, HostSession, DiscoverySession, ConnectionAttempt, and PeerConnection created from it. Runtime also arbitrates logical ownership of reusable PeerConnections among those children and retention policies.
 - Child objects MUST NOT outlive Runtime.
 - `runtime.close()` cascades closure to all children.
 
@@ -4740,21 +5497,177 @@ joinOrCreateGroup(config) -> GroupSession
 createHostSession(config) -> HostSession  // advanced explicit-role API
 startDiscovery(config) -> DiscoverySession
 connect(discoveryEndpointId, config) -> ConnectionAttempt
+releasePeerRetention(peerId) -> success / error
+updateLocalPresentation(presentation) -> success / error
 events() -> event source
 close()
 ```
 
-A runtime may have:
+A Runtime may have multiple child objects expressing logical BLE presence demand. Physical BLE advertising, the service listener/server, and scanning are Runtime-owned shared resources as defined below.
+
+A symmetric nearby point-to-point application that must both be discoverable and discover others MAY keep one internal HostSession advertising while one DiscoverySession scans. This is the canonical low-level bidirectional-presence pattern. It does not expose or assign an application-level host/client role. The advertising device is merely the BLE peripheral for an individual physical connection, as defined in Section 10.1.
+
+`releasePeerRetention(peerId)` is the mandatory application-facing operation for releasing Runtime-managed direct/known-peer retention without force-disconnecting a shared PeerConnection.
+
+Its exact binding name MAY be idiomatic, but every conforming binding MUST expose equivalent semantics.
+
+On success it MUST:
+
+- release Runtime-managed explicit/direct retention for `peerId`, if present;
+- release automatic known-peer retention for `peerId`, if present;
+- cancel reconnect/retention work whose only remaining reason is one of those released Runtime-managed owners;
+- invalidate any cached `KnownPeerResolver` result for `peerId`, so a future nearby observation is classified from current resolver state rather than a stale positive cache entry;
+- leave application-owned persistent known-peer storage unchanged;
+- leave HostSession ownership unchanged. An application that also wants to release a HostSession-owned direct relationship uses `HostSession.disconnect(peerId, reason)`;
+- leave GroupSession and all other unrelated logical ownership unchanged;
+- MUST NOT send connection-level CLOSE or close the physical transport while another valid logical owner still requires the PeerConnection.
+
+If these releases remove the final logical owner, the Runtime MUST initiate the normal graceful final-owner close behavior defined in Section 33.5.1.
+
+Calling `releasePeerRetention(peerId)` when no matching Runtime-managed direct/known-peer owner exists MUST succeed as an idempotent no-op unless the Runtime itself is closed, in which case it fails `INVALID_STATE`.
+
+This operation changes retention policy only. It MUST NOT change PeerId, trust history, GroupSession membership, or application relationship records.
+
+### 33.1.1 Runtime-Owned BLE Advertising, Listener, and Discovery Multiplexing
+
+For one configured LPC service UUID, the Runtime owns the physical BLE resources:
 
 ```text
-at most 1 active HostSession advertising
-at most 1 active DiscoverySession per configured service UUID
-multiple PeerConnections
+Runtime
+  |
+  +-- one physical LPC advertiser / peripheral listener when demanded
+  |
+  +-- one physical LPC scan operation when demanded
 ```
+
+`HostSession`, `DiscoverySession`, and `GroupSession` express **logical demand** for those resources. They do not own independent platform advertisers, GATT service registrations/listeners, or duplicate scans.
+
+Normative requirements:
+
+- Multiple child objects on the same Runtime MAY simultaneously require LPC service advertising.
+- The Runtime MUST multiplex compatible logical advertising requirements onto at most one physical advertisement and one physical LPC GATT service/listener for the configured service UUID.
+- The Runtime MUST NOT register duplicate LPC GATT services or duplicate platform listeners merely because another child object begins advertising demand.
+- `HostSession.startAdvertising()` adds HostSession advertising/listener demand. `HostSession.stopAdvertising()` removes only that HostSession's demand.
+- An active GroupSession that requires AUTO_GROUP presence adds GroupSession advertising/listener demand. Leaving or closing that GroupSession removes only its demand.
+- The physical advertiser/listener MUST remain active while at least one compatible logical owner still requires it.
+- A Runtime MAY have at most one explicit `DiscoverySession` object per configured service UUID, but GroupSession discovery demand MUST reuse the Runtime's physical scan when one is already active rather than creating a second platform scan.
+- Stopping the explicit `DiscoverySession` removes only its logical demand. A physical scan MUST continue if an active GroupSession still requires discovery.
+- Conversely, leaving a GroupSession MUST NOT stop the physical scan while the explicit `DiscoverySession` still requires it.
+- `joinOrCreateGroup()` MUST NOT return `INVALID_STATE` solely because same-UUID HostSession advertising or DiscoverySession scanning is already active.
+- Platform limitations that prevent simultaneous advertise/scan are handled by the Runtime time-slicing rule in Section 10.1 across the combined logical demand set, not independently per child object.
+
+Inbound connection dispatch remains subject to authentication-profile compatibility. Sharing a physical listener MUST NOT cause LPC to treat a connection authenticated under one trust/credential profile as satisfying an incompatible logical owner's security requirements.
 
 `close()` is idempotent.
 
 After RuntimeClosed, mutating operations fail `INVALID_STATE`.
+
+### 33.1.2 KnownPeerResolver and Automatic Known-Peer Connection
+
+The application MAY provide:
+
+```text
+KnownPeerResolver {
+    isKnownPeer(peerId: PeerId) -> async bool
+}
+```
+
+`isKnownPeer()` is an exact membership query over application-owned persistent relationship state.
+
+The resolver MAY use SQLite, a key/value store, a platform database, an in-memory set, or another application-controlled backing store. LPC MUST NOT require the complete known-peer population to be copied into Runtime memory.
+
+The resolver contract is:
+
+- LPC MUST call it only with an authenticated `PeerId`;
+- the result `true` means the application currently considers that PeerId known for automatic connection purposes;
+- the result `false` means LPC MUST NOT retain or auto-connect the candidate solely under this facility;
+- lookup failure or timeout MUST be treated conservatively as not-known for the current automatic decision;
+- lookup failure MUST NOT create a Friend/contact/relationship record;
+- the resolver MUST NOT be invoked merely for every stored PeerId at Runtime startup.
+
+The lookup is asynchronous because persistent application storage may require asynchronous access.
+
+A probabilistic structure such as a Bloom filter MAY be used as a negative/positive prefilter, but a positive probabilistic result MUST be confirmed by an exact membership lookup before the SDK treats a peer as known.
+
+#### Probe scheduling
+
+With `autoConnectKnownPeers=true`, the Runtime MAY automatically establish bounded candidate connections for active discovery endpoints whose authenticated PeerId is not yet known for that discovery record.
+
+At all times:
+
+```text
+active automatic known-peer probes <= maxConcurrentKnownPeerProbes
+pending automatic known-peer probes <= maxPendingKnownPeerProbes
+```
+
+Pending work beyond `maxPendingKnownPeerProbes` MUST NOT allocate an unbounded queue. The Runtime MAY drop a pending probe candidate. It SHOULD prefer retaining candidates that are currently observable and SHOULD allow later discovery observations to make a dropped candidate eligible again.
+
+Probe scheduling MUST NOT allocate a `PeerConnection` for every application-known PeerId. Connections are candidate/discovery driven, not database-population driven.
+
+When an automatic candidate probe fails because the physical endpoint closed,
+was lost, or timed out, the Runtime MUST apply a bounded retry delay before
+retrying that endpoint. The retry delay SHOULD include bounded per-runtime and
+per-endpoint jitter so reciprocal probes from two nearby devices do not remain
+phase-locked and repeatedly create simultaneous GATT attempts. This jitter is
+only a scheduling aid: it MUST NOT be used as PeerId identity, trust, routing,
+duplicate ownership, or reconnect-direction authority. The delay and jitter
+MUST remain finite and MUST not prevent a later discovery observation from
+making the endpoint eligible again.
+
+#### Classification and retention
+
+After a candidate reaches the point where its cryptographic PeerId is authenticated and all configured trust requirements necessary for READY have succeeded, the Runtime performs the resolver lookup.
+
+If the result is `true`:
+
+- the Runtime MUST retain the successful PeerConnection rather than close it as a probe-only connection;
+- normal `PeerConnected` semantics apply;
+- the Runtime MUST emit `KnownPeerConnected` exactly once for that connection incarnation, immediately after the corresponding `PeerConnected` event on the Runtime's serialized event stream;
+- `autoReconnect` applies normally after the connection exists.
+
+If the result is `false`:
+
+- the Runtime MUST NOT mark the peer as known;
+- the Runtime MAY emit `UnknownPeerIdentified`;
+- if no explicit application connection request, HostSession ownership, or GroupSession ownership requires the PeerConnection to remain open, the Runtime SHOULD close a probe-only connection promptly;
+- when a local advertising `HostSession` with `autoAccept = true` is active, the Runtime MAY defer that close for a bounded handoff window so an authenticated application request arriving over the simultaneous physical link can be processed; this does not classify the peer as known or create persistent relationship state;
+- the Runtime MUST NOT create persistent relationship state on behalf of the application.
+
+`UnknownPeerIdentified` does not mean unauthenticated. It means LPC established an authenticated PeerId but the application resolver did not classify that PeerId as known.
+
+#### Cache bounds
+
+The Runtime MAY cache resolver results.
+
+Any such cache MUST be bounded to at most:
+
+```text
+maxKnownPeerCacheEntries
+```
+
+entries. A value of `0` disables resolver-result caching.
+
+Cache eviction MUST NOT change persistent application relationship state. An evicted PeerId may simply require a future resolver lookup.
+
+A negative cached result MUST NOT be retained indefinitely. Implementations SHOULD either avoid negative caching or use a short bounded lifetime so that a peer newly added to the application's relationship database can become auto-connectable without Runtime restart.
+
+The application MAY expose its own invalidation mechanism around the resolver. LPC does not define persistent known-peer storage.
+
+#### Memory scaling requirement
+
+Runtime memory attributable to automatic known-peer support MUST be bounded primarily by:
+
+```text
+currently observed discovery endpoints
++ maxConcurrentKnownPeerProbes
++ maxPendingKnownPeerProbes
++ maxKnownPeerCacheEntries
++ actually connected/reconnecting peers
+```
+
+and MUST NOT grow linearly with the complete persistent known-peer database unless the application itself deliberately implements the resolver as an in-memory set.
+
+A conforming Runtime therefore remains valid when the application has a known-peer database much larger than the number of simultaneously nearby peers.
 
 ## 33.2 HostSession
 
@@ -4764,11 +5677,15 @@ Configuration:
 HostConfig {
     maxPeers = 7
     topology = STAR
-    applicationMetadata = bytes <= 31
+    applicationMetadata optional bytes <= 31   // omitted => inherit RuntimeConfig.applicationMetadata
     autoAccept = false
     trustMode optional override
 }
 ```
+
+For a HostSession-owned connection, the local HELLO application metadata MUST be the explicit `HostConfig.applicationMetadata` value when supplied, otherwise `RuntimeConfig.applicationMetadata`.
+
+A HostSession with `autoAccept=true` MAY be used as an internal listener for a symmetric application. This does not make the local application the LPC group coordinator and MUST NOT be surfaced to normal users as a host role.
 
 Methods:
 
@@ -4789,11 +5706,16 @@ close()
 Ownership/lifecycle:
 
 - HostSession owns no Runtime. Runtime owns HostSession.
-- `close()` stops advertising first.
-- It then sends graceful CLOSE to READY peers.
-- It waits at most 1000 ms for close flushing.
-- It force-closes remaining transports.
-- It emits terminal HostSessionClosed.
+- `disconnect(peerId, reason)` releases this HostSession's logical ownership of the matching PeerConnection.
+- If HostSession release leaves another valid Runtime logical owner on that PeerConnection, `disconnect(peerId, reason)` MUST NOT send connection-level CLOSE and MUST NOT close the underlying transport solely because HostSession ownership ended.
+- If HostSession release removes the final logical owner, `disconnect(peerId, reason)` initiates graceful connection-level CLOSE for that PeerConnection.
+- `close()` first releases this HostSession's logical advertising/listener demand. The Runtime stops the physical advertiser/listener only when no other logical owner requires it.
+- `close()` then releases HostSession ownership from every PeerConnection owned by this HostSession.
+- For each PeerConnection whose HostSession ownership was the final logical owner, HostSession initiates graceful connection-level CLOSE.
+- A PeerConnection still required by another Runtime logical owner MUST NOT receive connection-level CLOSE solely because HostSession closes.
+- The 1000 ms close-flush wait and subsequent force-close behavior apply only to PeerConnections for which HostSession release left no remaining logical owner.
+- HostSession MUST NOT force-close a shared physical transport still carrying another surviving logical/security session or logical owner.
+- It emits terminal HostSessionClosed after HostSession-owned final-owner closures complete or reach their 1000 ms limit. It does not wait for PeerConnections that survived under other owners to close.
 - Repeated `close()` is idempotent.
 
 ## 33.3 DiscoverySession
@@ -4808,9 +5730,23 @@ stop()
 
 `currentEndpoints()` returns a snapshot, not a live mutable collection.
 
+Discovery events are:
+
+```text
+EndpointFound { endpoint }
+EndpointUpdated { previous, endpoint }
+EndpointLost { endpoint }
+DiscoveryStopped
+```
+
+Repeated observations for one active endpoint update the current snapshot and
+MUST NOT create a second endpoint record. After `EndpointLost`, the endpoint
+is removed from the current snapshot and no further lifecycle event is
+emitted after `stop()`.
+
 `stop()`:
 
-- stops platform scanning;
+- releases this DiscoverySession's logical scan demand; the Runtime stops platform scanning only when no other logical owner, including an active GroupSession, requires it;
 - emits DiscoveryStopped once;
 - is idempotent;
 - does not close existing PeerConnections;
@@ -4865,6 +5801,110 @@ After DISCONNECTED:
 - `send()` fails `INVALID_STATE`;
 - identity/session diagnostics remain readable.
 
+## 33.5.1 PeerConnection Reuse and Logical Ownership
+
+A `PeerConnection` represents one authenticated LPC logical session to one remote PeerId and may be required simultaneously by more than one Runtime child or retention policy.
+
+Examples of logical owners include:
+
+```text
+explicit application/direct connection
+HostSession accepted peer
+Runtime known-peer retention
+GroupSession bootstrap/coordinator/member link
+```
+
+Logical ownership is reference-like. It does not create a second cryptographic identity or a second application-visible PeerId.
+
+### Compatible reuse
+
+Before establishing a new authenticated PeerConnection to a PeerId, the Runtime MUST check whether an existing READY or RECONNECTING PeerConnection to that PeerId can satisfy the new logical owner's required security profile.
+
+Reuse is permitted only when the existing connection's authenticated security context satisfies the new owner's complete required pairwise profile. At minimum, compatibility includes:
+
+```text
+mapped HELLO trust_mode
+credential/security binding required by that mode
+authenticated remote PeerId constraints
+```
+
+For example:
+
+```text
+existing direct connection: TOFU
+GroupSession OPEN_TOFU mapping: TOFU
+=> compatible, reuse/adoption permitted
+
+existing direct connection: TOFU
+GroupSession GROUP_PSK_32 mapping: PSK_32 with specific PSK
+=> incompatible, MUST NOT be silently adopted as PSK-authenticated
+```
+
+When compatible:
+
+- the Runtime MUST adopt/reuse the existing PeerConnection unless a distinct logical/security session is independently required by another normative LPC requirement;
+- the Runtime MUST NOT create a duplicate authenticated PeerConnection merely to represent another compatible logical owner;
+- the new logical owner is attached independently;
+- `SessionId`, cryptographic state, transport generation, reconnect/RESUME state, keepalive, and pairwise send queues remain properties of the reused PeerConnection;
+- owner-specific protocol state, such as GroupSession membership/routing state or HostSession peer membership, remains owned by that logical owner;
+- inbound frames and application events MUST be dispatched to the correct logical protocol/application consumer according to frame type and ownership. Direct application DATA MUST NOT become GroupSession application delivery merely because the connection is also group-owned, and GroupSession routed frames MUST NOT be surfaced as direct-chat DATA.
+
+A `GroupSession` internally requiring a compatible connection to a peer already connected by a direct/HostSession/known-peer path MUST be able to attach to that connection. GroupSession creation MUST NOT require a duplicate physical BLE link solely to establish GroupSession ownership.
+
+If a fresh authenticated READY connection for the same PeerId and compatible
+security profile is accepted while the previous logical PeerConnection is
+RECONNECTING, the Runtime MUST treat the fresh connection as the replacement
+owner when the previous connection cannot complete RESUME (for example, the
+remote application restarted and no longer has the previous resume state). It
+MUST cancel the old reconnect schedule and expiry timer, close the old logical
+connection, and attach the Runtime's compatible logical owners to the fresh
+connection. The old RECONNECTING connection MUST NOT later expire and remove
+the peer or close the replacement transport. GroupSession routing attached to
+the peer MUST observe the replacement as a new usable transport and preserve
+the committed membership set and version.
+
+The same replacement behavior MUST apply when the previous PeerConnection is
+still marked READY but its negotiated keepalive dead timeout has elapsed
+without a valid authenticated encrypted frame. Platform disconnect callbacks
+are not required for this liveness decision. The Runtime MUST first retire the
+stale owner through transport-loss handling, cancel its reconnect/expiry
+machinery as applicable, and then attach compatible logical owners to the fresh
+authenticated connection. A fresh candidate on the same physical endpoint
+must still be coalesced according to the per-endpoint and duplicate rules; a
+different peer's candidate MUST NOT be cancelled by this stale-owner rule.
+
+### Incompatible security requirements
+
+An existing PeerConnection MUST NOT be treated as satisfying a stronger or different authentication profile merely because the remote PeerId is the same.
+
+If a new logical owner requires an incompatible profile, the implementation MUST do one of the following, as explicitly supported by the binding/backend:
+
+1. establish a distinct LPC logical/security session whose authentication satisfies the new profile, multiplexing it over an available physical transport when supported; or
+2. reject that ownership/connection attempt with an explicit security/profile error such as `INVALID_STATE` or `AUTHENTICATION_FAILED`.
+
+It MUST NOT downgrade the requested security profile, silently reinterpret the existing session, or mark the existing connection as authenticated under credentials it did not use.
+
+If multiple LPC logical/security sessions to the same PeerId are supported, Section 10.2 duplicate collapse applies only to redundant physical links for the **same logical/security session candidate**, not to distinct intentionally established security sessions.
+
+### Lifetime and release
+
+A compatible reused PeerConnection MUST remain alive while at least one valid logical owner requires it, subject to normal terminal transport/authentication failure.
+
+Releasing one owner MUST NOT disconnect the PeerConnection if another owner still requires it. In particular:
+
+- `HostSession.close()` or `disconnect(peerId, ...)` releases HostSession ownership and MUST NOT tear down a connection still required by a GroupSession or another Runtime owner;
+- `GroupSession.leave()`/`close()` releases that GroupSession's ownership and MUST NOT disconnect a connection still retained for direct/HostSession/known-peer use;
+- a known-peer resolver result changing to false or an application releasing known-peer retention MUST NOT break a GroupSession that still owns the connection;
+- removal of an application friendship/relationship is application state and MUST NOT by itself invalidate GroupSession ownership.
+
+When the last logical owner releases a PeerConnection, the Runtime MUST gracefully close it unless another explicit normative LPC policy requires temporary retention.
+
+Every conforming binding MUST expose the Runtime direct/known-peer retention-release operation defined as `releasePeerRetention(peerId)` in Section 33.1. A binding MAY use an idiomatic API name, but it MUST preserve those semantics.
+
+Applications releasing a HostSession-owned relationship MUST use `HostSession.disconnect(peerId, reason)` or close the HostSession. These operations release HostSession ownership according to Section 33.2 and MUST preserve other owners.
+
+`PeerConnection.disconnect()` remains an explicit force-disconnect of that PeerConnection. Applications MUST NOT use it merely to release one logical relationship when shared ownership may exist.
+
 ## 33.6 Event Subscription Ownership
 
 Every event subscription MUST have explicit cancellation/disposal.
@@ -4886,6 +5926,10 @@ RuntimeError
 EndpointFound
 EndpointUpdated
 EndpointLost
+KnownPeerProbeStarted
+KnownPeerProbeFailed
+UnknownPeerIdentified
+KnownPeerConnected
 ConnectionRequested
 PeerAuthenticating
 PeerVerificationRequired
@@ -4919,6 +5963,41 @@ active transport
 ```
 
 Application metadata received in HELLO becomes authenticated only after AUTH succeeds.
+
+Automatic-known-peer event payloads are:
+
+```text
+KnownPeerProbeStarted {
+    discoveryEndpointId
+}
+
+KnownPeerProbeFailed {
+    discoveryEndpointId
+    error
+}
+
+UnknownPeerIdentified {
+    discoveryEndpointId optional
+    peerId
+    securityLevel
+    authenticated application metadata
+}
+
+KnownPeerConnected {
+    discoveryEndpointId optional
+    peerId
+    sessionId
+    securityLevel
+    authenticated application metadata
+    active transport
+}
+```
+
+`KnownPeerProbeStarted` does not imply that the endpoint is known.
+
+`UnknownPeerIdentified` MUST NOT be emitted before the peer's cryptographic identity has been authenticated.
+
+`KnownPeerConnected` MUST NOT be emitted unless `KnownPeerResolver.isKnownPeer(peerId)` returned true for the connection decision, either directly or from a valid bounded cache entry.
 
 ---
 
@@ -5170,7 +6249,7 @@ Applications requiring consensus, a globally ordered log, atomic commit, CRDT se
 
 `SendHandle.cancel()` is a LOCAL best-effort cancellation operation.
 
-Protocol minor 1 defines no routed application-message revocation frame.
+Protocol minor 0 defines no routed application-message revocation frame.
 
 Therefore cancellation MUST NOT be interpreted as proof that the destination did not receive the operation.
 
@@ -5193,7 +6272,7 @@ For a `GroupSession` routed send, once any source-hop bytes may have been accept
 - the coordinator MAY already have admitted the destination relay;
 - the coordinator MAY continue forwarding after the source handle becomes `CANCELLED`;
 - the destination MAY still receive and commit the message;
-- no protocol-minor-1 frame exists for the source to revoke an already admitted relay operation.
+- no protocol-minor-0 frame exists for the source to revoke an already admitted relay operation.
 
 A subsequent valid `GROUP_DELIVERY_ACK` or `GROUP_RELAY_STATUS` for that cancelled GroupMessageId MUST NOT transition the public SendHandle out of `CANCELLED`.
 
@@ -5443,7 +6522,7 @@ SAS verification timeout:              30000 ms
 Default keepalive interval:             2000 ms
 Derived dead timeout:         max(6000, 3 * negotiated interval)
 Default reconnect timeout:             15000 ms
-GATT frame fragment inactivity:         2000 ms
+GATT frame fragment inactivity:          5000 ms
 DATA message chunk inactivity:         10000 ms
 Upgrade candidate connect timeout:      5000 ms
 Old transport post-switch grace:        2000 ms
@@ -5794,6 +6873,16 @@ In the route-admission failure case, the coordinator MUST still generic-ACK the 
 
 `GROUP_RELAY_STATUS` is the authoritative group-routing failure signal.
 
+For `RELIABLE_ORDERED`, the coordinator MUST NOT emit a pairwise generic
+ACK for the non-ACK-required source hop.  When the destination is the
+coordinator, it commits local application delivery and sends the original
+non-coordinator source an ACK-required
+`GROUP_RELAY_STATUS(SENT_TO_DESTINATION_TRANSPORT)`.  A
+`GROUP_DELIVERY_ACK` is never valid for a `RELIABLE_ORDERED` operation.
+This lets the source complete its public `SendHandle` at
+`SENT_TO_TRANSPORT` without treating final-hop transport submission as
+remote-acknowledged application delivery.
+
 The coordinator MUST NOT:
 
 - generic-ACK a partially received source operation;
@@ -6104,7 +7193,7 @@ If the coordinator has already admitted the relay:
 - destination deduplication remains valid if a previously admitted relay later arrives;
 - late GROUP_DELIVERY_ACK / GROUP_RELAY_STATUS is handled through the cancellation tombstone rules in Section 36.
 
-The coordinator is not required to learn that the source cancelled because protocol minor 1 defines no route-cancel control frame.
+The coordinator is not required to learn that the source cancelled because protocol minor 0 defines no route-cancel control frame.
 
 Therefore an admitted relay MUST NOT be silently deleted merely because the source application locally cancelled its handle.
 
@@ -6618,14 +7707,14 @@ bit 8  LAN_UDP_REALTIME
 bits 9-31 reserved = 0
 ```
 
-For protocol minor 1:
+For protocol minor 0:
 
 ```text
 bits 0-8 may be used
 bits 9-31 MUST be zero
 ```
 
-Protocol minor 0 capability semantics are not defined by this specification.
+Protocol minor 1 capability semantics are not defined by this specification.
 
 A peer MUST set `REALTIME_LATEST` only if it implements Section 22.
 
@@ -6814,12 +7903,14 @@ When GroupSession commits LEAVING, new application send/broadcast calls fail `IN
 When an object commits CLOSING/CLOSED, new mutating operations fail `INVALID_STATE`.
 # 53. Mandatory Binary Test Vectors
 
-Before protocol minor 1 is considered interoperable across independent implementations, the repository MUST publish byte-for-byte vectors for all items below.
+Before protocol minor 0 is considered interoperable across independent implementations, the repository MUST publish byte-for-byte vectors for all items below.
 
 
-## 53.1 Protocol 1.1 Baseline Core Vectors
+## 53.1 Protocol 1.0 Baseline Core Vectors
 
-- HELLO minor 1 encoding including `PeerCapabilityBitmap`;
+- HELLO minor 0 encoding including `PeerCapabilityBitmap`;
+- HELLO `keepalive_interval_ms` encoding and READY derivation from unequal
+  local configured intervals;
 - `REALTIME_DATAGRAM` reliable-fallback frame encoding;
 - exact `GroupTrustMode -> HELLO trust_mode` mapping cases;
 - canonical `GroupMemberRecord`;
@@ -6847,6 +7938,9 @@ Before protocol minor 1 is considered interoperable across independent implement
 - ACK timer start event after final chunk of multi-chunk COORDINATOR_CHECKPOINT;
 - checkpoint partial-reassembly discard on transport loss and full retransmission after RESUME;
 
+- Section 12 GATT fragment envelope, including one-fragment `START|END` and
+  segmented `START`/middle/`END` cases;
+- GATT service/RX/TX/CONTROL UUID derivation from the configured service UUID;
 - TransportWrite/SENT_TO_TRANSPORT completion trace for GATT fragmentation;
 - ACK-timer trace showing final physical GATT fragment of final LPC frame triggers timer start;
 - RESUME trace containing an unacknowledged ACK-required control operation and post-RESUME duplicate suppression;
@@ -7016,8 +8110,6 @@ The vector/trace MUST prove:
 
 A second trace is REQUIRED where every RELIABLE_ORDERED destination-hop frame reached frame-level SENT_TO_TRANSPORT before generation loss. No retransmission is expected solely because of that later loss.
 
-
-
 ## 53.2 UDP Sidecar Vectors
 
 - UDP_OFFER reliable control frame;
@@ -7035,7 +8127,7 @@ A second trace is REQUIRED where every RELIABLE_ORDERED destination-hop frame re
 - replayed UDP packet rejection example;
 - UDP_CLOSE control frame.
 
-Every language implementation claiming protocol minor 1 support MUST reproduce these vectors exactly.
+Every language implementation claiming protocol minor 0 support MUST reproduce these vectors exactly.
 
 The vector package MUST include:
 
@@ -7047,166 +8139,301 @@ expected final packet bytes
 expected parser result
 ```
 
-
 # 54. Mandatory Unit Tests
 
-- [ ] UT-001 iOS-compatible canonical discovery requires service UUID only.
-- [ ] UT-002 HELLO exact binary encode/decode.
-- [ ] UT-003 PeerId = truncated SHA256(identity key).
-- [ ] UT-004 AUTH Ed25519 known vector.
-- [ ] UT-005 MITM substituted identity key produces different PeerId and fails KNOWN_PEER.
-- [ ] UT-006 SAS known vector and six-digit formatting.
-- [ ] UT-007 SAS rejection prevents READY.
-- [ ] UT-008 PSK_32 known vector.
-- [ ] UT-009 Version negotiation succeeds only when the peer's supported range includes minor 1.
-- [ ] UT-010 Peer advertising max_minor=0 has no compatible minor and receives pre-key PROTOCOL_MISMATCH.
-- [ ] UT-011 PeerCapabilityBitmap encoding exact.
-- [ ] UT-012 LocalRuntimeCapabilityBitmap never serialized in HELLO.
-- [ ] UT-013 GATT uint32 fragment sequence handles >65535 fragments.
-- [ ] UT-014 GATT fragmentation exact reassembly.
-- [ ] UT-015 LPC frame >16384 payload rejected.
-- [ ] UT-016 1 MiB application message produces correct DATA chunk count.
-- [ ] UT-017 PING can be scheduled between DATA chunks.
-- [ ] UT-018 derived keepalive dead timeout always >= 3x interval.
-- [ ] UT-019 ACK timeout retransmits same MessageId with new wire sequences.
-- [ ] UT-020 duplicate retransmission delivered once and ACKed again.
-- [ ] UT-021 conflicting duplicate chunk closes MESSAGE_ID_COLLISION.
-- [ ] UT-022 initial SessionId deterministic and no alternate random definition.
-- [ ] UT-023 RESUME candidate generation 0 behavior.
-- [ ] UT-024 RESUME proof success.
-- [ ] UT-025 RESUME proof failure.
-- [ ] UT-026 RESUME preserves SessionId and MessageId prefix.
-- [ ] UT-027 RESUME resets wire sequence to 1 at incremented generation.
-- [ ] UT-028 unacked ACK-required message retransmits after resume.
-- [ ] UT-029 non-ACK sent message is not auto-retransmitted after resume.
-- [ ] UT-030 upgrade BIND exact proof.
-- [ ] UT-031 upgrade failure before SWITCH leaves old transport active.
-- [ ] UT-032 failure after SWITCH triggers RESUME fallback, never old-generation rollback.
-- [ ] UT-033 symmetric dual GATT connection chooses one deterministic rank winner.
-- [ ] UT-034 queue preserves application send order.
-- [ ] UT-035 queue bounds enforced.
-- [ ] UT-036 queued message expiry before transmission.
-- [ ] UT-037 runtime.close cascades child closure once.
-- [ ] UT-038 DiscoverySession.stop does not close PeerConnection.
-- [ ] UT-039 PeerConnection send after disconnect returns INVALID_STATE.
-- [ ] UT-040 illegal backend callback does not create illegal state transition.
-- [ ] UT-041 First MessageId allocation uses counter value 1.
-- [ ] UT-042 MessageId allocation permits UINT32_MAX exactly once, then requires a new SessionId.
-- [ ] UT-043 A 262144-byte coordinator checkpoint chunks into control frames whose plaintext is <=4032 bytes.
-- [ ] UT-044 Every chunk of one coordinator checkpoint shares one MessageId and uses a fresh reliable wire sequence number.
-- [ ] UT-045 Coordinator checkpoint ACK is emitted only after complete reassembly and commit.
-- [ ] UT-046 Duplicate completed coordinator checkpoint is not reapplied and emits ACK again.
-- [ ] UT-047 Checkpoint retransmission resends all chunks with the same MessageId and new reliable wire sequences.
-- [ ] UT-048 ACK_REQUIRED header-bit binary vector matches exactly.
-- [ ] UT-049 Duplicate ACK-required MEMBERSHIP_SNAPSHOT does not reapply membership state and emits ACK again.
-- [ ] UT-050 KnownPeerPolicy ALLOWLIST vector accepts a listed identity and rejects an unlisted identity.
-- [ ] UT-051 MEMBERSHIP_SNAPSHOT final ACK timeout sets GroupSyncState=UNSYNCHRONIZED and triggers reconnect/resync.
-- [ ] UT-052 GROUP_MERGE final ACK timeout preserves committed merge and forces target rebootstrap.
-- [ ] UT-053 COORDINATOR_CHECKPOINT final ACK timeout reports replication failure without changing membership.
+- [x] UT-001 iOS-compatible canonical discovery requires service UUID only.
+- [x] UT-002 HELLO exact binary encode/decode.
+- [x] UT-003 PeerId = truncated SHA256(identity key).
+- [x] UT-004 AUTH Ed25519 known vector.
+- [x] UT-005 MITM substituted identity key produces different PeerId and fails KNOWN_PEER.
+- [x] UT-006 SAS known vector and six-digit formatting.
+- [x] UT-007 SAS rejection prevents READY.
+- [x] UT-008 PSK_32 known vector.
+- [x] UT-009 Version negotiation succeeds only when the peer's supported range includes minor 0.
+- [x] UT-010 Peer advertising max_minor=1 has no compatible minor and receives pre-key PROTOCOL_MISMATCH.
+- [x] UT-011 PeerCapabilityBitmap encoding exact.
+- [x] UT-012 LocalRuntimeCapabilityBitmap never serialized in HELLO.
+- [x] UT-013 GATT uint32 fragment sequence handles >65535 fragments.
+- [x] UT-014 GATT fragmentation exact reassembly.
+- [x] UT-015 LPC frame >16384 payload rejected.
+- [x] UT-016 1 MiB application message produces correct DATA chunk count.
+- [x] UT-017 PING can be scheduled between DATA chunks.
+- [x] UT-018 derived keepalive dead timeout always >= 3x interval.
+- [x] UT-019 ACK timeout retransmits same MessageId with new wire sequences.
+- [x] UT-020 duplicate retransmission delivered once and ACKed again.
+- [x] UT-021 conflicting duplicate chunk closes MESSAGE_ID_COLLISION.
+- [x] UT-022 initial SessionId deterministic and no alternate random definition.
+- [x] UT-023 RESUME candidate generation 0 behavior.
+- [x] UT-024 RESUME proof success.
+- [x] UT-025 RESUME proof failure.
+- [x] UT-026 RESUME preserves SessionId and MessageId prefix.
+- [x] UT-027 RESUME resets wire sequence to 1 at incremented generation.
+- [x] UT-028 unacked ACK-required message retransmits after resume.
+- [x] UT-029 non-ACK sent message is not auto-retransmitted after resume.
+- [x] UT-030 upgrade BIND exact proof.
+- [x] UT-031 upgrade failure before SWITCH leaves old transport active.
+- [x] UT-032 failure after SWITCH triggers RESUME fallback, never old-generation rollback.
+- [x] UT-033 symmetric dual GATT connection chooses one deterministic rank winner.
+- [x] UT-034 queue preserves application send order.
+- [x] UT-035 queue bounds enforced.
+- [x] UT-036 queued message expiry before transmission.
+- [x] UT-037 runtime.close cascades child closure once.
+- [x] UT-038 DiscoverySession.stop does not close PeerConnection.
+- [x] UT-039 PeerConnection send after disconnect returns INVALID_STATE.
+- [x] UT-040 illegal backend callback does not create illegal state transition.
+- [x] UT-041 First MessageId allocation uses counter value 1.
+- [x] UT-042 MessageId allocation permits UINT32_MAX exactly once, then requires a new SessionId.
+- [x] UT-043 A 262144-byte coordinator checkpoint chunks into control frames whose plaintext is <=4032 bytes.
+- [x] UT-044 Every chunk of one coordinator checkpoint shares one MessageId and uses a fresh reliable wire sequence number.
+- [x] UT-045 Coordinator checkpoint ACK is emitted only after complete reassembly and commit.
+- [x] UT-046 Duplicate completed coordinator checkpoint is not reapplied and emits ACK again.
+- [x] UT-047 Checkpoint retransmission resends all chunks with the same MessageId and new reliable wire sequences.
+- [x] UT-048 ACK_REQUIRED header-bit binary vector matches exactly.
+- [x] UT-049 Duplicate ACK-required MEMBERSHIP_SNAPSHOT does not reapply membership state and emits ACK again.
+- [x] UT-050 KnownPeerPolicy ALLOWLIST vector accepts a listed identity and rejects an unlisted identity.
+- [x] UT-051 MEMBERSHIP_SNAPSHOT final ACK timeout sets GroupSyncState=UNSYNCHRONIZED and triggers reconnect/resync.
+- [x] UT-052 GROUP_MERGE final ACK timeout preserves committed merge and forces target rebootstrap.
+- [x] UT-053 COORDINATOR_CHECKPOINT final ACK timeout reports replication failure without changing membership.
 
 ---
-- [ ] UT-054 ACK timer for multi-chunk RELIABLE_ACKED DATA starts only after the final DATA chunk of the attempt reaches SENT_TO_TRANSPORT.
-- [ ] UT-055 ACK timer for chunked COORDINATOR_CHECKPOINT starts only after the final checkpoint chunk of the attempt reaches SENT_TO_TRANSPORT.
-- [ ] UT-056 A transmission attempt taking longer than 3000 ms does not trigger ACK timeout before its final frame/chunk reaches SENT_TO_TRANSPORT.
-- [ ] UT-057 SENT_TO_TRANSPORT means backend acceptance of the complete serialized LPC frame, not scheduler enqueue.
-- [ ] UT-058 Transport loss before final chunk SENT_TO_TRANSPORT starts no ACK timeout for that incomplete attempt.
-- [ ] UT-059 Post-RESUME retransmission starts a fresh ACK timer only after the final retransmitted frame/chunk reaches SENT_TO_TRANSPORT.
-- [ ] UT-060 Incomplete checkpoint reassembly is discarded immediately on transport loss.
-- [ ] UT-061 After RESUME, unacknowledged checkpoint retransmits from chunk 0 with same MessageId and fresh wire sequences.
-- [ ] UT-062 Section 6 MessageId semantics cover ACK-required control operations.
-- [ ] UT-063 GATT LPC frame does not reach SENT_TO_TRANSPORT when merely inserted into the backend fragmentation queue.
-- [ ] UT-064 GATT LPC frame reaches SENT_TO_TRANSPORT only after its final GATT fragment is submitted to the platform API.
-- [ ] UT-065 ACK timer for multi-chunk DATA begins only after the final physical GATT fragment of the final LPC DATA frame is submitted.
-- [ ] UT-066 TCP LPC frame reaches SENT_TO_TRANSPORT only after all serialized frame bytes are accepted by the socket/kernel send path.
-- [ ] UT-067 L2CAP LPC frame reaches SENT_TO_TRANSPORT only after all serialized frame bytes are accepted by the L2CAP stream write mechanism.
-- [ ] UT-068 Backend TransportWrite remains PENDING while transport-specific fragmentation is only internally queued.
-- [ ] UT-069 A TransportWrite failure before final platform submission does not start an ACK timer.
-- [ ] UT-070 After RESUME_READY, unacknowledged ACK-required control operations are retransmitted and duplicate protocol-state mutation is suppressed.
-- [ ] UT-071 Transient backend not-writable/backpressure keeps TransportWrite PENDING and does not enter RECONNECTING.
-- [ ] UT-072 Terminal GATT fragment submission error transitions TransportWrite to FAILED and PeerConnection into transport-loss/RECONNECTING.
-- [ ] UT-073 TransportWrite.FAILED never starts an ACK timer and same transport generation sends no further LPC frames.
-- [ ] UT-074 All PENDING TransportWrites on a terminally failed physical transport complete FAILED.
-- [ ] UT-075 Partially reassembled RELIABLE_ORDERED DATA is discarded when transport generation is lost.
-- [ ] UT-076 Partially reassembled RELIABLE_ACKED DATA is discarded when transport generation is lost.
-- [ ] UT-077 Partially transmitted RELIABLE_ORDERED message retransmits from chunk 0 after RESUME when at least one chunk never reached frame-level SENT_TO_TRANSPORT.
-- [ ] UT-078 Fully frame-submitted RELIABLE_ORDERED message is not retransmitted after RESUME.
-- [ ] UT-079 RELIABLE_ACKED message retransmits all chunks after RESUME regardless of how many chunks reached SENT_TO_TRANSPORT before loss.
-- [ ] UT-080 Multi-frame SendHandle reaches SENT_TO_TRANSPORT only after every DATA chunk reaches frame-level SENT_TO_TRANSPORT.
-- [ ] UT-081 Protocol-minor no-overlap emits exact pre-key plaintext ERROR(PROTOCOL_MISMATCH) with zero session/message/nonce fields and no AEAD tag.
-- [ ] UT-082 Pre-key ERROR(PROTOCOL_MISMATCH) uses protocol_minor equal to sender max_minor.
-- [ ] UT-083 Plaintext ERROR with a non-PROTOCOL_MISMATCH error code is rejected.
-- [ ] UT-084 Plaintext ERROR after AUTH/session-key establishment is rejected.
-- [ ] UT-085 After sending pre-key ERROR(PROTOCOL_MISMATCH), sender closes without sending AUTH.
-- [ ] UT-086 GroupId merge winner uses larger committed_member_count before lexicographic GroupId tie-break.
-- [ ] UT-087 Conforming HELLO advertises min_minor=1 and max_minor=1.
-- [ ] UT-088 Peer advertising only minor 0 is rejected with pre-key PROTOCOL_MISMATCH before AUTH.
-- [ ] UT-089 Implementation does not attempt to encode a minor-0 DATA frame after version negotiation failure.
-- [ ] UT-090 When checkpoint A is in flight and B then C are published, only A and C are transmitted; B is replaced before transmission.
-- [ ] UT-091 Checkpoint replication retains at most one in-flight and one pending checkpoint per target peer.
-- [ ] UT-092 Publishing a newer checkpoint does not cancel or truncate an ACK-required checkpoint already in flight.
-- [ ] UT-093 After in-flight checkpoint terminal completion, the most recent pending checkpoint becomes the next transmitted checkpoint.
-- [ ] UT-094 A checkpoint replaced while pending allocates neither MessageId nor checkpoint_sequence.
-- [ ] UT-095 checkpoint_sequence increments only when a checkpoint is promoted to an actual in-flight operation, so pending replacement creates no sequence gap.
-- [ ] UT-096 A newly READY peer receives only the latest retained coordinator checkpoint rather than historical checkpoint backlog.
-- [ ] UT-097 Given peers A and B have different checkpoint replication progress, one application checkpoint publication may become in-flight for A while remaining pending for B; A and B allocate MessageId and checkpoint_sequence independently only when that checkpoint becomes in-flight for the respective peer.
-- [ ] UT-098 Same coordinator and same term: later membership-snapshot MessageId counter is considered newer.
-- [ ] UT-099 Older same-term MEMBERSHIP_SNAPSHOT received after newer accepted snapshot is ACKed but does not mutate committed membership.
-- [ ] UT-100 Membership snapshot MessageIds from different coordinator PeerIds or different terms are never ordered against each other by counter.
-- [ ] UT-101 Membership snapshot MessageId ordering is scoped by SessionId and MUST NOT compare counters across logical sessions.
-- [ ] UT-102 A new SessionId with same coordinator and coordinator_term accepts its first valid membership snapshot as a fresh ordering baseline even when its counter is lower than the previous SessionId's counter.
-- [ ] UT-103 Different SessionIds remain distinct membership-ordering domains even if sender_message_prefix bytes are equal.
-- [ ] UT-104 Non-coordinator B sending to non-coordinator C routes B->coordinator->C and does not require a B-C PeerConnection.
-- [ ] UT-105 RELIABLE_ACKED GroupSession SendHandle does not complete on source->coordinator generic ACK and completes only after GROUP_DELIVERY_ACK for destination C.
-- [ ] UT-106 Relayed GROUP_RELIABLE preserves GroupMessageId end-to-end while each hop uses an independently allocated pairwise MessageId.
-- [ ] UT-107 Destination duplicate (sourcePeerId, GroupMessageId) with identical content is not redelivered and permits destination ACK regeneration.
-- [ ] UT-108 GROUP_REALTIME_DATAGRAM preserves original sourcePeerId through coordinator relay.
-- [ ] UT-109 broadcast excludes local peer and snapshots committed remote membership at acceptance time.
-- [ ] UT-110 BroadcastHandle COMPLETED means all constituent SendHandles are terminal, including partial failures.
-- [ ] UT-111 RealtimeBroadcastHandle COMPLETED permits mixed terminal constituent results.
-- [ ] UT-112 ReliableMessageReceived exposes sourcePeerId, GroupMessageId, deliveryMode, and bytes.
-- [ ] UT-113 RealtimeDatagramReceived exposes sourcePeerId, channelId, senderTick, datagramSequence, and bytes.
-- [ ] UT-114 members() is updated before MemberJoined/MemberLeft callback delivery.
-- [ ] UT-115 coordinator getters are updated before CoordinatorChanged callback delivery.
-- [ ] UT-116 GroupSession callbacks are serialized and never concurrent.
-- [ ] UT-117 Public GroupSession methods are safe under concurrent invocation and reentrant send() from an event callback does not deadlock.
-- [ ] UT-118 No total order is inferred across messages from different source PeerIds.
-- [ ] UT-119 GROUP_RELIABLE source-to-coordinator final hop ACK timeout terminates the group send with ACK_TIMEOUT rather than retaining forever.
-- [ ] UT-120 GROUP_RELIABLE coordinator-to-destination final ACK timeout produces GROUP_RELAY_STATUS(DESTINATION_ACK_TIMEOUT).
-- [ ] UT-121 Final ACK timeout of GROUP_DELIVERY_ACK forces source-link reconnect; if source never received it, retained GroupMessageId reroutes and destination dedup avoids redelivery.
-- [ ] UT-122 Committed destination whose coordinator PeerConnection is not READY yields DESTINATION_UNAVAILABLE immediately for a new reliable group send; realtime is dropped.
-- [ ] UT-123 GROUP_RELAY_STATUS status values map to exact public error codes.
-- [ ] UT-124 Coordinator with insufficient destination reliable-queue capacity fully receives and validates RELIABLE_ACKED GROUP_RELIABLE, generic-ACKs the source hop, retains no relay operation, and sends GROUP_RELAY_STATUS(RELAY_QUEUE_FULL).
-- [ ] UT-125 Coordinator does not source-hop ACK a partial GROUP_RELIABLE operation.
-- [ ] UT-126 Relay admission reserves one complete logical operation's byte/message budget atomically before source-hop ACK.
-- [ ] UT-127 Route admission failure never causes repeated retransmission of the same large source hop solely because destination queue is full.
-- [ ] UT-128 Incomplete GROUP_RELIABLE reassembly is discarded on transport-generation loss.
-- [ ] UT-129 Partially submitted RELIABLE_ORDERED coordinator-to-destination GROUP_RELIABLE retransmits the complete hop from chunk 0 after successful RESUME using the same pairwise MessageId and GroupMessageId.
-- [ ] UT-130 Partially submitted RELIABLE_ACKED GROUP_RELIABLE retransmits the complete hop from chunk 0 after RESUME with the same pairwise MessageId and GroupMessageId.
-- [ ] UT-131 Fully frame-submitted RELIABLE_ORDERED GROUP_RELIABLE is not retransmitted solely because transport fails afterward.
-- [ ] UT-132 A retained admitted RELIABLE_ORDERED relay continues to consume its original bounded destination-queue reservation while destination PeerConnection is RECONNECTING.
-- [ ] UT-133 If destination-hop RESUME fails after partial RELIABLE_ORDERED relay, coordinator discards retained relay state and reports DESTINATION_UNAVAILABLE.
-- [ ] UT-134 After a completed (sourcePeerId, GroupMessageId) entry is evicted from the 16,384-entry destination dedup window, a later replay of that older GroupMessageId is not required to be recognized as duplicate and may redeliver.
-- [ ] UT-135 Queued reliable send cancelled before transmission sends no application frame and terminates CANCELLED.
-- [ ] UT-136 RELIABLE_ACKED source operation cancelled after partial local transmission performs no future source-side retry or reroute.
-- [ ] UT-137 Routed RELIABLE_ACKED send cancelled after coordinator relay admission may still complete destination delivery while source handle remains CANCELLED.
-- [ ] UT-138 GROUP_DELIVERY_ACK arriving after local cancellation is authenticated and generic-ACKed through the cancellation tombstone but does not transition the cancelled handle.
-- [ ] UT-139 GROUP_RELAY_STATUS arriving after local cancellation is authenticated and generic-ACKed through the cancellation tombstone but does not transition the cancelled handle.
-- [ ] UT-140 CANCELLED does not imply destination non-delivery when destination committed before cancellation result reached the source.
-- [ ] UT-141 When destination membership removal commits, nonterminal admitted relay operations targeting that destination are terminated and queued application traffic is not sent afterward.
-- [ ] UT-142 Cancelled routed send creates a tombstone; when all PeerConnection SessionIds capable of valid late signaling terminate while GroupSession remains open, the tombstone is released and no longer consumes tombstone capacity.
-- [ ] UT-143 GroupSession close releases all cancellation tombstones even if a previously signaling-capable PeerConnection SessionId would otherwise remain live.
-- [ ] UT-144 Delayed GROUP_DELIVERY_ACK from a former coordinator on the same historically valid SessionId and matching a cancellation tombstone is generic-ACKed and discarded as stale-authority signaling without changing CANCELLED.
-- [ ] UT-145 Former coordinator signaling for a nonterminal send never completes or fails that send after coordinator migration.
-- [ ] UT-146 A former coordinator cannot use the stale-authority exception to originate new route signaling after loss of coordinator authority.
-- [ ] UT-147 The 16,384 completed GroupMessageId dedup entries form one shared destination-GroupSession cache across all source PeerIds rather than a per-source cache.
-- [ ] UT-148 When coordinator authority loss commits, every nonterminal admitted relay owned by the former coordinator stops future GROUP_RELIABLE submission, releases queue reservation, and retains no reroute ownership.
-- [ ] UT-149 Source-cancellation relay continuation is overridden by coordinator authority loss.
-- [ ] UT-150 Already-in-flight GROUP_DELIVERY_ACK from immediately previous coordinator on the historically valid SessionId is generic-ACKed and semantically discarded after migration without completing/failing a nonterminal send.
-- [ ] UT-151 Already-in-flight GROUP_RELAY_STATUS from immediately previous coordinator on the historically valid SessionId is generic-ACKed and semantically discarded after migration.
-- [ ] UT-152 Stale former-coordinator GROUP_RELIABLE arriving after new coordinator commit does not emit application delivery or cause PROTOCOL_MISMATCH when historical authority/SessionId checks pass.
-- [ ] UT-153 Incomplete stale former-coordinator GROUP_RELIABLE reassembly is discarded and never combined with rerouted chunks from the new coordinator.
-- [ ] UT-154 Stale former-coordinator GROUP_REALTIME_DATAGRAM is authenticated then discarded without RealtimeDatagramReceived.
-- [ ] UT-155 A former coordinator newly originating routing/signaling after authority loss does not qualify for stale-authority handling.
+
+- [x] UT-054 ACK timer for multi-chunk RELIABLE_ACKED DATA starts only after the final DATA chunk of the attempt reaches SENT_TO_TRANSPORT.
+- [x] UT-055 ACK timer for chunked COORDINATOR_CHECKPOINT starts only after the final checkpoint chunk of the attempt reaches SENT_TO_TRANSPORT.
+- [x] UT-056 A transmission attempt taking longer than 3000 ms does not trigger ACK timeout before its final frame/chunk reaches SENT_TO_TRANSPORT.
+- [x] UT-057 SENT_TO_TRANSPORT means backend acceptance of the complete serialized LPC frame, not scheduler enqueue.
+- [x] UT-058 Transport loss before final chunk SENT_TO_TRANSPORT starts no ACK timeout for that incomplete attempt.
+- [x] UT-059 Post-RESUME retransmission starts a fresh ACK timer only after the final retransmitted frame/chunk reaches SENT_TO_TRANSPORT.
+- [x] UT-060 Incomplete checkpoint reassembly is discarded immediately on transport loss.
+- [x] UT-061 After RESUME, unacknowledged checkpoint retransmits from chunk 0 with same MessageId and fresh wire sequences.
+- [x] UT-062 Section 6 MessageId semantics cover ACK-required control operations.
+- [x] UT-063 GATT LPC frame does not reach SENT_TO_TRANSPORT when merely inserted into the backend fragmentation queue.
+- [x] UT-064 GATT LPC frame reaches SENT_TO_TRANSPORT only after its final GATT fragment is submitted to the platform API.
+- [x] UT-065 ACK timer for multi-chunk DATA begins only after the final physical GATT fragment of the final LPC DATA frame is submitted.
+- [x] UT-066 TCP LPC frame reaches SENT_TO_TRANSPORT only after all serialized frame bytes are accepted by the socket/kernel send path.
+- [x] UT-067 L2CAP LPC frame reaches SENT_TO_TRANSPORT only after all serialized frame bytes are accepted by the L2CAP stream write mechanism.
+- [x] UT-068 Backend TransportWrite remains PENDING while transport-specific fragmentation is only internally queued.
+- [x] UT-069 A TransportWrite failure before final platform submission does not start an ACK timer.
+- [x] UT-070 After RESUME_READY, unacknowledged ACK-required control operations are retransmitted and duplicate protocol-state mutation is suppressed.
+- [x] UT-071 Transient backend not-writable/backpressure keeps TransportWrite PENDING and does not enter RECONNECTING.
+- [x] UT-072 Terminal GATT fragment submission error transitions TransportWrite to FAILED and PeerConnection into transport-loss/RECONNECTING.
+- [x] UT-073 TransportWrite.FAILED never starts an ACK timer and same transport generation sends no further LPC frames.
+- [x] UT-074 All PENDING TransportWrites on a terminally failed physical transport complete FAILED.
+- [x] UT-075 Partially reassembled RELIABLE_ORDERED DATA is discarded when transport generation is lost.
+- [x] UT-076 Partially reassembled RELIABLE_ACKED DATA is discarded when transport generation is lost.
+- [x] UT-077 Partially transmitted RELIABLE_ORDERED message retransmits from chunk 0 after RESUME when at least one chunk never reached frame-level SENT_TO_TRANSPORT.
+- [x] UT-078 Fully frame-submitted RELIABLE_ORDERED message is not retransmitted after RESUME.
+- [x] UT-079 RELIABLE_ACKED message retransmits all chunks after RESUME regardless of how many chunks reached SENT_TO_TRANSPORT before loss.
+- [x] UT-080 Multi-frame SendHandle reaches SENT_TO_TRANSPORT only after every DATA chunk reaches frame-level SENT_TO_TRANSPORT.
+- [x] UT-081 Protocol-minor no-overlap emits exact pre-key plaintext ERROR(PROTOCOL_MISMATCH) with zero session/message/nonce fields and no AEAD tag.
+- [x] UT-082 Pre-key ERROR(PROTOCOL_MISMATCH) uses protocol_minor equal to sender max_minor.
+- [x] UT-083 Plaintext ERROR with a non-PROTOCOL_MISMATCH error code is rejected.
+- [x] UT-084 Plaintext ERROR after AUTH/session-key establishment is rejected.
+- [x] UT-085 After sending pre-key ERROR(PROTOCOL_MISMATCH), sender closes without sending AUTH.
+- [x] UT-086 GroupId merge winner uses larger committed_member_count before lexicographic GroupId tie-break.
+- [x] UT-087 Conforming HELLO advertises min_minor=0 and max_minor=0.
+- [x] UT-088 Peer advertising only minor 1 is rejected with pre-key PROTOCOL_MISMATCH before AUTH.
+- [x] UT-089 Implementation does not attempt to encode a minor-1 DATA frame after version negotiation failure.
+- [x] UT-090 When checkpoint A is in flight and B then C are published, only A and C are transmitted; B is replaced before transmission.
+- [x] UT-091 Checkpoint replication retains at most one in-flight and one pending checkpoint per target peer.
+- [x] UT-092 Publishing a newer checkpoint does not cancel or truncate an ACK-required checkpoint already in flight.
+- [x] UT-093 After in-flight checkpoint terminal completion, the most recent pending checkpoint becomes the next transmitted checkpoint.
+- [x] UT-094 A checkpoint replaced while pending allocates neither MessageId nor checkpoint_sequence.
+- [x] UT-095 checkpoint_sequence increments only when a checkpoint is promoted to an actual in-flight operation, so pending replacement creates no sequence gap.
+- [x] UT-096 A newly READY peer receives only the latest retained coordinator checkpoint rather than historical checkpoint backlog.
+- [x] UT-097 Given peers A and B have different checkpoint replication progress, one application checkpoint publication may become in-flight for A while remaining pending for B; A and B allocate MessageId and checkpoint_sequence independently only when that checkpoint becomes in-flight for the respective peer.
+- [x] UT-098 Same coordinator and same term: later membership-snapshot MessageId counter is considered newer.
+- [x] UT-099 Older same-term MEMBERSHIP_SNAPSHOT received after newer accepted snapshot is ACKed but does not mutate committed membership.
+- [x] UT-100 Membership snapshot MessageIds from different coordinator PeerIds or different terms are never ordered against each other by counter.
+- [x] UT-101 Membership snapshot MessageId ordering is scoped by SessionId and MUST NOT compare counters across logical sessions.
+- [x] UT-102 A new SessionId with same coordinator and coordinator_term accepts its first valid membership snapshot as a fresh ordering baseline even when its counter is lower than the previous SessionId's counter.
+- [x] UT-103 Different SessionIds remain distinct membership-ordering domains even if sender_message_prefix bytes are equal.
+- [x] UT-104 Non-coordinator B sending to non-coordinator C routes B->coordinator->C and does not require a B-C PeerConnection.
+- [x] UT-105 RELIABLE_ACKED GroupSession SendHandle does not complete on source->coordinator generic ACK and completes only after GROUP_DELIVERY_ACK for destination C.
+- [x] UT-106 Relayed GROUP_RELIABLE preserves GroupMessageId end-to-end while each hop uses an independently allocated pairwise MessageId.
+- [x] UT-107 Destination duplicate (sourcePeerId, GroupMessageId) with identical content is not redelivered and permits destination ACK regeneration.
+- [x] UT-108 GROUP_REALTIME_DATAGRAM preserves original sourcePeerId through coordinator relay.
+- [x] UT-109 broadcast excludes local peer and snapshots committed remote membership at acceptance time.
+- [x] UT-110 BroadcastHandle COMPLETED means all constituent SendHandles are terminal, including partial failures.
+- [x] UT-111 RealtimeBroadcastHandle COMPLETED permits mixed terminal constituent results.
+- [x] UT-112 ReliableMessageReceived exposes sourcePeerId, GroupMessageId, deliveryMode, and bytes.
+- [x] UT-113 RealtimeDatagramReceived exposes sourcePeerId, channelId, senderTick, datagramSequence, and bytes.
+- [x] UT-114 members() is updated before MemberJoined/MemberLeft callback delivery.
+- [x] UT-115 coordinator getters are updated before CoordinatorChanged callback delivery.
+- [x] UT-116 GroupSession callbacks are serialized and never concurrent.
+- [x] UT-117 Public GroupSession methods are safe under concurrent invocation and reentrant send() from an event callback does not deadlock.
+- [x] UT-118 No total order is inferred across messages from different source PeerIds.
+- [x] UT-119 GROUP_RELIABLE source-to-coordinator final hop ACK timeout terminates the group send with ACK_TIMEOUT rather than retaining forever.
+- [x] UT-120 GROUP_RELIABLE coordinator-to-destination final ACK timeout produces GROUP_RELAY_STATUS(DESTINATION_ACK_TIMEOUT).
+- [x] UT-121 Final ACK timeout of GROUP_DELIVERY_ACK forces source-link reconnect; if source never received it, retained GroupMessageId reroutes and destination dedup avoids redelivery.
+- [x] UT-122 Committed destination whose coordinator PeerConnection is not READY yields DESTINATION_UNAVAILABLE immediately for a new reliable group send; realtime is dropped.
+- [x] UT-123 GROUP_RELAY_STATUS status values map to exact public error codes.
+- [x] UT-124 Coordinator with insufficient destination reliable-queue capacity fully receives and validates RELIABLE_ACKED GROUP_RELIABLE, generic-ACKs the source hop, retains no relay operation, and sends GROUP_RELAY_STATUS(RELAY_QUEUE_FULL).
+- [x] UT-125 Coordinator does not source-hop ACK a partial GROUP_RELIABLE operation.
+- [x] UT-126 Relay admission reserves one complete logical operation's byte/message budget atomically before source-hop ACK.
+- [x] UT-127 Route admission failure never causes repeated retransmission of the same large source hop solely because destination queue is full.
+- [x] UT-128 Incomplete GROUP_RELIABLE reassembly is discarded on transport-generation loss.
+- [x] UT-129 Partially submitted RELIABLE_ORDERED coordinator-to-destination GROUP_RELIABLE retransmits the complete hop from chunk 0 after successful RESUME using the same pairwise MessageId and GroupMessageId.
+- [x] UT-130 Partially submitted RELIABLE_ACKED GROUP_RELIABLE retransmits the complete hop from chunk 0 after RESUME with the same pairwise MessageId and GroupMessageId.
+- [x] UT-131 Fully frame-submitted RELIABLE_ORDERED GROUP_RELIABLE is not retransmitted solely because transport fails afterward.
+- [x] UT-132 A retained admitted RELIABLE_ORDERED relay continues to consume its original bounded destination-queue reservation while destination PeerConnection is RECONNECTING.
+- [x] UT-133 If destination-hop RESUME fails after partial RELIABLE_ORDERED relay, coordinator discards retained relay state and reports DESTINATION_UNAVAILABLE.
+- [x] UT-134 After a completed (sourcePeerId, GroupMessageId) entry is evicted from the 16,384-entry destination dedup window, a later replay of that older GroupMessageId is not required to be recognized as duplicate and may redeliver.
+- [x] UT-135 Queued reliable send cancelled before transmission sends no application frame and terminates CANCELLED.
+- [x] UT-136 RELIABLE_ACKED source operation cancelled after partial local transmission performs no future source-side retry or reroute.
+- [x] UT-137 Routed RELIABLE_ACKED send cancelled after coordinator relay admission may still complete destination delivery while source handle remains CANCELLED.
+- [x] UT-138 GROUP_DELIVERY_ACK arriving after local cancellation is authenticated and generic-ACKed through the cancellation tombstone but does not transition the cancelled handle.
+- [x] UT-139 GROUP_RELAY_STATUS arriving after local cancellation is authenticated and generic-ACKed through the cancellation tombstone but does not transition the cancelled handle.
+- [x] UT-140 CANCELLED does not imply destination non-delivery when destination committed before cancellation result reached the source.
+- [x] UT-141 When destination membership removal commits, nonterminal admitted relay operations targeting that destination are terminated and queued application traffic is not sent afterward.
+- [x] UT-142 Cancelled routed send creates a tombstone; when all PeerConnection SessionIds capable of valid late signaling terminate while GroupSession remains open, the tombstone is released and no longer consumes tombstone capacity.
+- [x] UT-143 GroupSession close releases all cancellation tombstones even if a previously signaling-capable PeerConnection SessionId would otherwise remain live.
+- [x] UT-144 Delayed GROUP_DELIVERY_ACK from a former coordinator on the same historically valid SessionId and matching a cancellation tombstone is generic-ACKed and discarded as stale-authority signaling without changing CANCELLED.
+- [x] UT-145 Former coordinator signaling for a nonterminal send never completes or fails that send after coordinator migration.
+- [x] UT-146 A former coordinator cannot use the stale-authority exception to originate new route signaling after loss of coordinator authority.
+- [x] UT-147 The 16,384 completed GroupMessageId dedup entries form one shared destination-GroupSession cache across all source PeerIds rather than a per-source cache.
+- [x] UT-148 When coordinator authority loss commits, every nonterminal admitted relay owned by the former coordinator stops future GROUP_RELIABLE submission, releases queue reservation, and retains no reroute ownership.
+- [x] UT-149 Source-cancellation relay continuation is overridden by coordinator authority loss.
+- [x] UT-150 Already-in-flight GROUP_DELIVERY_ACK from immediately previous coordinator on the historically valid SessionId is generic-ACKed and semantically discarded after migration without completing/failing a nonterminal send.
+- [x] UT-151 Already-in-flight GROUP_RELAY_STATUS from immediately previous coordinator on the historically valid SessionId is generic-ACKed and semantically discarded after migration.
+- [x] UT-152 Stale former-coordinator GROUP_RELIABLE arriving after new coordinator commit does not emit application delivery or cause PROTOCOL_MISMATCH when historical authority/SessionId checks pass.
+- [x] UT-153 Incomplete stale former-coordinator GROUP_RELIABLE reassembly is discarded and never combined with rerouted chunks from the new coordinator.
+- [x] UT-154 Stale former-coordinator GROUP_REALTIME_DATAGRAM is authenticated then discarded without RealtimeDatagramReceived.
+- [x] UT-155 A former coordinator newly originating routing/signaling after authority loss does not qualify for stale-authority handling.
+- [x] UT-156 A non-coordinator `RELIABLE_ORDERED` send whose destination is the coordinator receives `GROUP_RELAY_STATUS(SENT_TO_DESTINATION_TRANSPORT)`, never `GROUP_DELIVERY_ACK`, and its non-ACK-required source hop receives no generic ACK.
+- [x] UT-241 HELLO `keepalive_interval_ms` is encoded at offset 106 and both
+  peers derive identical READY keepalive interval/dead-timeout values.
+- [x] UT-157 Backend-driven HELLO/AUTH sends encrypted generation-1 READY at
+  sequence 1 in both directions; a PeerConnection becomes READY only after
+  local transport submission and remote authenticated READY, and ordinary
+  encrypted traffic begins at sequence 2.
+- [x] UT-158 NearbyRuntime permits at most one explicit DiscoverySession per
+  configured service UUID, multiplexes its logical scan demand with GroupSession
+  demand onto one physical scan, forwards only opaque platform endpoint handles,
+  and closes the session when the runtime closes.
+- [x] UT-159 NearbyRuntime owns explicit HostSessions and multiplexes compatible
+  HostSession/GroupSession advertising-listener demand onto one physical
+  advertiser/listener while cascading idempotent child closure.
+- [x] UT-160 Platform GATT connect accepts only a local opaque
+  DiscoveryEndpointId and reports a completed Section 11 service discovery
+  separately from protocol identity.
+- [x] UT-161 Flutter's native GATT fragment binding preserves the exact
+  Section 44 submitted/transient-backpressure/terminal-failure distinction.
+- [x] UT-162 A live authenticated PeerConnection sends a 16-byte PING after
+  its negotiated idle interval, returns a byte-identical PONG, and enters
+  reconnecting after its derived receive-liveness timeout.
+- [x] UT-163 A live authenticated PeerConnection starts ACK timing only at
+  final-frame submission, retransmits the complete retained operation at each
+  3-second deadline, and reaches terminal timeout after two retransmissions.
+- [x] UT-164 `NearbyRuntime.close()` cancels every nonterminal connection
+  attempt and disconnects every authenticated PeerConnection it owns.
+- [x] UT-165 `HostSession.peers()` returns an immutable authenticated-peer
+  snapshot, and an empty explicit-host broadcast completes immediately.
+- [x] UT-166 Authenticated peer realtime delivery applies the Section 22
+  latest-sequence filter independently for each channel before callback.
+- [x] UT-167 Peer realtime sequence allocation starts at one independently per
+  channel and preserves valid sequence gaps caused by latest-state replacement.
+- [x] UT-168 A malformed authenticated DATA frame closes the PeerConnection
+  before any application delivery callback can be emitted.
+- [x] UT-169 A SAS handshake emits the same six-digit verification value on
+  both peers and sends no READY until each side explicitly accepts it.
+- [x] UT-170 RuntimeConfig defaults low-level explicit connections to SAS and
+  rejects malformed PSK_32 and KNOWN_PEER credential configuration.
+- [x] UT-171 HostSession validates credentials for a low-level trust-mode
+  override before beginning advertising or accepting inbound connections.
+- [x] UT-172 RuntimeConfig.enableGatt prevents GATT discovery, explicit-host
+  advertising, and outgoing GATT connection attempts when disabled.
+- [x] UT-173 A backend-bound candidate RESUME exchange uses only generation-0
+  candidate control until RESUME_ACCEPT, then returns success only after both
+  peers send and authenticate generation-specific RESUME_READY.
+- [x] UT-174 A responder that cannot verify an authenticated candidate
+  RESUME_REQUEST sends encrypted generation-0 RESUME_REJECT before closing.
+- [x] UT-175 Successful RESUME rebinds the continuing logical session to the
+  fresh backend, restarts generation sequence at one, and ignores stale
+  terminal callbacks from the failed physical backend.
+- [x] UT-176 Handshake-owned PeerConnectionCore retains the current
+  resume_secret and replaces it only with the newly derived secret after a
+  successful RESUME.
+- [x] UT-177 A fresh candidate handshake authenticates HELLO/AUTH with a new
+  transcript but emits no normal READY before candidate RESUME begins.
+
+- [x] UT-178 `autoConnectKnownPeers=true` is rejected when no KnownPeerResolver is configured.
+- [x] UT-179 automatic known-peer probing never exceeds `maxConcurrentKnownPeerProbes`.
+- [x] UT-180 automatic pending probe work never exceeds `maxPendingKnownPeerProbes`; excess candidates remain rediscoverable later.
+- [x] UT-181 repeated EndpointUpdated observations for one active DiscoveryEndpointId do not create duplicate concurrent probes.
+- [x] UT-182 KnownPeerResolver is invoked only after authenticated PeerId establishment and never with a Bluetooth/platform identifier.
+- [x] UT-183 resolver `true` retains the connection and emits KnownPeerConnected once.
+- [x] UT-184 resolver `false` does not create persistent known-peer state and a probe-only connection may close.
+- [x] UT-185 resolver timeout/failure is treated conservatively as not-known for the current automatic decision.
+- [x] UT-186 a known PeerId rediscovered through a different DiscoveryEndpointId is recognized as the same known peer.
+- [x] UT-187 Runtime known-peer cache never exceeds `maxKnownPeerCacheEntries`; eviction requires only future relookup.
+- [x] UT-188 known-peer database cardinality alone creates no PeerConnection/reconnect/queue objects.
+- [x] UT-189 a Bloom/probabilistic positive without exact membership confirmation never produces KnownPeerConnected.
+- [x] UT-190 Configured `discoveryDisplayName` is requested as the BLE local-name hint where the backend supports local-name advertising and is never used as PeerId or known-peer lookup input.
+- [x] UT-191 A pre-authentication local-name hint is exposed only as unauthenticated presentation metadata; absence of a hint does not cause LPC to synthesize a BLE address, GUID, PeerId fragment, `DiscoveryEndpointId`, or random user-visible identifier.
+- [x] UT-192 RuntimeConfig.applicationMetadata accepts 0..31 bytes and rejects larger values.
+- [x] UT-193 Automatic known-peer candidate probes place RuntimeConfig.applicationMetadata in local HELLO.
+- [x] UT-194 HostSession inherits RuntimeConfig.applicationMetadata when HostConfig.applicationMetadata is omitted and overrides it when explicitly supplied.
+- [x] UT-195 One Runtime may simultaneously operate one advertising HostSession and one DiscoverySession without assigning an application-visible host/client role.
+- [x] UT-196 `joinOrCreateGroup()` reuses already-active compatible Runtime advertising/listener and scan resources and does not create duplicate GATT service registrations or platform scans.
+- [x] UT-197 Stopping HostSession advertising while GroupSession still demands advertising leaves the shared physical advertiser/listener active; leaving GroupSession while HostSession still demands it does the converse.
+- [x] UT-198 Stopping DiscoverySession while GroupSession still demands discovery leaves the shared physical scan active; leaving GroupSession while DiscoverySession still demands it does the converse.
+- [x] UT-199 A READY TOFU PeerConnection may be simultaneously owned by a direct/HostSession path and an OPEN_TOFU GroupSession without creating a second authenticated connection.
+- [x] UT-200 Releasing one logical owner does not disconnect a PeerConnection still required by another owner.
+- [x] UT-201 A TOFU PeerConnection is never silently adopted as satisfying a GROUP_PSK_32/PSK_32 owner.
+- [x] UT-202 Runtime `updateLocalPresentation()` atomically updates future inherited HELLO application metadata and refreshes active discovery display-name advertising where supported without changing PeerId or disconnecting READY peers.
+- [x] UT-203 Every binding exposes the semantics of `releasePeerRetention(peerId)`; releasing Runtime-managed direct/known-peer ownership preserves a PeerConnection still owned by GroupSession.
+- [x] UT-204 `releasePeerRetention(peerId)` invalidates any cached resolver result for that PeerId, is idempotent when no matching Runtime-managed owner exists, and initiates graceful close when its release removes the final logical owner.
+- [x] UT-205 `HostSession.disconnect(peerId, ...)` and `HostSession.close()` send connection-level CLOSE only for PeerConnections whose HostSession release removes the final logical owner; shared connections survive without transport force-close.
+- [x] UT-206 When an existing READY/RECONNECTING PeerConnection satisfies the complete requested security profile, compatible ownership reuses that PeerConnection and does not create a duplicate authenticated connection absent another normative requirement for a distinct logical/security session.
+- [x] UT-207 Configured diagnostics report discovery, transport, handshake, queue, and terminal states; non-secret platform endpoint identifiers may be included, while payload bytes and key material are omitted.
+- [x] UT-208 DiscoverySession emits one EndpointFound, updates repeated endpoint observations, and emits EndpointLost after the observation timeout.
+- [x] UT-209 DiscoverySession emits no endpoint lifecycle events or retains endpoints after stop().
+- [x] UT-210 Duplicate platform GATT readiness callbacks start only one handshake binding per endpoint.
+- [x] UT-211 A central-side transport loss automatically resumes the existing PeerConnection without creating a second logical peer.
+- [x] UT-212 Automatic known-peer probing enforces concurrent and pending limits, while candidates rejected by the pending limit remain eligible on a later advertisement.
+- [x] UT-213 Repeated observations of one active DiscoveryEndpointId do not start duplicate automatic known-peer probes.
+- [x] UT-214 Exceptions from platform, GATT, handshake, or Runtime diagnostic sinks do not interrupt networking progress.
+- [x] UT-215 Reconnect timeout transitions the logical peer to terminal disconnected state and removes it from HostSession presentation.
+- [x] UT-216 DiscoverySession stop is idempotent under concurrent and repeated calls.
+- [x] UT-217 ConnectionAttempt cancel is idempotent after its first terminal cancellation.
+- [x] UT-218 `ConnectionAttempt.cancel()` after `Connected` is a no-op and does not
+  close or alter the authenticated PeerConnection.
+- [x] UT-219 `HostSession.close()` is idempotent and emits exactly one
+  `HostSessionClosed` event.
+- [x] UT-220 `DiscoverySession.currentEndpoints()` is an immutable point-in-time
+  snapshot and does not change after later observations.
+- [x] UT-221 `PeerConnection.disconnect()` is idempotent and emits one terminal
+  `PeerDisconnected` event.
+- [x] UT-222 `GroupSession.close()` is idempotent and emits one `GroupClosed`
+  event.
+- [x] UT-223 `GroupSession.members()` is an immutable point-in-time snapshot.
+- [x] UT-224 Accepted checkpoint publication allocates one GroupSession-local publicationId and does not serialize it into COORDINATOR_CHECKPOINT frames.
+- [x] UT-225 Default checkpoint acknowledgement requirement snapshots all current committed non-local members atomically at publication acceptance.
+- [x] UT-226 EXPLICIT_PEERS rejects a non-member, local PeerId, or duplicate before publicationId allocation or checkpoint-state mutation.
+- [x] UT-227 Checkpoint handle reaches DURABLE only after every required peer ACKs the exact publication-associated checkpoint operation.
+- [x] UT-228 ACK for an older/newer checkpoint or another peer cannot satisfy a publication peer result.
+- [x] UT-229 Publication with empty required set becomes DURABLE after valid local retained-latest update without requiring a network ACK.
+- [x] UT-230 Required peer removed after publication acceptance remains in the fixed requirement set and causes PEER_LEFT rather than silently shrinking the barrier.
+- [x] UT-231 Required peer removed before publication acceptance is absent from ALL_COMMITTED_MEMBERS snapshot.
+- [x] UT-232 Pending checkpoint B superseded by C for a required peer gives B SUPERSEDED and prevents B from becoming DURABLE.
+- [x] UT-233 Checkpoint B already in flight is not cancelled by newer C; B may still ACK while C remains pending.
+- [x] UT-234 Final COORDINATOR_CHECKPOINT ACK timeout maps to ACK_TIMEOUT on the associated handle and completes it FAILED when that peer is required.
+- [x] UT-235 Coordinator authority loss maps every nonterminal required peer on old-coordinator publications to AUTHORITY_LOST and never reports DURABLE afterward.
+- [x] UT-236 GroupSession close maps every nonterminal required peer to GROUP_CLOSED and completes the handle once.
+- [x] UT-237 New member joining after publication does not enlarge that publication's required set.
+- [x] UT-238 Terminal checkpoint publication result is immutable and completion fires exactly once under duplicate ACK, timeout, leave, and close races.
+- [x] UT-239 Checkpoint publication mutable bookkeeping remains bounded and superseded never-transmitted publications are released without retaining unbounded history.
+- [x] UT-240 publicationId exhausts after UINT64_MAX and subsequent publication fails RESOURCE_EXHAUSTED until a new GroupSession.
+- [x] UT-242 A platform disconnect that races Dart binding removal still issues one generation-safe native close and a late echoed disconnect cannot create a close loop.
+- [x] UT-243 A locally peripheral-side PeerConnection remains eligible for bounded automatic RESUME through a fresh discovered central candidate without an application-selected reconnect initiator.
+- [x] UT-244 A native GATT endpoint-busy teardown failure applies bounded known-peer probe backoff so repeated advertisements do not create a probe storm.
+- [x] UT-246 GroupSession emits GroupTransportChanged when a committed member returns READY on a new transport generation without changing membership.
+- [ ] UT-247 A fresh compatible same-PeerId READY connection replaces a RECONNECTING logical owner, cancels its old expiry, and preserves GroupSession ownership.
+- [x] UT-248 An authenticated same-group GROUP_INFO with a higher coordinator term refreshes authority without changing membership version, before application traffic is admitted.
+- [x] UT-249 A known-peer candidate that disconnects while KnownPeerResolver is pending is not published as KnownPeerConnected and completes as a failed probe.
+- [x] UT-255 A fresh authenticated compatible candidate replaces a READY logical owner whose negotiated keepalive dead timeout has elapsed, even when the platform omitted its disconnect callback; candidates for different PeerIds remain independent.
+- [x] UT-256 A completed known-peer probe is eligible for a fresh probe after its logical owner is terminal, including when disconnect cleanup is duplicated or reordered.
+- [x] UT-257 Reciprocal automatic candidate probes apply bounded endpoint-scoped retry jitter and do not remain phase-locked after transport failure.
 
 # 55. Mandatory Physical Integration Tests
 
@@ -7214,155 +8441,173 @@ Every mobile release candidate MUST run:
 
 - [ ] IT-001 iOS advertises only service UUID and Android discovers it.
 - [ ] IT-002 Android canonical service-UUID advertisement is discovered by iOS.
-- [ ] IT-003 Android central -> iOS peripheral.
-- [ ] IT-004 iOS central -> Android peripheral.
-- [ ] IT-005 Ed25519 identity continuity verified across reconnect.
-- [ ] IT-006 SAS values match on honest Android/iOS connection.
+- [x] IT-003 Android central -> iOS peripheral.
+- [x] IT-004 iOS central -> Android peripheral.
+- [x] IT-005 Ed25519 identity continuity verified across reconnect.
+- [x] IT-006 SAS values match on honest Android/iOS connection.
 - [ ] IT-007 deliberately altered handshake fails SAS/known-peer authentication.
-- [ ] IT-008 1000 x 32-byte messages, zero corruption.
-- [ ] IT-009 1 MiB application message over GATT succeeds via DATA chunking.
-- [ ] IT-010 keepalive remains healthy during 1 MiB transfer.
+- [x] IT-008 1000 x 32-byte messages, zero corruption.
+- [x] IT-009 1 MiB application message over GATT succeeds via DATA chunking.
+- [x] IT-010 keepalive remains healthy during 1 MiB transfer.
 - [ ] IT-011 ACK retry with intentionally dropped ACK produces one app delivery.
 - [ ] IT-012 out-of-range enters Reconnecting.
 - [ ] IT-013 return within timeout resumes same SessionId.
 - [ ] IT-014 resumed wire generation increments and sequence restarts.
 - [ ] IT-015 return after timeout produces PeerDisconnected.
 - [ ] IT-016 Bluetooth off/on recovery.
-- [ ] IT-017 30-minute two-player soak.
-- [ ] IT-018 four-player star.
-- [ ] IT-019 eight-player star where hardware permits.
+- [x] IT-017 30-minute two-player soak.
+- [x] IT-018 four-player star.
+- [x] IT-019 eight-player star where hardware permits.
 - [ ] IT-020 weak client does not stall other clients.
-- [ ] IT-021 simultaneous symmetric connect leaves exactly one PeerConnection.
+- [x] IT-021 simultaneous symmetric connect leaves exactly one PeerConnection.
 - [ ] IT-022 background/foreground no crash and state reconciles.
 - [ ] IT-023 L2CAP upgrade if supported.
 - [ ] IT-024 forced L2CAP upgrade failure remains on GATT.
 - [ ] IT-025 LAN upgrade if supported.
 - [ ] IT-026 LAN failure after switch triggers secure RESUME to GATT.
 - [ ] IT-027 transport switch under continuous traffic has zero duplicate ACK-required app messages.
-- [ ] IT-028 262144-byte coordinator checkpoint replicates successfully using bounded checkpoint chunks and one logical ACK.
+- [x] IT-028 262144-byte coordinator checkpoint replicates successfully using bounded checkpoint chunks and one logical ACK.
 - [ ] IT-029 Injected terminal GATT submission failure during multi-chunk RELIABLE_ACKED DATA enters RECONNECTING and resumes/retransmits successfully.
 - [ ] IT-030 Injected terminal GATT submission failure during partially transmitted RELIABLE_ORDERED DATA resumes by retransmitting the entire logical message from chunk 0.
 - [ ] IT-031 Simulated transient GATT backpressure does not disconnect/reconnect and transmission resumes when writable.
+- [x] IT-032 One Runtime with active HostSession advertising and DiscoverySession scanning can create/join an OPEN_TOFU GroupSession without a second physical advertiser/listener, duplicate GATT service registration, or second physical scan.
+- [x] IT-033 Two peers with an existing READY TOFU direct PeerConnection can enter the same OPEN_TOFU GroupSession, exchange both direct and group traffic over correctly routed logical ownership, and retain no redundant physical BLE connection.
+- [x] IT-034 Leaving the GroupSession in IT-033 leaves the direct PeerConnection usable.
+- [x] IT-035 `releasePeerRetention(peerId)` plus any applicable `HostSession.disconnect(peerId, ...)` in IT-033 releases all direct/known-peer/HostSession ownership while GroupSession still requires the link; GroupSession remains usable, and after GroupSession later releases the final owner the connection closes normally.
+- [ ] IT-036 Three-peer checkpoint publication with ALL_COMMITTED_MEMBERS reaches DURABLE only after both remote peers fully reassemble, commit, and ACK the exact publication; dropping one ACK forces retry and does not produce false durability.
+- [ ] IT-037 During a three-peer checkpoint barrier, one required peer disconnects and resumes within timeout; the same publication may still reach DURABLE after its exact checkpoint operation is ACKed following RESUME.
+- [ ] IT-038 During a three-peer checkpoint barrier, one required peer is terminally removed before ACK; the original publication completes FAILED/PEER_LEFT and a new publication against the new membership can reach DURABLE.
+- [ ] IT-041 Both Android and iOS send 64-byte RELIABLE_ACKED packets at 5 packets/second for 60 seconds; every packet receives the fixture application ACK and both logical connections remain READY.
+- [x] IT-043 Both Android and iOS send direct RELIABLE_ACKED packets in both directions at 1 Hz for 5 seconds per size, ramping 64, 128, 256, 512, 1024, 2048 bytes and back down to 64 bytes; each direction averages at least 200 B/s, loss remains below 10%, and the post-2048-byte 64-byte phase continues to deliver.
+- [ ] IT-044 The elected coordinator publishes application-validated checkpoints through the upward-and-downward size ramp `64, 128, 256, 512, 1024, 2048, 1024, 512, 256, 128, 64` bytes, at 4 accepted publications/second for 5 seconds per phase; the fixture records durable payload bandwidth, accepted-to-DURABLE latency, and failed-publication rate, requires at least 200 B/s durable payload bandwidth and less than 10% failed publications in every phase, and verifies the final 64-byte phase still completes without a reconnect or queue stall.
 
+For IT-044, the per-publication completion wait MUST be at least
+`ceil(checkpointSize / 200 B/s) + 2 seconds`. The two seconds are an explicit
+buffer for the expected minimum payload bandwidth and checkpoint ACK/validation
+overhead; this wait is a test-harness bound, not a change to LPC's checkpoint
+publication timeout. Durable payload bandwidth is the number of checkpoint
+payload bytes whose handles reached `DURABLE`, divided by the phase's active
+measurement interval. Failed-publication rate is failed accepted publications
+divided by all accepted publications in that phase. Publications rejected
+synchronously by LPC's four-per-second rolling admission limit are recorded as
+admission failures and MUST NOT be hidden as transport loss; a phase with any
+such failure is not a passing bandwidth sample.
 
+## In-process Runtime Integration Tests
+
+These deterministic tests use the public platform BLE boundary with an
+in-memory three-runtime GATT mesh. They complement, but do not replace, the
+physical Android/iOS release-candidate tests above.
+
+- [x] IT-039 Three runtimes complete authenticated pairwise GATT handshakes, form a compatible staged group, route reliable traffic through the committed coordinator, retain the GroupId while the coordinator links are dropped, and route reliable traffic after the surviving membership/coordinator view is committed.
 
 ## Automatic Coordinator Tests
 
-- [ ] COORD-001 Three peers starting simultaneously converge on one coordinator without user host selection.
-- [ ] COORD-002 Existing healthy coordinator remains coordinator when a higher-ranked peer joins.
-- [ ] COORD-003 Coordinator disappears and remaining peers elect exactly one replacement.
-- [ ] COORD-004 Coordinator migration retains the same GroupId.
-- [ ] COORD-005 Coordinator migration retains all PeerIds.
-- [ ] COORD-006 Coordinator migration rebuilds star automatically.
-- [ ] COORD-007 Two singleton groups merge and deterministically retain lexicographically smaller GroupId.
-- [ ] COORD-008 Same-term competing coordinator claims converge to higher CoordinatorRank.
-- [ ] COORD-009 Higher election term always supersedes lower term.
-- [ ] COORD-010 Latest committed membership snapshot survives coordinator loss.
-- [ ] COORD-011 Coordinator checkpoint is available to newly promoted coordinator.
-- [ ] COORD-012 No UI/user approval callback is required for migration.
-- [ ] COORD-013 Two partitioned halves independently elect coordinators, reconnect, and converge to one coordinator.
-- [ ] COORD-014 Divergent same-GroupId membership snapshots reconcile at `max(termA, termB)+1`.
-- [ ] COORD-015 A 6-member group and 5-member group refuse automatic merge when effective_max_peers=8.
-- [ ] COORD-016 Different maxPeers values negotiate `min(all member maxPeers)`.
-- [ ] COORD-017 Winning coordinator learns complete losing membership from GROUP_INFO before merge.
-- [ ] COORD-018 Losing GroupId alias redirects an authenticated reconnecting member for exactly 30 seconds.
-- [ ] COORD-019 Three compatible groups discovered simultaneously converge deterministically on one GroupId.
-- [ ] COORD-020 Stale GROUP_MERGE from an older/equal already-superseded term is ignored.
-- [ ] COORD-021 Same namespace but different TOKEN_SCOPED join tokens never auto-merge.
-- [ ] COORD-022 OPEN_PROXIMITY groups do auto-merge when all other compatibility checks pass.
-- [ ] COORD-023 Split-brain union exceeding capacity does not arbitrarily evict existing committed members.
-- [ ] COORD-024 GROUP_INFO carries every member's max_peers and remote peer computes the same effective_max_peers.
-- [ ] COORD-025 Groups with different GroupTrustMode values refuse automatic merge.
-- [ ] COORD-026 KNOWN_PEERS groups with knownPeersAutoMerge=false remain separate.
-- [ ] COORD-027 GROUP_MERGE_REJECT is emitted only by the would-be winning coordinator.
-- [ ] COORD-028 Normal member GROUP_LEAVE removes it and produces a same-term MEMBERSHIP_SNAPSHOT.
-- [ ] COORD-029 Abrupt non-coordinator disconnect retains membership through reconnect window then removes it on terminal timeout.
-- [ ] COORD-030 Coordinator voluntary leave triggers immediate election without waiting for heartbeat timeout.
-- [ ] COORD-031 Replacement coordinator first snapshot excludes voluntarily/abruptly departed old coordinator.
-- [ ] COORD-032 Coordinator KICKED leave removes only the target member and publishes a new snapshot.
-- [ ] COORD-033 Membership changes caused by normal join/leave/kick do not increment coordinator term.
-- [ ] COORD-034 Conflicting same-PeerId max_peers snapshots reconcile to the minimum value.
-- [ ] COORD-035 MEMBERSHIP_SNAPSHOT final ACK timeout marks peer UNSYNCHRONIZED and forces reconnect/resynchronization.
-- [ ] COORD-036 GROUP_MERGE final ACK timeout does not roll back merge and forces target peer to rebootstrap.
-- [ ] COORD-037 COORDINATOR_CHECKPOINT final ACK timeout reports replication failure without removing/disconnecting the peer.
-- [ ] COORD-038 Ordinary GROUP_LEAVE ACK loss does not prevent leaving peer from closing after its grace period.
-- [ ] COORD-039 Kicked-member GROUP_LEAVE ACK loss does not keep that peer committed.
-- [ ] COORD-040 Coordinator-resignation GROUP_LEAVE ACK loss does not cancel resignation or election.
-- [ ] COORD-041 A 5-member group with lexicographically larger GroupId merges with a 1-member group with smaller GroupId; the 5-member group's GroupId survives.
-- [ ] COORD-042 Two equally sized groups merge; the lexicographically smaller GroupId survives.
-- [ ] COORD-043 Rapid checkpoint publication over slow BLE keeps exactly one in-flight and one pending checkpoint per peer.
-- [ ] COORD-044 With A in flight and B then C published, a slow peer receives A then C, never B.
-- [ ] COORD-045 A peer that reconnects receives the latest retained checkpoint without replaying historical checkpoint publications.
-- [ ] COORD-046 Same published checkpoint may be in-flight for peer A and pending for peer B; each peer allocates its own MessageId/checkpoint_sequence only at that peer's promotion time.
-- [ ] COORD-047 Same-term membership snapshot B accepted after A MUST prevent later A retransmission from replacing B after RESUME.
-- [ ] COORD-048 A ACKed, B partially transmitted, transport loss, RESUME, and B retransmission converges to B without stale rollback to A.
-- [ ] COORD-049 A ACKed, B fully transmitted but ACK lost, transport loss, RESUME, duplicate B remains committed exactly once.
-- [ ] COORD-050 B accepted remotely but ACK lost; post-RESUME retransmission of B is ACKed again without duplicate membership mutation.
-- [ ] COORD-051 Transport loss during retransmission of newer same-term snapshot B cannot allow older snapshot A to overwrite B.
-- [ ] COORD-052 Coordinator C remains at term T. Under SessionId S1, receiver accepts snapshot counter 100. S1 expires and cannot RESUME. Under new SessionId S2, receiver accepts current snapshot counter 1 as the new ordering baseline and MUST NOT compare it against S1 counter 100.
-- [ ] COORD-053 Same coordinator/term establishes a new SessionId whose sender_message_prefix bytes collide with an expired prior SessionId; receiver still treats the new SessionId as a distinct membership-ordering domain.
-- [ ] COORD-054 B sends to C in a coordinator star with no B-C PeerConnection; A relays and C receives sourcePeerId=B.
-- [ ] COORD-055 B RELIABLE_ACKED send to C survives coordinator loss before destination acknowledgment by retaining GroupMessageId and rerouting through the new coordinator.
-- [ ] COORD-056 Destination C accepted B's message but destination acknowledgment was lost during coordinator failure; post-migration duplicate relay does not redeliver and regenerates acknowledgment.
-- [ ] COORD-057 RELIABLE_ORDERED B->C SendHandle reaches SENT_TO_TRANSPORT only after coordinator reports final-hop submission.
-- [ ] COORD-058 Broadcast from B snapshots committed remote members, excludes B, and produces independent per-destination results.
-- [ ] COORD-059 Coordinator queue-full relay admission ACKs the fully received source hop exactly once, sends RELAY_QUEUE_FULL, retains no destination relay operation, and source fails without re-sending the 1 MiB source hop.
-- [ ] COORD-060 B->A remains healthy while A->C fails halfway through a multi-chunk RELIABLE_ORDERED relay. A->C RESUMEs, A retransmits the complete destination hop from chunk 0 with the same pairwise MessageId and GroupMessageId, C emits exactly one application event, and B eventually reaches SENT_TO_TRANSPORT.
-- [ ] COORD-061 A->C fails after every RELIABLE_ORDERED GROUP_RELIABLE chunk reached frame-level SENT_TO_TRANSPORT but before any later unrelated traffic; A does not retransmit that completed hop solely because of the transport failure.
-- [ ] COORD-062 GroupMessageId dedup eviction is bounded: after C completes message G, more than 16,384 newer completed source/message pairs evict G, and a later replay of G is not required to be suppressed as duplicate.
-- [ ] COORD-063 B sends G to C through A. A admits and generic-ACKs the source hop. B cancels before A->C completes. A may complete delivery, C emits exactly one event, A sends GROUP_DELIVERY_ACK, B authenticates/ACKs the late signaling through its cancellation tombstone, B remains CANCELLED, and B never reroutes G.
-- [ ] COORD-064 A has admitted B->C. C is removed from committed membership before destination delivery commits. A terminates the relay, releases reservation, sends DESTINATION_NOT_IN_GROUP to B when possible, and sends no additional application chunks to C.
-- [ ] COORD-065 A is coordinator and has an already-created/in-flight GROUP_DELIVERY_ACK for G. B has cancelled G. D becomes coordinator before B receives A's signaling. Delayed signaling from former coordinator A on the same historically valid SessionId is authenticated and generic-ACKed as stale-authority signaling, cannot alter B's CANCELLED handle, and cannot revive/reroute G.
-- [ ] COORD-066 B sends G to C through coordinator A. A admits G and transmits only part of the final-hop GROUP_RELIABLE. Before C commits the complete application message, D becomes committed coordinator. A stops future relay transmission and releases its admitted relay state. B reroutes G through D with the same GroupMessageId and new pairwise MessageIds. C commits G exactly once.
-- [ ] COORD-067 A submitted a GROUP_RELIABLE frame while still coordinator, but C receives it only after committing D as new coordinator. C classifies it as stale-authority traffic on the historically valid A-C SessionId, does not redeliver, and does not treat the healthy historical A-C PeerConnection as malicious protocol corruption.
-- [ ] COORD-068 B has a nonterminal routed send when an already-in-flight GROUP_DELIVERY_ACK from old coordinator A arrives after D becomes coordinator. B generic-ACKs and discards A's stale signaling, leaves the SendHandle nonterminal, and continues completion only through D.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+- [x] COORD-001 Three peers starting simultaneously converge on one coordinator without user host selection.
+- [x] COORD-002 Existing healthy coordinator remains coordinator when a higher-ranked peer joins.
+- [x] COORD-003 Coordinator disappears and remaining peers elect exactly one replacement.
+- [x] COORD-004 Coordinator migration retains the same GroupId.
+- [x] COORD-005 Coordinator migration retains all PeerIds.
+- [x] COORD-006 Coordinator migration rebuilds star automatically.
+- [x] COORD-007 Two singleton groups merge and deterministically retain lexicographically smaller GroupId.
+- [x] COORD-008 Same-term competing coordinator claims converge to higher CoordinatorRank.
+- [x] COORD-009 Higher election term always supersedes lower term.
+- [x] COORD-010 Latest committed membership snapshot survives coordinator loss.
+- [x] COORD-011 Coordinator checkpoint is available to newly promoted coordinator.
+- [x] COORD-012 No UI/user approval callback is required for migration.
+- [x] COORD-013 Two partitioned halves independently elect coordinators, reconnect, and converge to one coordinator.
+- [x] COORD-014 Divergent same-GroupId membership snapshots reconcile at `max(termA, termB)+1`.
+- [x] COORD-015 A 6-member group and 5-member group refuse automatic merge when effective_max_peers=8.
+- [x] COORD-016 Different maxPeers values negotiate `min(all member maxPeers)`.
+- [x] COORD-017 Winning coordinator learns complete losing membership from GROUP_INFO before merge.
+- [x] COORD-018 Losing GroupId alias redirects an authenticated reconnecting member for exactly 30 seconds.
+- [x] COORD-019 Three compatible groups discovered simultaneously converge deterministically on one GroupId.
+- [x] COORD-020 Stale GROUP_MERGE from an older/equal already-superseded term is ignored.
+- [x] COORD-021 Same namespace but different TOKEN_SCOPED join tokens never auto-merge.
+- [x] COORD-022 OPEN_PROXIMITY groups do auto-merge when all other compatibility checks pass.
+- [x] COORD-023 Split-brain union exceeding capacity does not arbitrarily evict existing committed members.
+- [x] COORD-024 GROUP_INFO carries every member's max_peers and remote peer computes the same effective_max_peers.
+- [x] COORD-025 Groups with different GroupTrustMode values refuse automatic merge.
+- [x] COORD-026 KNOWN_PEERS groups with knownPeersAutoMerge=false remain separate.
+- [x] COORD-027 GROUP_MERGE_REJECT is emitted only by the would-be winning coordinator.
+- [x] COORD-028 Normal member GROUP_LEAVE removes it and produces a same-term MEMBERSHIP_SNAPSHOT.
+- [x] COORD-029 Abrupt non-coordinator disconnect retains membership through reconnect window then removes it on terminal timeout.
+- [x] COORD-030 Coordinator voluntary leave triggers immediate election without waiting for heartbeat timeout.
+- [x] COORD-031 Replacement coordinator first snapshot excludes voluntarily/abruptly departed old coordinator.
+- [x] COORD-032 Coordinator KICKED leave removes only the target member and publishes a new snapshot.
+- [x] COORD-033 Membership changes caused by normal join/leave/kick do not increment coordinator term.
+- [x] COORD-034 Conflicting same-PeerId max_peers snapshots reconcile to the minimum value.
+- [x] COORD-035 MEMBERSHIP_SNAPSHOT final ACK timeout marks peer UNSYNCHRONIZED and forces reconnect/resynchronization.
+- [x] COORD-036 GROUP_MERGE final ACK timeout does not roll back merge and forces target peer to rebootstrap.
+- [x] COORD-037 COORDINATOR_CHECKPOINT final ACK timeout reports replication failure without removing/disconnecting the peer.
+- [x] COORD-038 Ordinary GROUP_LEAVE ACK loss does not prevent leaving peer from closing after its grace period.
+- [x] COORD-039 Kicked-member GROUP_LEAVE ACK loss does not keep that peer committed.
+- [x] COORD-040 Coordinator-resignation GROUP_LEAVE ACK loss does not cancel resignation or election.
+- [x] COORD-041 A 5-member group with lexicographically larger GroupId merges with a 1-member group with smaller GroupId; the 5-member group's GroupId survives.
+- [x] COORD-042 Two equally sized groups merge; the lexicographically smaller GroupId survives.
+- [x] COORD-043 Rapid checkpoint publication over slow BLE keeps exactly one in-flight and one pending checkpoint per peer.
+- [x] COORD-044 With A in flight and B then C published, a slow peer receives A then C, never B.
+- [x] COORD-045 A peer that reconnects receives the latest retained checkpoint without replaying historical checkpoint publications.
+- [x] COORD-046 Same published checkpoint may be in-flight for peer A and pending for peer B; each peer allocates its own MessageId/checkpoint_sequence only at that peer's promotion time.
+- [x] COORD-047 Same-term membership snapshot B accepted after A MUST prevent later A retransmission from replacing B after RESUME.
+- [x] COORD-048 A ACKed, B partially transmitted, transport loss, RESUME, and B retransmission converges to B without stale rollback to A.
+- [x] COORD-049 A ACKed, B fully transmitted but ACK lost, transport loss, RESUME, duplicate B remains committed exactly once.
+- [x] COORD-071 Checkpoint durability handle correlates one publication across independently allocated per-peer MessageIds and checkpoint_sequence values.
+- [x] COORD-072 A required-peer ACK for publication P is reported as CoordinatorCheckpointReplicationAcknowledged with P's local publicationId.
+- [x] COORD-073 Authority loss before a publication becomes DURABLE terminates that old-authority handle with AUTHORITY_LOST even if some peers already ACKed.
+- [x] COORD-074 A publication that reached DURABLE before authority loss guarantees every peer in its fixed required set had committed the exact checkpoint bytes before migration began.
+- [x] COORD-075 CoordinatorChanged.latestCheckpoint remains the newest locally available recovery checkpoint and is not falsely labeled proof that the previous publisher observed aggregate durability completion.
+- [x] COORD-050 B accepted remotely but ACK lost; post-RESUME retransmission of B is ACKed again without duplicate membership mutation.
+- [x] COORD-051 Transport loss during retransmission of newer same-term snapshot B cannot allow older snapshot A to overwrite B.
+- [x] COORD-052 Coordinator C remains at term T. Under SessionId S1, receiver accepts snapshot counter 100. S1 expires and cannot RESUME. Under new SessionId S2, receiver accepts current snapshot counter 1 as the new ordering baseline and MUST NOT compare it against S1 counter 100.
+- [x] COORD-053 Same coordinator/term establishes a new SessionId whose sender_message_prefix bytes collide with an expired prior SessionId; receiver still treats the new SessionId as a distinct membership-ordering domain.
+- [x] COORD-054 B sends to C in a coordinator star with no B-C PeerConnection; A relays and C receives sourcePeerId=B.
+- [x] COORD-055 B RELIABLE_ACKED send to C survives coordinator loss before destination acknowledgment by retaining GroupMessageId and rerouting through the new coordinator.
+- [x] COORD-056 Destination C accepted B's message but destination acknowledgment was lost during coordinator failure; post-migration duplicate relay does not redeliver and regenerates acknowledgment.
+- [x] COORD-057 RELIABLE_ORDERED B->C SendHandle reaches SENT_TO_TRANSPORT only after coordinator reports final-hop submission.
+- [x] COORD-058 Broadcast from B snapshots committed remote members, excludes B, and produces independent per-destination results.
+- [x] COORD-059 Coordinator queue-full relay admission ACKs the fully received source hop exactly once, sends RELAY_QUEUE_FULL, retains no destination relay operation, and source fails without re-sending the 1 MiB source hop.
+- [x] COORD-060 B->A remains healthy while A->C fails halfway through a multi-chunk RELIABLE_ORDERED relay. A->C RESUMEs, A retransmits the complete destination hop from chunk 0 with the same pairwise MessageId and GroupMessageId, C emits exactly one application event, and B eventually reaches SENT_TO_TRANSPORT.
+- [x] COORD-061 A->C fails after every RELIABLE_ORDERED GROUP_RELIABLE chunk reached frame-level SENT_TO_TRANSPORT but before any later unrelated traffic; A does not retransmit that completed hop solely because of the transport failure.
+- [x] COORD-062 GroupMessageId dedup eviction is bounded: after C completes message G, more than 16,384 newer completed source/message pairs evict G, and a later replay of G is not required to be suppressed as duplicate.
+- [x] COORD-063 B sends G to C through A. A admits and generic-ACKs the source hop. B cancels before A->C completes. A may complete delivery, C emits exactly one event, A sends GROUP_DELIVERY_ACK, B authenticates/ACKs the late signaling through its cancellation tombstone, B remains CANCELLED, and B never reroutes G.
+- [x] COORD-064 A has admitted B->C. C is removed from committed membership before destination delivery commits. A terminates the relay, releases reservation, sends DESTINATION_NOT_IN_GROUP to B when possible, and sends no additional application chunks to C.
+- [x] COORD-065 A is coordinator and has an already-created/in-flight GROUP_DELIVERY_ACK for G. B has cancelled G. D becomes coordinator before B receives A's signaling. Delayed signaling from former coordinator A on the same historically valid SessionId is authenticated and generic-ACKed as stale-authority signaling, cannot alter B's CANCELLED handle, and cannot revive/reroute G.
+- [x] COORD-066 B sends G to C through coordinator A. A admits G and transmits only part of the final-hop GROUP_RELIABLE. Before C commits the complete application message, D becomes committed coordinator. A stops future relay transmission and releases its admitted relay state. B reroutes G through D with the same GroupMessageId and new pairwise MessageIds. C commits G exactly once.
+- [x] COORD-067 A submitted a GROUP_RELIABLE frame while still coordinator, but C receives it only after committing D as new coordinator. C classifies it as stale-authority traffic on the historically valid A-C SessionId, does not redeliver, and does not treat the healthy historical A-C PeerConnection as malicious protocol corruption.
+- [x] COORD-068 B has a nonterminal routed send when an already-in-flight GROUP_DELIVERY_ACK from old coordinator A arrives after D becomes coordinator. B generic-ACKs and discards A's stale signaling, leaves the SendHandle nonterminal, and continues completion only through D.
+- [x] COORD-069 Two independently created singleton groups converge through one authenticated GROUP_MERGE to the same GroupId, member union, and coordinator term.
+- [x] COORD-070 A received GROUP_MERGE is accepted only when its authenticated sender is the coordinator advertised by retained winning-group GROUP_INFO and the local GroupId is the declared loser.
 
 ## Realtime Datagram Tests
 
-- [ ] RT-001 REALTIME_LATEST emits no ACK.
-- [ ] RT-002 REALTIME_LATEST is never retransmitted after simulated loss.
-- [ ] RT-003 New queued state supersedes older queued state on same channel.
-- [ ] RT-004 Realtime states on different channelIds do not supersede each other.
-- [ ] RT-005 Receiver drops older/equal datagram sequence.
-- [ ] RT-006 Receiver accepts sequence gaps.
-- [ ] RT-007 1101-byte realtime payload fails deterministically.
-- [ ] RT-008 Queued realtime packet expires after 100 ms by default.
-- [ ] RT-009 Reconnect discards pre-disconnect realtime queue.
-- [ ] RT-010 RESUME preserves realtime channel sequence counters, discards old queued state, and accepts the next freshly generated sequence.
-- [ ] RT-011 GATT realtime uses Write Without Response central->peripheral.
-- [ ] RT-012 GATT realtime uses Notify peripheral->central.
-- [ ] RT-013 Optional LAN UDP carries realtime only, never reliable DATA.
-- [ ] RT-014 Heavy realtime traffic cannot permanently starve reliable interactive traffic.
-- [ ] RT-015 A delayed reliable frame is accepted after a numerically later UDP packet arrives.
-- [ ] RT-016 UDP packet loss does not create a reliable sequence gap or reliable replay failure.
-- [ ] RT-017 UDP packets may reorder within the 256-packet UDP replay window without affecting reliable traffic.
-- [ ] RT-018 A maximum 1100-byte realtime payload produces a UDP datagram <=1232 bytes.
-- [ ] RT-019 A spoofed or modified UDP datagram fails AEAD authentication.
-- [ ] RT-020 UDP source IP/port change is rejected and deterministically triggers sidecar re-establishment.
-- [ ] RT-021 UDP sidecar loss falls back to the existing reliable transport without changing reliable transport generation.
-- [ ] RT-022 UDP packet sequence and realtime datagram_sequence advance independently.
-- [ ] RT-023 Reliable RESUME destroys the old UDP sidecar and requires fresh UDP key derivation.
-- [ ] RT-024 Simultaneous UDP capability detection causes only the lexicographically smaller PeerId to initiate automatically.
-- [ ] RT-025 First valid UDP packet initializes an empty replay window and is accepted.
-- [ ] RT-026 UDP packet sequence never wraps; fresh sidecar is required before UINT64_MAX.
-- [ ] RT-027 Unexpected-source authenticated UDP packet invalidates sidecar only; reliable PeerConnection remains READY.
-
-
+- [x] RT-001 REALTIME_LATEST emits no ACK.
+- [x] RT-002 REALTIME_LATEST is never retransmitted after simulated loss.
+- [x] RT-003 New queued state supersedes older queued state on same channel.
+- [x] RT-004 Realtime states on different channelIds do not supersede each other.
+- [x] RT-005 Receiver drops older/equal datagram sequence.
+- [x] RT-006 Receiver accepts sequence gaps.
+- [x] RT-007 1101-byte realtime payload fails deterministically.
+- [x] RT-008 Queued realtime packet expires after 100 ms by default.
+- [x] RT-009 Reconnect discards pre-disconnect realtime queue.
+- [x] RT-010 RESUME preserves realtime channel sequence counters, discards old queued state, and accepts the next freshly generated sequence.
+- [x] RT-011 GATT realtime uses Write Without Response central->peripheral.
+- [x] RT-012 GATT realtime uses Notify peripheral->central.
+- [x] RT-013 Optional LAN UDP carries realtime only, never reliable DATA.
+- [x] RT-014 Heavy realtime traffic cannot permanently starve reliable interactive traffic.
+- [x] RT-015 A delayed reliable frame is accepted after a numerically later UDP packet arrives.
+- [x] RT-016 UDP packet loss does not create a reliable sequence gap or reliable replay failure.
+- [x] RT-017 UDP packets may reorder within the 256-packet UDP replay window without affecting reliable traffic.
+- [x] RT-018 A maximum 1100-byte realtime payload produces a UDP datagram <=1232 bytes.
+- [x] RT-019 A spoofed or modified UDP datagram fails AEAD authentication.
+- [x] RT-020 UDP source IP/port change is rejected and deterministically triggers sidecar re-establishment.
+- [x] RT-021 UDP sidecar loss falls back to the existing reliable transport without changing reliable transport generation.
+- [x] RT-022 UDP packet sequence and realtime datagram_sequence advance independently.
+- [x] RT-023 Reliable RESUME destroys the old UDP sidecar and requires fresh UDP key derivation.
+- [x] RT-024 Simultaneous UDP capability detection causes only the lexicographically smaller PeerId to initiate automatically.
+- [x] RT-025 First valid UDP packet initializes an empty replay window and is accepted.
+- [x] RT-026 UDP packet sequence never wraps; fresh sidecar is required before UINT64_MAX.
+- [x] RT-027 Unexpected-source authenticated UDP packet invalidates sidecar only; reliable PeerConnection remains READY.
 
 ---
 
@@ -7414,7 +8659,7 @@ MUST deliver:
 - RESUME;
 - star topology.
 
-## v0.2.1 / Protocol Minor 1
+## v0.2.1 / AUTO_GROUP feature milestone, folded into Protocol Minor 0
 
 MUST deliver:
 
@@ -7423,7 +8668,7 @@ MUST deliver:
 - automatic coordinator migration;
 - deterministic group merging;
 - replicated membership snapshots;
-- optional coordinator checkpoints;
+- optional coordinator checkpoints with application-visible per-publication durability acknowledgement;
 - RELIABLE_ORDERED;
 - RELIABLE_ACKED;
 - REALTIME_LATEST;
@@ -7511,6 +8756,12 @@ A developer or AI implementation agent MUST follow these rules:
 31. Do not expose coordinator PeerId as the source of relayed application events; preserve the original sourcePeerId.
 32. Do not invent total ordering or atomic broadcast semantics across multiple source peers.
 33. Serialize callbacks/events per object and implement the public concurrency/reentrancy contract in Section 52.
+34. Do not use a Bluetooth address, DiscoveryEndpointId, local name, or platform peripheral identifier to decide persistent known-peer identity.
+35. Do not allocate PeerConnection/reconnect/queue state for every PeerId in an application's persistent known-peer database.
+36. Automatic known-peer probing MUST obey the configured active and pending probe bounds.
+37. KnownPeerResolver is an application relationship lookup and MUST NOT be conflated with KNOWN_PEER/KnownPeerPolicy authentication semantics.
+38. Any Runtime cache of known-peer resolver results MUST obey `maxKnownPeerCacheEntries`.
+39. A probabilistic known-peer prefilter MUST NOT by itself authorize known-peer classification; positive results require exact membership confirmation.
 # 59. Final Developer Experience
 
 The target application code must remain conceptually this simple:
@@ -7540,6 +8791,7 @@ The framework is responsible for:
 
 ```text
 BLE discovery
+bounded automatic known-peer probing and resolver lookup
 BLE role selection and duplicate-link resolution
 GATT service management
 fragmentation
@@ -7574,110 +8826,14 @@ application payload format
 
 ---
 
-
 # 60. Review Issue Resolution Record
 
 This section records the redesign made after independent protocol review.
 
-| Review issue | Validity | Normative resolution |
-|---|---|---|
-| iOS cannot emit custom advertisement format | Valid blocker | V1 canonical advertisement now uses service UUID only. All protocol metadata moves to HELLO. |
-| Initial handshake did not authenticate peer identity | Valid blocker | Persistent Ed25519 identity key, PeerId derived from public key, signed AUTH, explicit KNOWN_PEER/SAS/PSK_32/TOFU trust levels. Default first-contact mode is SAS. |
-| P2P role election conflicted with connect API | Valid blocker | Advertiser is peripheral, caller of connect is central. Symmetric dual-connect is resolved after authentication by deterministic duplicate-link ranking. |
-| uint16 fragment sequence insufficient | Valid blocker | Fragment sequence changed to uint32. |
-| 1 MiB GATT frame conflicts with keepalive | Valid blocker | Frame plaintext capped at 16,384 bytes. 1 MiB application messages are chunked into multiple DATA frames; control frames interleave between chunks. |
-| RESUME lifecycle underspecified | Valid blocker | Fresh candidate handshake, generation-0 candidate encryption, exact request/accept proofs, resumed-root derivation, SessionId preservation, generation increment, sequence reset, RESUME_READY specified. |
-| Upgrade/fallback incomplete | Valid blocker | Exact offer/accept/reject/bind/bind-ack/switch/switch-ack flow. Post-switch failure falls back via secure RESUME to another transport. |
-| DATA/API size contradiction | Valid major | 1 MiB is now application-message max, while each LPC frame plaintext is max 16,384 bytes. |
-| Keepalive interval could exceed dead timeout | Valid major | Dead timeout is derived as max(6000, 3 x negotiated interval) and is not independently configurable. |
-| ACK retry missing | Valid major | 3 s ACK timeout, exactly 2 retransmissions, same MessageId/new wire sequences, 16,384-entry completed-ID dedup set. |
-| SessionId contradictory | Valid major | SessionId is now deterministically derived for initial handshake and explicitly preserved across RESUME. No random SessionId rule remains. |
-| Minor-version negotiation missing | Valid major | HELLO carries min/max minor; highest common minor is selected. |
-| Capability bitmap definitions conflicted | Valid major | `PeerCapabilityBitmap` wire format and `LocalRuntimeCapabilityBitmap` API-only format are now distinct. |
-| API ownership/lifecycle incomplete | Valid medium | Runtime/HostSession/DiscoverySession/ConnectionAttempt/PeerConnection ownership, cascade closure, idempotence, and terminal behavior are explicitly specified. |
-| Explicit host/client UX creates friction and host failure ends topology | Valid design limitation | Added symmetric `joinOrCreateGroup`, deterministic automatic coordinator election, group merge, coordinator heartbeat, migration, and optional replicated coordinator checkpoint. |
-| Protocol minor contradictory | Valid | Section 4 now distinguishes current spec minor from the supported minor range; minor is negotiated rather than treated as a protocol-major constant. |
-| UDP shares reliable sequence/key space | Valid blocker | UDP is now an independent `LPU1` sidecar with directional UDP keys, uint64 UDP packet sequences, and a separate 256-packet replay window. |
-| 1200-byte realtime payload exceeds 1232-byte UDP packet | Valid blocker | Universal realtime application maximum reduced to 1100 bytes; full UDP packet is 1176 bytes. |
-| UDP binding/establishment underspecified | Valid blocker | Added UDP_OFFER, UDP_ACCEPT, encrypted UDP_PROBE/ACK, UDP_CLOSE, key derivation, endpoint binding, activation, failure, and re-establishment. |
-| Losing group membership unavailable | Valid | GROUP_INFO now carries the complete sorted committed PeerId list plus verified hash. |
-| Split-brain membership reconciliation missing | Valid | Same-GroupId divergent views reconcile at a new term using both authenticated snapshots plus reachable members. |
-| maxPeers absent from merge semantics | Valid | Effective capacity is the minimum maxPeers across candidate members; over-capacity merges are rejected without arbitrary member selection. |
-| SAS conflicts with frictionless GroupSession | Valid product conflict | GroupSession now defaults to encrypted OPEN_TOFU; stronger GROUP_PSK_32, PAIRWISE_SAS, and KNOWN_PEERS are explicit options. |
-| Empty namespace can merge unrelated games | Valid | Replaced with mandatory applicationNamespace plus default TOKEN_SCOPED 16-byte groupJoinToken; OPEN_PROXIMITY is explicit opt-in. |
-| GroupTrustMode not mapped to pairwise HELLO trust mode | Valid blocker | Added an exact mapping table; RuntimeConfig.trustMode is ignored for GroupSession-internal PeerConnections. |
-| effective_max_peers cannot be computed from GROUP_INFO | Valid blocker | Introduced canonical 18-byte GroupMemberRecord containing PeerId + max_peers and use it in GROUP_INFO, MEMBERSHIP_SNAPSHOT, GROUP_MERGE, reconciliation, and membership hashing. |
-| Simultaneous UDP_OFFER collision | Valid | Only the lexicographically smaller PeerId may automatically initiate the UDP sidecar. |
-| UDP replay-window initialization/wrap unspecified | Valid | First authenticated sequence initializes the window; sequence 0 is invalid; uint64 sequence must never wrap/reuse under one sidecar key. |
-| Unexpected UDP source could fail whole peer | Valid operational issue | It now invalidates/rebuilds only the UDP sidecar while the reliable PeerConnection remains READY. |
-| GROUP_MERGE_REJECT sender ambiguous | Valid | Merge rank is computed before capacity; only the would-be winning coordinator sends rejection. |
-| groupJoinToken could be mistaken for a secret | Valid documentation/security issue | Explicitly defined as merge scoping only, never authentication. |
-| Group trust mode absent from GROUP_INFO | Valid | GROUP_INFO now carries group_trust_mode and KNOWN_PEERS merge policy; differing trust modes never auto-merge. |
-| Protocol 1.1 test vectors incomplete | Valid | Added mandatory minor-1 group/realtime/UDP binary test vectors including GroupMemberRecord membership hashes. |
-| KNOWN_PEERS conflicts with exact expectedPeerId KNOWN_PEER | Valid blocker | KNOWN_PEER now has exact `EXPECT_EXACT_PEER` and `ALLOWLIST` policies; GroupSession KNOWN_PEERS normatively uses ALLOWLIST. |
-| ACK-required special control frames underspecified | Valid blocker | Added frame-header ACK_REQUIRED bit and one generic MessageId/ACK/retry/dedup/RESUME mechanism for RELIABLE_ACKED DATA plus MEMBERSHIP_SNAPSHOT, GROUP_MERGE, COORDINATOR_CHECKPOINT, and GROUP_LEAVE. |
-| group.leave and membership removal underspecified | Valid blocker | Added GROUP_LEAVE 0x23 with exact normal leave, coordinator resign, kick, abrupt disappearance, snapshot, and term behavior. |
-| conflicting max_peers during split-brain | Valid | Same-PeerId conflicting records reconcile to the minimum max_peers until clean leave/rejoin. |
-| stale AUTH HMAC vector wording | Valid editorial/protocol-vector issue | Replaced with Ed25519 AUTH signature vector. |
-| duplicate coordinator topology heading | Valid editorial issue | Removed duplicate and normalized subsection numbering. |
-| normative summary missing protocol 1.1 constructs | Valid | Expanded summary to include GroupMemberRecord, trust mapping/scoping, group frames, generic ACK_REQUIRED, and LPU1/UDP rules. |
-| COORDINATOR_CHECKPOINT exceeds control-frame limit | Valid blocker | Checkpoints now use <=4000-byte chunks inside <=4032-byte plaintext control frames; all chunks share one MessageId and receive one ACK only after full reassembly/commit. |
-| MessageId counter has off-by-one ambiguity | Valid | Replaced with `next_message_counter=1`; allocation uses the current value then increments. |
-| ACK-timeout control recovery unspecified | Valid | Added an exact recovery table for MEMBERSHIP_SNAPSHOT, GROUP_MERGE, COORDINATOR_CHECKPOINT, and each GROUP_LEAVE role. |
-| New ACK/control vectors incomplete | Valid | Added ACK_REQUIRED, membership duplicate/ACK, GROUP_LEAVE, ALLOWLIST, and checkpoint chunk/retransmission vectors and tests. |
-| ACK timeout start time undefined | Valid blocker | ACK timer now starts only after every frame/chunk in the current attempt reaches SENT_TO_TRANSPORT; transmission duration itself cannot trigger timeout. |
-| Section 6 MessageId wording stale | Valid normative inconsistency | MessageId now explicitly covers reliable application messages and ACK-required logical control operations. |
-| RESUME preservation list stale | Valid normative inconsistency | Section 26 now preserves all unacknowledged ACK_REQUIRED logical operations and explicitly discards incomplete checkpoint reassembly on transport loss. |
-| SENT_TO_TRANSPORT ambiguous for GATT fragmentation | Valid freeze blocker | SENT_TO_TRANSPORT now occurs only after all transport-specific bytes/fragments for the LPC frame are submitted to the underlying platform API; backend/internal queues do not count. Added TransportWrite completion contract. |
-| Section 26.6 application-message-only wording stale | Valid normative inconsistency | RESUME delivery/retransmission subsection now covers every unacknowledged ACK_REQUIRED logical operation and separately states exactly-once application-delivery vs control-state idempotence. |
-| TransportWrite.FAILED core behavior undefined | Valid state-machine blocker | Terminal submission failure now invalidates the physical transport, fails all pending writes, forbids further same-generation sends, and enters normal RECONNECTING/RESUME recovery. |
-| Backpressure vs FAILED ambiguous | Valid | Transient not-writable conditions keep TransportWrite PENDING and resume on Writable; FAILED is terminal only. |
-| Partially transmitted RELIABLE_ORDERED undefined | Valid | Incomplete DATA reassembly is discarded on generation loss; partially submitted RELIABLE_ORDERED retransmits the entire message from chunk 0 after RESUME with same MessageId. |
-| SendHandle SENT_TO_TRANSPORT scope ambiguous | Valid | SendHandle-level SENT_TO_TRANSPORT now occurs only after every constituent DATA frame reaches frame-level SENT_TO_TRANSPORT. |
-| GroupId merge winner contradiction between Sections 10 and 31 | Valid interoperability blocker | Section 10 now delegates to GroupMergeRank: larger committed group wins, equal sizes use lexicographically smaller GroupId. |
-| Plaintext PROTOCOL_MISMATCH ERROR contradicted plaintext-frame rule | Valid interoperability blocker | Added exact pre-key plaintext ERROR exception, wire fields, permitted state, and mandatory close behavior. |
-| Protocol minor 0 compatibility undefined | Valid blocker if minor 0 were claimed | Backward compatibility was intentionally removed. This spec now advertises/supports only major 1 minor 1; minor 0 DATA/control/capability semantics are explicitly undefined and unsupported. |
-| Coordinator checkpoint queueing underspecified | Valid freeze-level behavior gap | Checkpoint replication now has exactly one in-flight and one replaceable pending checkpoint per target peer; pending replacement allocates no MessageId/sequence and cannot cancel in-flight delivery. |
-| Checkpoint publish still implied one global MessageId/checkpoint_sequence | Valid normative inconsistency | Checkpoint logical operation identity is now explicitly per target peer and allocated only when that peer promotes the checkpoint to in-flight transmission. |
-| Pre-key ERROR exact field names stale | Valid editorial/normative precision issue | Replaced `nonce_suffix` with header field `nonce` and `payload_length` with `encrypted_payload_length`, explicitly noting plaintext payload sizing. |
-| Section 61 major-version freeze wording conflicted with future minor negotiation | Valid conceptual inconsistency | Minor 1 semantics are fixed forever; future major-1 minors may add negotiated backward-compatible extensions; incompatible changes require a new major. |
-| Section 11 stale v1.0 negotiation wording | Valid editorial inconsistency | Reworded to initial LPC protocol negotiation and protocol-major-1 BLE Baseline Conformance. |
-| Full V1 Mobile Conformance too loose/stale | Valid | Renamed Full V1.1 Mobile Conformance and explicitly requires minor 1, GroupSession/AUTO_GROUP, coordinator behavior, all three delivery modes, Android+iOS, diagnostics, and mandatory tests. |
-| Same-term membership snapshot stale overwrite risk | Valid adversarial validation concern | Added deterministic same-coordinator/same-term ordering using retained MessageId allocation order, stale-snapshot suppression, and RESUME regression tests without adding membership_revision. |
-| Snapshot ordering lacked SessionId scope | Valid normative ambiguity | MembershipSnapshotOrderState now includes coordinator PeerId, term, SessionId, sender prefix, and greatest accepted counter. New SessionId establishes a fresh baseline even if counter decreases or prefix bytes collide. |
-| GroupSession routing undefined in coordinator star | Valid freeze blocker | Added normative coordinator relay with GROUP_RELIABLE/GROUP_REALTIME, stable GroupMessageId, per-hop MessageIds, destination-level GROUP_DELIVERY_ACK, relay status, deduplication, migration, and source preservation. |
-| BroadcastHandle semantics undefined | Valid API gap | Defined immutable target snapshot, per-peer handles/results, ACTIVE/COMPLETED/CANCELLED states, local-peer exclusion, and non-atomic partial-success semantics. |
-| Group event payloads undefined | Valid API gap | Defined exact payload structures and common eventSequence metadata for every public GroupSession event. |
-| Event ordering undefined | Valid API/concurrency gap | Added one logical per-object event dispatcher in protocol-state commit order, with getters updated before events. |
-| Public concurrency/thread-safety undefined | Valid API gap | All public methods are thread-safe with per-object serialized mutation; callbacks are non-concurrent and reentrant calls are permitted. |
-| RELIABLE_ORDERED name may imply guaranteed delivery | Valid documentation risk | API docs now prominently define RELIABLE_ORDERED as ordered transport-submitted and RELIABLE_ACKED as destination-recipient-confirmed. |
-| Group-wide ordering/broadcast atomicity unspecified | Valid semantic gap | Explicitly no total order across different sources and no atomic broadcast; each destination is independent. |
-| TOKEN_SCOPED default UX unclear | Valid documentation gap | Added concrete OPEN_PROXIMITY game and TOKEN_SCOPED room/whiteboard/messaging examples. |
-| Security mode guidance by application type | Valid guidance improvement | Added use-case trust profiles and clarified coordinator relay is hop-by-hop, not member-to-member end-to-end encrypted. |
-| Section 26.6 stale after group-routing additions | Valid freeze blocker | RESUME Message Recovery now exhaustively includes GROUP_RELIABLE, GROUP_DELIVERY_ACK, and GROUP_RELAY_STATUS for protocol minor 1. |
-| Group-routing binary vectors missing | Valid interoperability blocker | Added mandatory byte-for-byte GroupMessageId, GROUP_RELIABLE, GROUP_REALTIME_DATAGRAM, GROUP_DELIVERY_ACK, all GROUP_RELAY_STATUS variants, two-hop relay, and destination-duplicate vectors. |
-| Coordinator relay admission boundary ambiguous | Valid normative gap | Coordinator now atomically admits/reserves the complete destination relay operation; on route/queue rejection it ACKs the fully received source hop, retains no relay state, and reports failure with GROUP_RELAY_STATUS. |
-| Normative Summary stale after routing additions | Valid normative consistency issue | Section 61 now explicitly lists GroupMessageId, all four routing frame types, relay semantics, broadcast handles, event serialization, and concurrency/reentrancy rules. |
-| GROUP_RELIABLE partial-hop transport loss undefined | Valid freeze blocker | Added generation-loss discard/reassembly rules and whole-hop retransmission from chunk 0 for both RELIABLE_ORDERED and RELIABLE_ACKED, including coordinator->destination partial relay recovery while source->coordinator remains healthy. |
-| Final coordinator-to-destination hop wording too narrow | Valid precision issue | Replaced with `final end-destination hop` and defined all three source/destination topology cases. |
-| GroupMessageId dedup lifetime caveat insufficiently prominent | Valid reliability/documentation issue | Section 43 now states exactly-once GroupSession RELIABLE_ACKED delivery is guaranteed only while the completed source/GroupMessageId remains in the 16,384-entry destination dedup window; post-eviction replay may redeliver. |
-| Routed-send cancellation semantics undefined | Valid API/normative gap | SendHandle.cancel is now explicitly local best-effort only; no minor-1 remote revocation exists, cancelled sends stop source retry/reroute, and admitted coordinator relays may still complete. |
-| Late route signaling after cancellation ambiguous | Valid protocol-race gap | Added bounded cancellation tombstones so late GROUP_DELIVERY_ACK/GROUP_RELAY_STATUS is authenticated and ACKed normally while cancelled public handles remain terminal. |
-| Membership removal during admitted relay ambiguous | Valid routing gap | Committed destination removal now terminates nonterminal queued/admitted relays that have not already completed destination delivery and reports DESTINATION_NOT_IN_GROUP when possible. |
-| Cancellation tombstone retention used later-of instead of earlier-of | Valid normative bug | Tombstones now release at the earlier of GroupSession close or termination of every SessionId capable of valid late signaling. |
-| Former-coordinator late route signaling race undefined | Valid edge-case precision issue | Added stale-authority signaling rules: only already-in-flight controls on the historically valid SessionId may be ACKed/discarded for cancelled tombstones; they can never affect send state or grant ongoing authority. |
-| GroupMessageId dedup cache scope implicit | Valid implementation-precision issue | Defined one shared 16,384-entry completed GroupMessageId cache per destination GroupSession across all source PeerIds. |
-| Already-admitted relay behavior on coordinator authority loss undefined | Valid routing/state-machine gap | Former coordinator now immediately terminates unfinished admitted relays, stops future application-frame submission, releases reservations, and transfers no pairwise relay identity/responsibility. Source reroutes through the new coordinator with the same GroupMessageId. |
-| Non-authoritative/stale coordinator handling referenced but undefined | Valid normative gap | Added unified stale former-coordinator handling for already-in-flight GROUP_DELIVERY_ACK, GROUP_RELAY_STATUS, GROUP_RELIABLE, and GROUP_REALTIME_DATAGRAM with historical SessionId/authority checks and deterministic ACK/discard behavior. |
-
-
-
-
-
-| All application traffic effectively reliable/ordered | Valid game-latency limitation | Added `REALTIME_LATEST` datagrams with no LPC ACK/retry, latest-only queue replacement, stale-sequence dropping, 100 ms default expiry, and optional authenticated LAN UDP. |
-
-
 ---
+
+## 60.1 Demo-integration clarifications in 0.9.10
+
 
 # 61. Normative Summary
 
@@ -7716,11 +8872,14 @@ For protocol major 1, the following are fixed and MUST match across implementati
 - REALTIME_DATAGRAM format and latest-only queue semantics;
 - coordinator control frame numeric values 0x16 through 0x1A;
 - REALTIME_DATAGRAM frame value 0x1B;
-- protocol-minor-1 PeerCapabilityBitmap bits 6 through 8;
+- protocol-minor-0 PeerCapabilityBitmap bits 6 through 8;
 - optional authenticated Wi-Fi UDP realtime path;
 - canonical 18-byte GroupMemberRecord encoding;
 - canonical committed membership hash construction including max_peers;
 - GroupTrustMode values and exact mapping to pairwise HELLO trust_mode/KnownPeerPolicy;
+- Runtime automatic known-peer configuration and exact `KnownPeerResolver` contract;
+- bounded automatic known-peer probe scheduling and cache limits;
+- KnownPeerConnected / UnknownPeerIdentified event semantics;
 - applicationNamespace and groupJoinToken scoping rules;
 - group trust compatibility and KNOWN_PEERS auto-merge rules;
 - GROUP_INFO format and full committed GroupMemberRecord list;
@@ -7728,6 +8887,8 @@ For protocol major 1, the following are fixed and MUST match across implementati
 - GROUP_LEAVE semantics and committed membership removal rules;
 - generic ACK_REQUIRED flag and ACK/retry/dedup/RESUME behavior for critical control frames;
 - coordinator checkpoint chunking with a 4000-byte checkpoint-data maximum per control frame and one MessageId per per-target logical checkpoint operation;
+- GroupSession-local coordinator-checkpoint publicationId allocation and fixed acknowledgement-set snapshot semantics;
+- CoordinatorCheckpointHandle per-peer ACK correlation, DURABLE/FAILED aggregation, supersession, membership-race, authority-loss, and bounded-retention semantics;
 - MessageId `next_message_counter` initialization, allocation, and exhaustion behavior;
 - exact frame-specific final ACK-timeout recovery and per-peer GroupSyncState;
 - exact ACK timer start semantics based on final frame/chunk reaching SENT_TO_TRANSPORT;
@@ -7770,7 +8931,7 @@ For protocol major 1, the following are fixed and MUST match across implementati
 - termination of nonterminal admitted relays when destination membership removal commits;
 - API semantics.
 
-For negotiated protocol minor 1, the rules above are fixed and MUST match across conforming implementations.
+For negotiated protocol minor 0, the rules above are fixed and MUST match across conforming implementations.
 
 A future protocol-major-1 minor version MAY add backward-compatible wire or semantic extensions when those extensions are governed by minor-version negotiation.
 

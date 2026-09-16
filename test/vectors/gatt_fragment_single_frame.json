@@ -1,0 +1,5 @@
+{
+  "name": "gatt_fragment_single_frame",
+  "description": "Section 12 one-fragment START|END envelope",
+  "hex": "00000000030003aabbcc"
+}

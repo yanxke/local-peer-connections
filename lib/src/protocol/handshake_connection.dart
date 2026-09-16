@@ -1,0 +1,370 @@
+import 'dart:async';
+import 'dart:math';
+
+import '../backend.dart';
+import '../peer_connection_core.dart';
+import '../types.dart';
+import 'control_payload.dart';
+import 'crypto.dart';
+import 'frame.dart';
+import 'handshake_exchange.dart';
+import 'handshake_orchestrator.dart';
+import 'reliability.dart';
+
+/// Backend-bound Section 16 handshake driver.
+///
+/// It owns plaintext HELLO/AUTH until [HandshakeExchange] authenticates, then
+/// exchanges the mandatory generation-1 READY frames.  Its [ready] future
+/// completes only after the local READY reached the backend API boundary and
+/// the remote READY authenticated; the returned core consequently starts
+/// ordinary encrypted traffic at sequence 2 in both directions.
+class HandshakeConnection {
+  HandshakeConnection({
+    required this.backend,
+    required this.exchange,
+    required this.localPeerId,
+    this.logger,
+    PeerId? remotePeerId,
+    this.onSasRequired,
+    this.candidateOnly = false,
+    this.acceptCandidateResume = false,
+  }) : expectedRemotePeerId = remotePeerId;
+
+  final BackendConnection backend;
+  final HandshakeExchange exchange;
+  final PeerId localPeerId;
+
+  /// Optional lifecycle diagnostics. Only frame type/size/state is exposed;
+  /// frame payloads and cryptographic material are intentionally omitted.
+  final void Function(String message)? logger;
+
+  /// An initiator only has a platform-local discovery endpoint before HELLO.
+  /// This optional value is a policy assertion for callers that already know
+  /// the peer, never a substitute for the authenticated HELLO identity.
+  final PeerId? expectedRemotePeerId;
+  final void Function(PeerId peerId, String sas)? onSasRequired;
+
+  /// Section 26.1 candidate handshakes authenticate HELLO/AUTH but must not
+  /// send normal READY; their owner immediately starts candidate RESUME.
+  final bool candidateOnly;
+
+  /// Responder-side Section 26 handoff.  This is used only for a newly
+  /// accepted physical connection while an existing logical peer is
+  /// reconnecting: wait for either its normal READY or its first candidate
+  /// RESUME_REQUEST.  Waiting avoids sending a normal READY onto a candidate
+  /// connection, which would make a valid reconnect fail.
+  final bool acceptCandidateResume;
+  final Completer<PeerConnectionCore> _ready = Completer<PeerConnectionCore>();
+  final Completer<HandshakeResult> _authenticated =
+      Completer<HandshakeResult>();
+  final Completer<List<int>> _candidateInitialFrame = Completer<List<int>>();
+  StreamSubscription<BackendConnectionEvent>? _subscription;
+  // GATT notifications are delivered in order, but parsing and cryptographic
+  // verification are asynchronous. Serialize receive work as well as the
+  // platform callbacks: otherwise a fast link can start processing AUTH
+  // while the preceding HELLO is still being decoded, yielding the misleading
+  // "AUTH before HELLO exchange" failure. This is especially likely during
+  // crossed reconnect candidates, where both sides submit frames back-to-back.
+  Future<void> _inbound = Future<void>.value();
+  bool _started = false;
+  bool _localReadySubmitted = false;
+  bool _remoteReadyAuthenticated = false;
+  // BackendClosed can race the async decrypt/validation of a READY frame that
+  // was already delivered by the GATT reassembler.  Keep that frame's
+  // protocol result authoritative; malformed READY still completes [ready]
+  // with an error from _receive.
+  bool _remoteReadyFrameReceived = false;
+  bool _normalReadySelected = false;
+  bool _sasNotified = false;
+  Timer? _sasTimeout;
+
+  void _log(String message) {
+    try {
+      logger?.call(message);
+    } on Object {
+      // Logging must never affect protocol progress.
+    }
+  }
+
+  Future<PeerConnectionCore> get ready => _ready.future;
+  Future<HandshakeResult> get authenticated => _authenticated.future;
+  Future<List<int>> get candidateInitialFrame => _candidateInitialFrame.future;
+
+  PeerId get remotePeerId {
+    final peerId = exchange.remoteHello?.peerId;
+    if (peerId == null) {
+      throw const LpcException(
+          LpcErrorCode.invalidState, 'remote PeerId is not authenticated');
+    }
+    return peerId;
+  }
+
+  /// Begins the local HELLO. Call after the backend reports it is open.
+  Future<void> start() async {
+    if (_started) {
+      throw const LpcException(
+          LpcErrorCode.invalidState, 'handshake has already started');
+    }
+    _started = true;
+    _log(
+        'start candidateOnly=$candidateOnly acceptCandidateResume=$acceptCandidateResume');
+    _subscription = backend.events.listen((event) {
+      if (event is BackendBytesReceived) {
+        _inbound = _inbound.then((_) => _receive(event.bytes));
+      }
+      if (event is BackendClosed) {
+        if (!_ready.isCompleted && !_remoteReadyFrameReceived) {
+          _fail(const LpcException(LpcErrorCode.transportClosed));
+        }
+      }
+      if (event is BackendError &&
+          !_ready.isCompleted &&
+          !_remoteReadyFrameReceived) {
+        _fail(event.error);
+      }
+    },
+        onError: (Object error, StackTrace stackTrace) =>
+            _fail(error, stackTrace));
+    try {
+      // Create the HELLO exactly once so diagnostics describe the frame that
+      // is actually submitted.
+      // ignore: unnecessary_local_variable
+      final hello = exchange.createHello();
+      _log('send ${_frameSummary(hello)}');
+      await _send(hello);
+    } catch (error, stackTrace) {
+      await _closeWithError(error, stackTrace);
+      rethrow;
+    }
+  }
+
+  /// Confirms an SAS-authenticated exchange and, when accepted, starts READY.
+  Future<void> confirmSas(bool accepted) async {
+    try {
+      _sasTimeout?.cancel();
+      _sasTimeout = null;
+      exchange.confirmSas(accepted);
+      await _sendReadyIfAuthenticated();
+    } catch (error, stackTrace) {
+      await _closeWithError(error, stackTrace);
+      rethrow;
+    }
+  }
+
+  Future<void> _receive(List<int> bytes) async {
+    if (_ready.isCompleted) return;
+    try {
+      final frame = LpcFrame.decode(bytes);
+      _log('receive ${_frameSummary(frame)} state=${exchange.state.name}');
+      if (frame.encrypted && frame.type == FrameType.ready) {
+        _remoteReadyFrameReceived = true;
+      }
+      if (!frame.encrypted) {
+        final response = await exchange.receivePlaintext(frame);
+        if (response != null) {
+          _log('protocol response ${_frameSummary(response)}; closing');
+          // Section 16.2.1 requires this response to be sent before close.
+          await _send(response);
+          await _closeWithError(
+              const LpcException(LpcErrorCode.protocolMismatch));
+          return;
+        }
+        if (exchange.state == HandshakeExchangeState.helloExchanged) {
+          final expected = expectedRemotePeerId;
+          if (expected != null && expected != remotePeerId) {
+            throw const LpcException(
+                LpcErrorCode.authenticationFailed, 'unexpected HELLO PeerId');
+          }
+          await _send(await exchange.createAuth());
+          _log('AUTH submitted remote=${remotePeerId}');
+        }
+        _notifySasIfRequired();
+        await _sendReadyIfAuthenticated();
+        return;
+      }
+      if (acceptCandidateResume &&
+          exchange.state == HandshakeExchangeState.authenticated &&
+          frame.type == FrameType.resumeRequest &&
+          frame.transportGeneration == 0) {
+        // The requester sends only this first candidate frame and then waits
+        // for RESUME_ACCEPT, so cancellation before the candidate driver is
+        // installed cannot drop a subsequent protocol frame.
+        await _subscription?.cancel();
+        if (!_authenticated.isCompleted)
+          _authenticated.complete(exchange.result!);
+        _log('candidate authenticated remote=${remotePeerId}');
+        if (!_candidateInitialFrame.isCompleted) {
+          _candidateInitialFrame.complete(List<int>.from(bytes));
+        }
+        return;
+      }
+      if (acceptCandidateResume) _normalReadySelected = true;
+      await _receiveReady(frame);
+      // A selectable responder sends READY only after it has proved that this
+      // is the normal generation-1 path, never before candidate selection.
+      await _sendReadyIfAuthenticated();
+    } catch (error, stackTrace) {
+      await _closeWithError(error, stackTrace);
+    }
+  }
+
+  void _notifySasIfRequired() {
+    if (_sasNotified ||
+        exchange.state != HandshakeExchangeState.awaitingSasConfirmation) {
+      return;
+    }
+    _sasNotified = true;
+    _log('SAS verification required remote=${remotePeerId}');
+    _sasTimeout = Timer(const Duration(seconds: 30), () {
+      _fail(const LpcException(
+          LpcErrorCode.authenticationFailed, 'SAS verification timed out'));
+    });
+    onSasRequired?.call(remotePeerId, exchange.result!.sas!);
+  }
+
+  Future<void> _sendReadyIfAuthenticated() async {
+    if (exchange.state != HandshakeExchangeState.authenticated ||
+        _localReadySubmitted ||
+        _ready.isCompleted) {
+      return;
+    }
+    if (candidateOnly) {
+      await _completeCandidateHandshake();
+      return;
+    }
+    if (acceptCandidateResume && !_normalReadySelected) return;
+    final result = exchange.result!;
+    final remote = remotePeerId;
+    final direction = _direction(localPeerId, remote);
+    final key = await trafficKey(result.secrets.sessionRootKey, 1, direction);
+    final clear = LpcFrame(
+        type: FrameType.ready,
+        flags: 0,
+        transportGeneration: 1,
+        sequenceNumber: 1,
+        messageId: List<int>.filled(8, 0),
+        sessionId: result.secrets.sessionId,
+        nonce: List<int>.filled(12, 0),
+        payload: result.createReady().encode());
+    final protected =
+        await const FrameProtector().encrypt(clear, await key.extractBytes());
+    final status = await _write(protected);
+    if (status != TransportWriteState.submittedToPlatform) {
+      throw const LpcException(LpcErrorCode.transportClosed);
+    }
+    _localReadySubmitted = true;
+    _log('READY submitted remote=$remote generation=1');
+    await _completeIfReady();
+  }
+
+  Future<void> _completeCandidateHandshake() async {
+    if (_authenticated.isCompleted) return;
+    await _subscription?.cancel();
+    _authenticated.complete(exchange.result!);
+  }
+
+  Future<void> _receiveReady(LpcFrame frame) async {
+    final result = exchange.result;
+    if (result == null ||
+        frame.type != FrameType.ready ||
+        frame.flags != 0 ||
+        frame.protocolMinor != result.negotiatedMinor ||
+        frame.transportGeneration != 1 ||
+        frame.sequenceNumber != 1 ||
+        frame.messageId.any((byte) => byte != 0) ||
+        !_same(frame.sessionId, result.secrets.sessionId)) {
+      throw const LpcException(
+          LpcErrorCode.protocolMismatch, 'invalid READY frame');
+    }
+    final key = await trafficKey(result.secrets.sessionRootKey, 1,
+        _direction(remotePeerId, localPeerId));
+    final clear =
+        await const FrameProtector().decrypt(frame, await key.extractBytes());
+    result.verifyRemoteReady(ReadyPayload.decode(clear.payload));
+    _remoteReadyAuthenticated = true;
+    _log('READY authenticated remote=${remotePeerId}');
+    await _completeIfReady();
+  }
+
+  Future<void> _completeIfReady() async {
+    if (!_localReadySubmitted ||
+        !_remoteReadyAuthenticated ||
+        _ready.isCompleted) {
+      return;
+    }
+    final core = PeerConnectionCore(
+        backend: backend,
+        sessionRootKey: exchange.result!.secrets.sessionRootKey,
+        sessionId: exchange.result!.secrets.sessionId,
+        resumeSecret: exchange.result!.secrets.resumeSecret,
+        localPeerId: localPeerId,
+        remotePeerId: remotePeerId,
+        securityLevel: exchange.result!.createReady().securityLevel,
+        keepaliveTiming: exchange.result!.keepaliveTiming,
+        messageIdAllocator: MessageIdAllocator(
+            List<int>.generate(4, (_) => Random.secure().nextInt(256))),
+        initialNextSequence: 2,
+        initialHighestReceivedSequence: 1);
+    // READY has already been authenticated in both directions. Publish that
+    // protocol result before awaiting listener teardown: a simultaneous
+    // duplicate-link close can otherwise complete _ready with transportClosed
+    // during subscription cancellation, even though this handshake reached
+    // the authoritative READY state.
+    _log('handshake complete remote=${remotePeerId}');
+    _ready.complete(core);
+    await _subscription?.cancel();
+  }
+
+  Future<void> _send(LpcFrame frame) async {
+    final status = await _write(frame);
+    if (status != TransportWriteState.submittedToPlatform) {
+      throw const LpcException(LpcErrorCode.transportClosed);
+    }
+  }
+
+  Future<TransportWriteState> _write(LpcFrame frame) =>
+      backend.write(frame.encode()).completion;
+
+  Future<void> _closeWithError(Object error, [StackTrace? stackTrace]) async {
+    final lpcError = error is LpcException ? error : null;
+    _log('failed code=${lpcError?.code.name ?? 'unknown'} detail=$error');
+    _sasTimeout?.cancel();
+    _sasTimeout = null;
+    if (!_ready.isCompleted) _ready.completeError(error, stackTrace);
+    if (candidateOnly && !_authenticated.isCompleted) {
+      _authenticated.completeError(error, stackTrace);
+    }
+    if (acceptCandidateResume && !_candidateInitialFrame.isCompleted) {
+      _candidateInitialFrame.completeError(error, stackTrace);
+    }
+    await _subscription?.cancel();
+    await backend.close();
+  }
+
+  void _fail(Object error, [StackTrace? stackTrace]) {
+    unawaited(_closeWithError(error, stackTrace));
+  }
+}
+
+String _frameSummary(LpcFrame frame) =>
+    'frame=${frame.type.name} encrypted=${frame.encrypted} generation=${frame.transportGeneration} sequence=${frame.sequenceNumber} bytes=${frame.encode().length}';
+
+int _direction(PeerId sender, PeerId receiver) =>
+    _compare(sender.bytes, receiver.bytes) < 0 ? 0 : 1;
+
+int _compare(List<int> a, List<int> b) {
+  for (var index = 0; index < a.length; index++) {
+    final comparison = a[index].compareTo(b[index]);
+    if (comparison != 0) return comparison;
+  }
+  return 0;
+}
+
+bool _same(List<int> a, List<int> b) {
+  if (a.length != b.length) return false;
+  var difference = 0;
+  for (var index = 0; index < a.length; index++) {
+    difference |= a[index] ^ b[index];
+  }
+  return difference == 0;
+}

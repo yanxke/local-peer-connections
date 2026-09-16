@@ -1,0 +1,4 @@
+// Copy this file to Local.xcconfig and replace the value with the team shown
+// by `security find-identity -v -p codesigning` on the development Mac.
+// Local.xcconfig is ignored so a personal Apple team is never committed.
+DEVELOPMENT_TEAM = YOUR_APPLE_DEVELOPMENT_TEAM

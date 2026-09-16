@@ -46,6 +46,10 @@ For protocol-affecting work:
 7. search for stale contradictory wording;
 8. verify test IDs remain unique;
 9. verify explicit Section references still resolve.
+10. when fixing bugs in the implementation or when there
+are platform (Android/iOS/Bluetooth) caveats, document the
+reason for the fixes in the code so that future maintainers
+can understand why the specific logic is there.
 
 For implementation-only work, do not modify protocol semantics.
 
@@ -223,3 +227,117 @@ If you cannot point to the normative rule that justifies an implementation choic
 Check `local_peer_connections_spec.md`.
 
 If the rule is missing, document the ambiguity and fix the specification first.
+
+If there is something in AGENTS.md that is wrong and conflicts
+with the spec, you can fix AGENTS.md.
+
+Do not perform userspace reboots (or other device reboots) on connected test
+devices. If an iOS deployment is stuck or a device becomes unavailable, wait
+for it to recover or ask the user to reconnect/unlock it.  Sometimes iOS install
+is blocked by an older, stale Flutter/devicectl launch process, in which
+case terminate the stale tooling processes and try.  Sometimes
+iOS install has stale Runner.app processes from previous launches which block
+CoreDevice’s install operation, in which case terminate those processes and retry.
+
+When running the LPC multi device integration tests, watch for non stable connections
+and high packet loss rates, or stalled transfers, and debug and figure out why.  Add logs
+where useful to help identify the problem.
+
+When fixing bugs in the implementation or when there are platform (Android/iOS/Bluetooth) caveats, document the reason for the fixes in the code so that future maintainers can understand why the specific logic is there.
+
+Deployments on iOS could take a while to complete.
+
+Applications should not be hot restarted because it can cause duplicate endpoints.
+
+## Platform deployment and physical-test caveats
+
+These are operational rules for deploying and testing the bindings. They do not
+change LPC wire semantics or replace the normative requirements in the spec.
+
+- Preserve the installed application and its data during automated physical
+  testing. Do not uninstall, clear application data, reboot a test device, or
+  hot restart the app unless the test explicitly requires a clean environment
+  and a person is available to approve permissions again. A fresh install can
+  require manual Bluetooth, Keychain, and automation approvals and can make
+  the test run appear to be a connection failure.
+- On Android, prefer an in-place debug update, for example
+  `adb -s <serial> install -r build/app/outputs/flutter-apk/app-debug.apk`,
+  then relaunch the package if the update stopped it. Preserve the existing
+  `adb reverse`/forward control-port setup. A runtime reset means stopping and
+  starting LPC presence and sessions; it is not an uninstall or device reboot.
+- On iOS, allow extra time for `flutter run` and CoreDevice. If `flutter run`
+  or installation hangs, inspect for stale `flutter`, `devicectl`, or
+  `Runner.app` processes and terminate only the stale deployment/Runner
+  process before retrying. `ps aux | rg 'flutter run|devicectl|Runner.app|iproxy'`
+  is sufficient to identify candidates; use the matching device and process
+  ID with `xcrun devicectl device process terminate` when necessary. Do not
+  reboot the device or broadly kill the CoreDevice service. Keep the `iproxy`
+  control-port forward alive. If Flutter reports an Automation permission
+  request, approve it in macOS Settings.
+  `flutter build ios --debug --no-codesign` produces only an unsigned
+  compile artifact; CoreDevice rejects it for physical deployment. Use
+  `flutter run` with automatic development signing, an IDE with the Flutter
+  plugin, or Xcode to deploy the debug harness. Keep `--no-codesign` for
+  compile-only checks and CI artifacts, not installation.
+  On iOS 14+, debug Flutter apps must be launched through `flutter run`, an
+  IDE with the Flutter plugin, or Xcode; direct `devicectl device process
+  launch` is rejected. An in-place `xcrun devicectl device install app` is
+  still allowed for installation, but CoreDevice must not be used to launch
+  the debug Flutter app as a fallback when Flutter's deploy wrapper is stale.
+  When replacing an already-running debug build, stop the matching old
+  `flutter run`/`devicectl` wrapper and `Runner.app` process first, then run
+  `flutter run -d <UDID> --debug --no-pub`. If the matching CoreDevice install
+  child remains stuck for five minutes with no result, terminate only that
+  stale deployment session and retry once; do not uninstall or reboot the
+  device.
+  If the app remains frozen on the device after a termination signal, stop
+  every stale Flutter launch session for that device, not only the last
+  `devicectl` child. Inspect `flutter_tools.snapshot run -d <UDID>`, the
+  project-specific `xcode_debug.js`, and matching `devicectl` install/launch
+  children; old Flutter sessions can relaunch or retain the visible process.
+  Then terminate the app PID from `xcrun devicectl device info processes` and
+  start exactly one `flutter run -d <UDID> --debug --no-pub` session. Preserve
+  the other apps and the control-port forward. If that forward accepts TCP
+  connections but does not answer, restart only its matching `iproxy
+  <local-port>:<control-port>` process after the new app is running.
+- On macOS, build with `flutter build macos --debug` and keep the application
+  open while the user approves the LPC identity's Keychain access. Prefer
+  “Always Allow” for the test identity. A pending Keychain dialog can leave
+  the control API up while the runtime is not ready; that is an authorization
+  wait, not evidence that Bluetooth discovery failed. Do not bypass the
+  prompt by returning success from a permission channel or by moving platform
+  authorization into a mobile-only path. Keychain seed access must stay off
+  the Flutter main thread so the control API and permission UI remain
+  responsive. Do not check a developer-specific `DEVELOPMENT_TEAM` into the
+  macOS project. Keep automatic Apple Development signing enabled and provide
+  the local team through Xcode or the local `xcodebuild` invocation. The
+  integration app has an optional ignored
+  `macos/Runner/Configs/Local.xcconfig`; copy its
+  `Local.xcconfig.example` and set the local team there before building.
+  Verify the built app with `codesign -dv --verbose=4`; it must have an Apple
+  Development authority and team identifier, not `Signature=adhoc`. Switching
+  from an ad-hoc build to a stable signing identity may require one final
+  Keychain/Bluetooth approval; subsequent in-place builds with that identity
+  should reuse it.
+- Do not start a second Flutter launch session over an already-running app,
+  and do not stop a successful deployment session merely to inspect it. A
+  stale launch wrapper can outlive Ctrl-C and continue holding CoreDevice or
+  the app process; clean up that specific wrapper/Runner process before the
+  next deployment.
+- If a macOS/iOS run reports `MissingPluginException` for
+  `loadOrCreateEd25519Seed`, verify that the platform plugin implementation is
+  included in the current build and rebuild/relaunch in place. Do not mask the
+  missing registration or a pending Keychain authorization with a fake seed or
+  a successful no-op.
+- When a run stalls, collect the LPC diagnostics and native BLE/GATT logs
+  before changing the environment. In particular, repeated Android
+  `ENDPOINT_BUSY` errors indicate a stale/duplicate GATT client link; fix the
+  teardown/duplicate-callback or bounded probe backoff, rather than starting
+  an unbounded retry loop. Automatic known-peer probes must remain bounded and
+  must not starve an application reconnect.
+- For each physical multi-device run, record device roles, start/end times,
+  connection/reconnection events, message counts, bytes per second, and loss.
+  Save failure evidence for stalls or unstable links. Clean up all
+  test-created sessions/games through the harness UI on every participating
+  device before the next scenario so persisted state does not contaminate
+  discovery or reconnect tests.
