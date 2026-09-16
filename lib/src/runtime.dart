@@ -3656,6 +3656,25 @@ class _RuntimeGroupRouteTransport
           info.coordinatorTerm > group.coordinatorTerm) {
         return;
       }
+      // A process that joined through a non-coordinator can briefly advertise
+      // the same GroupId with the coordinator's older, strict-subset view.
+      // That is a bootstrap lag, not split brain: the local coordinator still
+      // owns the newer committed membership and must not create a new term on
+      // every GROUP_INFO heartbeat.  Re-send the current authority metadata;
+      // the already-published MEMBERSHIP_SNAPSHOT remains the mechanism that
+      // brings this peer up to the committed set.
+      if (info.coordinatorPeerId == group.coordinatorPeerId &&
+          info.coordinatorTerm < group.coordinatorTerm &&
+          _isMemberSubset(info.info.members, local.members)) {
+        await _sendGroupInfo(peer);
+        // A restarted GroupSession does not retain the prior snapshot's
+        // ACK/retry state. Re-send the current committed membership to this
+        // authenticated peer specifically; GROUP_INFO alone cannot expand a
+        // recreated two-member view back to the full group.
+        await _publishMembershipSnapshot(local.members, group.coordinatorTerm,
+            onlyPeer: peer);
+        return;
+      }
       final members = _mergeMembers(local.members, info.info.members);
       if (members.length > group.config.maxPeers) {
         group.reportError(LpcErrorCode.groupFull,
@@ -3763,6 +3782,17 @@ class _RuntimeGroupRouteTransport
             left[index].maxPeers == right[index].maxPeers);
   }
 
+  bool _isMemberSubset(Iterable<GroupMember> possibleSubset,
+      Iterable<GroupMember> possibleSuperset) {
+    final superset = {
+      for (final member in possibleSuperset) member.peerId: member,
+    };
+    return possibleSubset.every((member) {
+      final current = superset[member.peerId];
+      return current != null && current.maxPeers == member.maxPeers;
+    });
+  }
+
   void _applyGroupMerge(GroupMergePayload payload,
       {required PeerId coordinator}) {
     final disposition = _mergeReceiver.receive(payload);
@@ -3847,6 +3877,11 @@ class _RuntimeGroupRouteTransport
           _sameMembers(group.members, remote.info.members)) {
         continue;
       }
+      if (remote.coordinatorPeerId == group.coordinatorPeerId &&
+          remote.coordinatorTerm < group.coordinatorTerm &&
+          _isMemberSubset(remote.info.members, group.members)) {
+        continue;
+      }
       final members = _mergeMembers(group.members, remote.info.members);
       if (members.length > group.config.maxPeers) {
         group.reportError(LpcErrorCode.groupFull,
@@ -3864,13 +3899,14 @@ class _RuntimeGroupRouteTransport
 
   Future<void> _publishMembershipSnapshot(
       Iterable<GroupMember> members, int coordinatorTerm,
-      {bool sameGroupOnly = false}) async {
+      {bool sameGroupOnly = false, PeerConnection? onlyPeer}) async {
     final payload = MembershipSnapshot(
         groupId: group.groupId,
         coordinatorTerm: coordinatorTerm,
         members: members.toList(growable: false));
     final encoded = await payload.encode();
     for (final peer in _frameSubscriptions.keys.toList()) {
+      if (onlyPeer != null && !identical(peer, onlyPeer)) continue;
       if (peer.state != PeerConnectionState.ready) continue;
       if (sameGroupOnly &&
           _remoteGroupInfo[peer]?.info.groupId != group.groupId) {
@@ -3913,9 +3949,13 @@ class _RuntimeGroupRouteTransport
         coordinatorTerm: snapshot.coordinatorTerm,
         sessionId: peer.sessionId,
         senderMessageId: frame.messageId);
+    logger(
+        'group membership snapshot order peer=${peer.peerId} term=${snapshot.coordinatorTerm} disposition=$disposition message=${_debugId(frame.messageId)}');
     if (disposition == MembershipSnapshotOrderDisposition.accepted) {
       group.commitMembership(snapshot.members,
           coordinator: peer.peerId, coordinatorTerm: snapshot.coordinatorTerm);
+      logger(
+          'group membership snapshot applied local=${group.localPeerId} term=${group.coordinatorTerm} members=${group.members.map((member) => member.peerId).join(',')}');
       _mergeReceiver = GroupMergeReceiver(
           committedGroupId: group.groupId,
           committedTerm: group.coordinatorTerm,
