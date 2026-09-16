@@ -5594,6 +5594,16 @@ Pending work beyond `maxPendingKnownPeerProbes` MUST NOT allocate an unbounded q
 
 Probe scheduling MUST NOT allocate a `PeerConnection` for every application-known PeerId. Connections are candidate/discovery driven, not database-population driven.
 
+When an automatic candidate probe fails because the physical endpoint closed,
+was lost, or timed out, the Runtime MUST apply a bounded retry delay before
+retrying that endpoint. The retry delay SHOULD include bounded per-runtime and
+per-endpoint jitter so reciprocal probes from two nearby devices do not remain
+phase-locked and repeatedly create simultaneous GATT attempts. This jitter is
+only a scheduling aid: it MUST NOT be used as PeerId identity, trust, routing,
+duplicate ownership, or reconnect-direction authority. The delay and jitter
+MUST remain finite and MUST not prevent a later discovery observation from
+making the endpoint eligible again.
+
 #### Classification and retention
 
 After a candidate reaches the point where its cryptographic PeerId is authenticated and all configured trust requirements necessary for READY have succeeded, the Runtime performs the resolver lookup.
@@ -8413,6 +8423,7 @@ expected parser result
 - [x] UT-249 A known-peer candidate that disconnects while KnownPeerResolver is pending is not published as KnownPeerConnected and completes as a failed probe.
 - [x] UT-255 A fresh authenticated compatible candidate replaces a READY logical owner whose negotiated keepalive dead timeout has elapsed, even when the platform omitted its disconnect callback; candidates for different PeerIds remain independent.
 - [x] UT-256 A completed known-peer probe is eligible for a fresh probe after its logical owner is terminal, including when disconnect cleanup is duplicated or reordered.
+- [x] UT-257 Reciprocal automatic candidate probes apply bounded endpoint-scoped retry jitter and do not remain phase-locked after transport failure.
 
 # 55. Mandatory Physical Integration Tests
 

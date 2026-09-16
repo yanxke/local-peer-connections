@@ -892,6 +892,13 @@ class NearbyRuntime {
   final Map<String, PeerConnection> _gattPeersByEndpoint = {};
   final Map<PeerConnection, Timer> _gattReconnectExpiryTimers = {};
   final Map<PeerConnection, Timer> _unknownPeerReleaseTimers = {};
+  // A user-visible friend acceptance flow can require leaving the current
+  // game screen and opening the Friends tab. Keep an authenticated unknown
+  // connection long enough for that explicit decision; the timer is still
+  // bounded, and releasePeerRetention/HostSession ownership can close it
+  // earlier. A ten-second window was routinely too short on iOS/macOS when
+  // CoreBluetooth was still updating the nearby list.
+  static const _unknownPeerHandoffTimeout = Duration(seconds: 30);
   final Map<PeerConnection, _GattLink> _gattLinks = {};
   // A peripheral-side link has no local connectable endpoint. Keep the
   // logical peer eligible while the shared scan is running so either device
@@ -1795,8 +1802,21 @@ class NearbyRuntime {
   }
 
   void _deferKnownPeerProbe(String endpointId) {
+    // Reciprocal runtimes can observe one another at nearly the same time.
+    // A fixed retry interval lets both sides repeatedly become BLE centrals
+    // together, which is especially hostile to CoreBluetooth when the first
+    // GATT client has just been torn down.  De-phase only the retry schedule;
+    // endpoint IDs and this hash are never used as identity or ownership.
+    var hash = 2166136261;
+    for (final byte in localPeerId.bytes) {
+      hash = ((hash ^ byte) * 16777619) & 0x7fffffff;
+    }
+    for (final byte in utf8.encode(endpointId)) {
+      hash = ((hash ^ byte) * 16777619) & 0x7fffffff;
+    }
+    const jitterRangeMs = 1501;
     _knownPeerProbeNotBeforeMs[endpointId] =
-        _monotonicMs + _knownPeerProbeFailureBackoffMs;
+        _monotonicMs + _knownPeerProbeFailureBackoffMs + (hash % jitterRangeMs);
   }
 
   void _startNextKnownPeerProbe() {
@@ -1924,8 +1944,7 @@ class NearbyRuntime {
         // a short handoff window so a simultaneous explicit Connect or host
         // promotion cannot lose the first application frame to probe cleanup.
         _unknownPeerReleaseTimers[peer]?.cancel();
-        _unknownPeerReleaseTimers[peer] =
-            Timer(const Duration(seconds: 10), () {
+        _unknownPeerReleaseTimers[peer] = Timer(_unknownPeerHandoffTimeout, () {
           _unknownPeerReleaseTimers.remove(peer);
           if (!_hasOtherOwner(peer) &&
               peer.state == PeerConnectionState.ready) {

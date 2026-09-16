@@ -53,6 +53,13 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
   private var gattServerEndpointByCentral: [UUID: String] = [:]
   private var gattServerCentralByEndpoint: [String: UUID] = [:]
   private var gattServerGenerations: [String: Int64] = [:]
+  private var gattServerLastActivity: [String: Date] = [:]
+  // LPC's minimum keepalive dead timeout is 6 seconds. Use a larger native
+  // observation window so a quiet but healthy link is not replaced merely
+  // because CoreBluetooth delivered another subscription callback. This is
+  // only for deciding whether an opaque native binding is orphaned; LPC's
+  // authenticated PeerId/liveness rules remain authoritative in Dart.
+  private let staleServerBindingAfter: TimeInterval = 10
   private var nextGattGeneration: Int64 = 1
   private var nextServerEndpointId: Int64 = 1
   private var lastDiscoveryLog: [UUID: Date] = [:]
@@ -168,6 +175,7 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
       gattServerEndpointByCentral.removeAll()
       gattServerCentralByEndpoint.removeAll()
       gattServerGenerations.removeAll()
+      gattServerLastActivity.removeAll()
       // Do not carry a CBPeripheral discovered for the old local service
       // generation into a later runtime start. The wrapper is not an
       // authenticated LPC identity and can retain stale GATT service state.
@@ -470,6 +478,7 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
       guard let endpointId = gattServerEndpointByCentral[request.central.identifier] else {
         peripheral.respond(to: request, withResult: .requestNotSupported); continue
       }
+      gattServerLastActivity[endpointId] = Date()
       eventSink?(["type": "gattFragment", "endpointId": endpointId,
                   "connectionGeneration": gattServerGenerations[endpointId] as Any,
                   "bytes": [UInt8](value)])
@@ -480,9 +489,31 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
                                 didSubscribeTo characteristic: CBCharacteristic) {
     guard let service = gattService,
           characteristic.uuid == (try? characteristicUuid(service.uuid, increment: 2)) else { return }
-    if gattServerEndpointByCentral[central.identifier] != nil {
-      print("[LocalPeerConnections] duplicate server subscription central=\(central.identifier.uuidString)")
-      return
+    if let oldEndpoint = gattServerEndpointByCentral[central.identifier] {
+      let lastActivity = gattServerLastActivity[oldEndpoint] ?? Date()
+      let idleFor = Date().timeIntervalSince(lastActivity)
+      guard idleFor >= staleServerBindingAfter else {
+        print("[LocalPeerConnections] active server subscription retained central=\(central.identifier.uuidString) endpoint=\(oldEndpoint) idleSeconds=\(String(format: "%.1f", idleFor))")
+        return
+      }
+      // CoreBluetooth may keep a peripheral-side subscription after the
+      // central has gone away without delivering didUnsubscribeTo promptly.
+      // Only replace it after the binding has been idle for the bounded stale
+      // window. Replacing every older callback would disconnect a healthy
+      // active link and could create an endless subscribe/disconnect loop.
+      // Retaining the old opaque handle while it is active is safe because
+      // CoreBluetooth has not established a second usable subscription.
+      // The endpoint ID is transport-scoped, so retire the old generation
+      // before publishing the fresh one; PeerId authentication still happens
+      // in the portable LPC runtime.
+      let oldGeneration = gattServerGenerations.removeValue(forKey: oldEndpoint)
+      gattServerLastActivity.removeValue(forKey: oldEndpoint)
+      gattServerCentralByEndpoint.removeValue(forKey: oldEndpoint)
+      gattServerEndpointByCentral.removeValue(forKey: central.identifier)
+      gattServerCentrals.removeValue(forKey: central.identifier)
+      print("[LocalPeerConnections] replacing stale server subscription central=\(central.identifier.uuidString) oldEndpoint=\(oldEndpoint)")
+      eventSink?(["type": "gattDisconnected", "endpointId": oldEndpoint,
+                  "connectionGeneration": oldGeneration as Any])
     }
     let endpointId = "server-\(nextServerEndpointId)"
     nextServerEndpointId += 1
@@ -492,6 +523,7 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     let generation = nextGattGeneration
     nextGattGeneration += 1
     gattServerGenerations[endpointId] = generation
+    gattServerLastActivity[endpointId] = Date()
     // CoreBluetooth exposes the negotiated notification capacity on the
     // subscribed CBCentral. Hard-coding 20 here makes every iOS-peripheral
     // notification use the legacy ATT minimum, multiplying the fragment
@@ -509,6 +541,7 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
     gattServerCentralByEndpoint.removeValue(forKey: endpointId)
     gattServerCentrals.removeValue(forKey: central.identifier)
     let generation = gattServerGenerations.removeValue(forKey: endpointId)
+    gattServerLastActivity.removeValue(forKey: endpointId)
     eventSink?(["type": "gattDisconnected", "endpointId": endpointId,
                 "connectionGeneration": generation as Any])
   }
@@ -606,8 +639,13 @@ public class LocalPeerConnectionsPlugin: NSObject, FlutterPlugin, FlutterStreamH
          gattServerGenerations[endpointId] != requestedGeneration {
         throw BackendError("ENDPOINT_LOST", "stale GATT connection generation")
       }
-      return peripheral.updateValue(fragment.data, for: tx, onSubscribedCentrals: [central])
-        ? "submitted" : "temporarilyUnavailable"
+      let submitted = peripheral.updateValue(
+        fragment.data,
+        for: tx,
+        onSubscribedCentrals: [central]
+      )
+      if submitted { gattServerLastActivity[endpointId] = Date() }
+      return submitted ? "submitted" : "temporarilyUnavailable"
     }
     guard let identifier = UUID(uuidString: endpointId) else {
       throw BackendError("ENDPOINT_LOST", "unknown GATT connection")

@@ -640,6 +640,57 @@ void main() {
     await events.close();
   });
 
+  test('UT-257 failed automatic probes use a bounded retry jitter', () async {
+    const methods = MethodChannel('runtime-known-probe-jitter-test');
+    final events = StreamController<PlatformBleEvent>.broadcast();
+    final runtimeEvents = <RuntimeEvent>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methods, (call) async => null);
+    final runtime = await createRuntime(
+      config: RuntimeConfig(
+        autoConnectKnownPeers: true,
+        knownPeerResolver: _KnownPeerResolver(),
+        reconnectTimeoutMs: 1000,
+      ),
+      identityStore: InMemoryIdentityStore(),
+      platformBleBackend: PlatformBleBackend(
+        methods: methods,
+        eventStream: events.stream,
+      ),
+    );
+    final subscription = runtime.events.listen(runtimeEvents.add);
+    final discovery = await runtime.startDiscovery();
+    events.add(const PlatformEndpointFound('jitter-endpoint', rssi: -40));
+    await _waitUntil(
+      () => runtimeEvents.whereType<KnownPeerProbeFailed>().isNotEmpty,
+      timeout: const Duration(seconds: 2),
+    );
+    final failed = runtimeEvents.whereType<KnownPeerProbeFailed>().single;
+    final retryObservations = Timer.periodic(
+      const Duration(milliseconds: 100),
+      (_) =>
+          events.add(const PlatformEndpointFound('jitter-endpoint', rssi: -40)),
+    );
+    try {
+      await _waitUntil(
+        () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 2,
+        timeout: const Duration(seconds: 8),
+      );
+    } finally {
+      retryObservations.cancel();
+    }
+    final starts = runtimeEvents.whereType<KnownPeerProbeStarted>().toList();
+    final delay = starts[1].monotonicTimestampMs - failed.monotonicTimestampMs;
+    // Allow a small scheduler/CI overshoot beyond the configured 0..1500 ms
+    // jitter; the runtime's configured bound is still 5000..6500 ms.
+    expect(delay, inInclusiveRange(5000, 7000));
+
+    await subscription.cancel();
+    await discovery.stop();
+    await runtime.close();
+    await events.close();
+  });
+
   test('automatic probe protocol failure is reported and releases its slot',
       () async {
     const methods = MethodChannel('runtime-known-probe-protocol-failure-test');
