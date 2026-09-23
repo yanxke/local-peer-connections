@@ -276,7 +276,22 @@ class Runner:
                     })
             source_snapshot = source.snapshot()
             target_snapshot = target.snapshot()
-            return bool(source_snapshot.get("connections")) and bool(target_snapshot.get("connections"))
+            source_peer_id = target_snapshot.get("localPeerId")
+            target_peer_id = source_snapshot.get("localPeerId")
+            return (
+                isinstance(source_peer_id, str)
+                and isinstance(target_peer_id, str)
+                and any(
+                    connection.get("peerId") == source_peer_id
+                    and connection.get("state") == "ready"
+                    for connection in source_snapshot.get("connections", [])
+                )
+                and any(
+                    connection.get("peerId") == target_peer_id
+                    and connection.get("state") == "ready"
+                    for connection in target_snapshot.get("connections", [])
+                )
+            )
 
         try:
             # LPC's connection-request timeout is 10 seconds. Keep the host
@@ -304,8 +319,14 @@ class Runner:
         return saw_verification
 
     def peer_id(self, api: DeviceApi, other: DeviceApi) -> str:
+        other_peer_id = other.snapshot().get("localPeerId")
+        if not isinstance(other_peer_id, str):
+            raise RunnerFailure(f"{other.device.label}: local PeerId is unavailable")
         for connection in api.snapshot().get("connections", []):
-            if isinstance(connection, dict) and isinstance(connection.get("peerId"), str):
+            if (
+                isinstance(connection, dict)
+                and connection.get("peerId") == other_peer_id
+            ):
                 return connection["peerId"]
         raise RunnerFailure(f"{api.device.label}: no authenticated peer for {other.device.label}")
 
@@ -483,6 +504,7 @@ class Runner:
         self.reset_all()
         first, second = self.apis[:2]
         self.connect(first, second)
+        self.drain_events()
         first_peer = self.peer_id(second, first)
         second_peer = self.peer_id(first, second)
         payloads = (32, 262144, 32, 262144)
@@ -524,6 +546,15 @@ class Runner:
         # device: ``first`` sends to ``second_peer`` and vice versa.
         first_target_peer = self.peer_id(first, second)
         second_target_peer = self.peer_id(second, first)
+        expected_peers = {
+            first.device.label: first_target_peer,
+            second.device.label: second_target_peer,
+        }
+        # Do not let lifecycle events from the connection setup satisfy or
+        # obscure the continuous-traffic stability assertion below.
+        self.drain_events()
+        self._wait_for_selected_connections("IT-041")
+        self._assert_selected_stability_window("IT-041", seconds=3)
         arguments = [
             {
                 "peerId": first_target_peer,
@@ -555,16 +586,7 @@ class Runner:
         minimum_messages = expected_messages - 5
         deadline = time.monotonic() + duration_seconds
         while time.monotonic() < deadline:
-            for api in (first, second):
-                connections = api.snapshot().get("connections", [])
-                if any(connection.get("state") != "ready" for connection in connections):
-                    raise RunnerFailure(
-                        f"IT-041: connection left ready state on {api.device.label}"
-                    )
-                if len(connections) != 1:
-                    raise RunnerFailure(
-                        f"IT-041: expected one logical connection on {api.device.label}"
-                    )
+            self._assert_selected_connections_ready("IT-041", phase=0)
             time.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
 
         # Stop concurrently and let each fixture's bounded ACK-drain grace
@@ -593,14 +615,11 @@ class Runner:
                     f"IT-041: {api.device.label} ACK/loss mismatch: "
                     f"sent={sent}, acked={acked}, timedOut={timed_out}"
                 )
-            if any(connection.get("state") != "ready" for connection in api.snapshot().get("connections", [])):
-                raise RunnerFailure(
-                    f"IT-041: connection was not ready after traffic on {api.device.label}"
-                )
+        self._assert_selected_stability_window("IT-041")
         print(
             "IT-041: bidirectional 64-byte reliable traffic at 5 packets/s "
             f"for {duration_seconds}s delivered with zero application-level loss "
-            f"({connection_direction})"
+            f"and remained stable for 30s after drain ({connection_direction})"
         )
 
     def ensure_bidirectional_ready(
@@ -613,13 +632,27 @@ class Runner:
         generations. The explicit directions remain a bounded fallback for
         mobile stacks that temporarily omit the peer advertisement.
         """
+        first_peer_id = second.snapshot().get("localPeerId")
+        second_peer_id = first.snapshot().get("localPeerId")
+
+        def pair_ready() -> bool:
+            if not isinstance(first_peer_id, str) or not isinstance(second_peer_id, str):
+                return False
+            return all(
+                any(
+                    connection.get("peerId") == peer_id
+                    and connection.get("state") == "ready"
+                    for connection in api.snapshot().get("connections", [])
+                )
+                for api, peer_id in (
+                    (first, first_peer_id),
+                    (second, second_peer_id),
+                )
+            )
+
         try:
             self.wait(
-                lambda: all(
-                    len(api.snapshot().get("connections", [])) == 1
-                    and api.snapshot()["connections"][0].get("state") == "ready"
-                    for api in (first, second)
-                ),
+                pair_ready,
                 "known-peer connection ready on both devices",
                 timeout=min(self.timeout, 30),
             )
@@ -639,11 +672,40 @@ class Runner:
                     ) from second_error
 
     def _assert_traffic_connections_ready(
-        self, scenario: str, devices: tuple[DeviceApi, DeviceApi], phase: int
+        self,
+        scenario: str,
+        devices: tuple[DeviceApi, DeviceApi],
+        phase: object,
+        expected_peers: dict[str, str] | None = None,
     ) -> None:
         for api in devices:
+            expected_peer = (
+                expected_peers.get(api.device.label)
+                if expected_peers is not None
+                else None
+            )
+            for event in api.events():
+                if event.get("type") in {
+                    "peerReconnecting",
+                    "peerReconnected",
+                    "peerDisconnected",
+                    "connectFailed",
+                } and (
+                    expected_peer is None
+                    or event.get("peerId") in (None, expected_peer)
+                ):
+                    raise RunnerFailure(
+                        f"{scenario}: transport instability on {api.device.label} "
+                        f"during phase {phase}: {event}"
+                    )
             connections = api.snapshot().get("connections", [])
-            if len(connections) == 1 and connections[0].get("state") == "ready":
+            relevant = [
+                connection
+                for connection in connections
+                if expected_peer is None
+                or connection.get("peerId") == expected_peer
+            ]
+            if len(relevant) == 1 and relevant[0].get("state") == "ready":
                 continue
             # Keep the failure artifact useful without logging payload bytes or
             # secrets: event types, error codes, and native lifecycle
@@ -658,8 +720,121 @@ class Runner:
             ]
             raise RunnerFailure(
                 f"{scenario}: phase {phase} connection not READY on {api.device.label}; "
-                f"connections={connections}; diagnostics={diagnostics}"
+                f"expectedPeer={expected_peer}; connections={connections}; "
+                f"diagnostics={diagnostics}"
             )
+
+    def _assert_stable_traffic_window(
+        self,
+        scenario: str,
+        devices: tuple[DeviceApi, DeviceApi],
+        expected_peers: dict[str, str] | None = None,
+        seconds: int = 30,
+    ) -> None:
+        """Require READY links throughout the post-traffic stability window.
+
+        A final READY snapshot is insufficient: a BLE link can disconnect and
+        reconnect between two snapshots while the fixture still reports a
+        healthy final state. Consume lifecycle events on every sample so the
+        physical traffic tests fail on the first reconnect or oscillation.
+        """
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self._assert_traffic_connections_ready(
+                scenario,
+                devices,
+                phase="post-drain-stability",
+                expected_peers=expected_peers,
+            )
+            time.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
+        print(f"{scenario}: links remained READY for {seconds}s after traffic drain")
+
+    def _selected_expected_peers(self) -> dict[str, set[str]]:
+        local_peer_ids = {
+            api.device.label: api.snapshot().get("localPeerId")
+            for api in self.apis
+        }
+        if any(not isinstance(peer_id, str) for peer_id in local_peer_ids.values()):
+            raise RunnerFailure("continuous traffic: a selected device has no local PeerId")
+        return {
+            label: {
+                peer_id
+                for other_label, peer_id in local_peer_ids.items()
+                if other_label != label and isinstance(peer_id, str)
+            }
+            for label in local_peer_ids
+        }
+
+    def _assert_selected_connections_ready(self, scenario: str, phase: object) -> None:
+        expected_by_device = self._selected_expected_peers()
+        unstable_events = {
+            "peerReconnecting",
+            "peerReconnected",
+            "peerDisconnected",
+            "connectFailed",
+        }
+        for api in self.apis:
+            expected = expected_by_device[api.device.label]
+            for event in api.events():
+                if (
+                    event.get("type") in unstable_events
+                    and event.get("peerId") in (None, *expected)
+                ):
+                    raise RunnerFailure(
+                        f"{scenario}: transport instability on {api.device.label} "
+                        f"during phase {phase}: {event}"
+                    )
+            connections = api.snapshot().get("connections", [])
+            relevant = [
+                connection
+                for connection in connections
+                if connection.get("peerId") in expected
+            ]
+            if len(relevant) != len(expected) or any(
+                connection.get("state") != "ready" for connection in relevant
+            ):
+                raise RunnerFailure(
+                    f"{scenario}: selected links not READY on {api.device.label}; "
+                    f"expectedPeers={sorted(expected)} connections={connections}"
+                )
+
+    def _wait_for_selected_connections(self, scenario: str) -> None:
+        def ready() -> bool:
+            expected_by_device = self._selected_expected_peers()
+            return all(
+                len(
+                    [
+                        connection
+                        for connection in api.snapshot().get("connections", [])
+                        if connection.get("peerId") in expected_by_device[api.device.label]
+                    ]
+                )
+                == len(expected_by_device[api.device.label])
+                and all(
+                    connection.get("state") == "ready"
+                    for connection in api.snapshot().get("connections", [])
+                    if connection.get("peerId") in expected_by_device[api.device.label]
+                )
+                for api in self.apis
+            )
+
+        self.wait(ready, f"{scenario} all selected links READY", timeout=min(self.timeout, 30))
+        # Do not count convergence events as part of the stability window.
+        self.drain_events()
+
+    def _assert_selected_stability_window(
+        self, scenario: str, seconds: int = 30
+    ) -> None:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self._assert_selected_connections_ready(
+                scenario, phase="post-drain-stability"
+            )
+            time.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
+        print(
+            f"{scenario}: all selected links remained READY for "
+            f"{seconds}s after traffic drain"
+        )
 
     def scenario_bidirectional_size_ramp(self) -> None:
         """Run the requested bidirectional 1 Hz 64..2048..64 byte profile."""
@@ -668,6 +843,13 @@ class Runner:
         connection_direction = self.ensure_bidirectional_ready("IT-043", first, second)
         first_target_peer = self.peer_id(first, second)
         second_target_peer = self.peer_id(second, first)
+        expected_peers = {
+            first.device.label: first_target_peer,
+            second.device.label: second_target_peer,
+        }
+        self.drain_events()
+        self._wait_for_selected_connections("IT-043")
+        self._assert_selected_stability_window("IT-043", seconds=3)
 
         sizes = (64, 128, 256, 512, 1024, 2048, 1024, 512, 256, 128, 64)
         phase_seconds = 5
@@ -713,7 +895,7 @@ class Runner:
 
             phase_deadline = time.monotonic() + phase_seconds
             while time.monotonic() < phase_deadline:
-                self._assert_traffic_connections_ready("IT-043", (first, second), phase)
+                self._assert_selected_connections_ready("IT-043", phase=phase)
                 time.sleep(min(0.25, max(0.05, phase_deadline - time.monotonic())))
 
             # A 2048-byte application message at the 200 B/s acceptance floor
@@ -760,7 +942,7 @@ class Runner:
                     f"{api.device.label}: sent={sent} acked={acked} timedOut={timed_out}"
                 )
 
-            self._assert_traffic_connections_ready("IT-043", (first, second), phase)
+            self._assert_selected_connections_ready("IT-043", phase=phase)
 
         for api in (first, second):
             total = totals[api.device.label]
@@ -777,10 +959,11 @@ class Runner:
                     f"IT-043: {api.device.label} loss rate {loss_rate:.2%} is not below 10%; "
                     f"totals={total}"
                 )
+        self._assert_selected_stability_window("IT-043")
         print(
             "IT-043: bidirectional 1 Hz 64B..2048B..64B reliable traffic "
             f"for {active_seconds}s met >=200 B/s and <10% loss "
-            f"({connection_direction})"
+            f"and remained stable for 30s after drain ({connection_direction})"
         )
 
     def scenario_symmetric_connect(self) -> None:
@@ -1016,6 +1199,12 @@ class Runner:
             and snapshot["group"].get("localIsCoordinator") is True
         )
         self.drain_events()
+        expected_peers = {
+            first.device.label: self.peer_id(first, second),
+            second.device.label: self.peer_id(second, first),
+        }
+        self._wait_for_selected_connections(scenario)
+        self._assert_selected_stability_window(scenario, seconds=3)
         for phase, size in enumerate(sizes, start=1):
             coordinator.command("startCheckpointTest", {
                 "checkpointSize": size,
@@ -1093,13 +1282,8 @@ class Runner:
                     f"{scenario}: phase {phase} hit the four-publication/second "
                     f"admission limit {admission_failed} times: {result}"
                 )
-            for api in (first, second):
-                connections = api.snapshot().get("connections", [])
-                if any(connection.get("state") != "ready" for connection in connections):
-                    raise RunnerFailure(
-                        f"{scenario}: phase {phase} connection left READY on "
-                        f"{api.device.label}: {connections}"
-                    )
+            self._assert_selected_connections_ready(scenario, phase=phase)
+        self._assert_selected_stability_window(scenario)
         print(
             f"{scenario}: checkpoint size ramp passed with durable bandwidth "
             "and accepted-to-DURABLE latency recorded for every phase"

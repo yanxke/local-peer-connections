@@ -324,6 +324,15 @@ change LPC wire semantics or replace the normative requirements in the spec.
   stale launch wrapper can outlive Ctrl-C and continue holding CoreDevice or
   the app process; clean up that specific wrapper/Runner process before the
   next deployment.
+- For macOS LPC harness tests, run exactly one harness instance and one
+  `flutter run -d macos` session at a time. Before starting it, verify that
+  only one `lpc_integration_device_app` process owns the control port (for
+  example with `pgrep -af lpc_integration_device_app` and
+  `lsof -nP -iTCP:8765 -sTCP:LISTEN`). Terminate an older, stale harness and
+  its matching Flutter launch wrapper before starting the current one. Two
+  macOS harnesses advertise the same LPC service and can create duplicate
+  candidates for the same PeerId, causing endpoint/GATT replacement and
+  connect/reconnect flip-flopping even though each app appears healthy.
 - If a macOS/iOS run reports `MissingPluginException` for
   `loadOrCreateEd25519Seed`, verify that the platform plugin implementation is
   included in the current build and rebuild/relaunch in place. Do not mask the

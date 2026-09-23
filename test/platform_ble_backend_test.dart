@@ -76,9 +76,30 @@ void main() {
         PlatformBleEvent.fromPlatform({
           'type': 'gattConnected',
           'endpointId': 'platform-endpoint',
-          'localRole': 'central'
+          'localRole': 'central',
+          'physicalEndpointId': 'physical-device',
         }),
-        isA<PlatformGattConnected>());
+        isA<PlatformGattConnected>()
+            .having((event) => event.physicalEndpointId, 'physical endpoint',
+                'physical-device'));
+  });
+
+  test('authenticated GATT endpoint association uses the protocol PeerId',
+      () async {
+    const channel = MethodChannel('platform-ble-peer-association-test');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'associateGattPeer');
+      expect(call.arguments, {
+        'endpointId': 'platform-endpoint',
+        'peerId': List<int>.filled(16, 7),
+      });
+      return null;
+    });
+    await PlatformBleBackend(methods: channel).associateGattPeer(
+      'platform-endpoint',
+      PeerId(List<int>.filled(16, 7)),
+    );
   });
 
   test('UT-161 platform GATT fragment outcome maps Section 44 states',

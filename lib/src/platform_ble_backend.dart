@@ -14,14 +14,14 @@ import 'types.dart';
 /// GATT connection and whole-frame transport are a separate backend concern
 /// and are not claimed by this class.
 class PlatformBleBackend {
-  PlatformBleBackend(
-      {MethodChannel? methods,
-      EventChannel? events,
-      Stream<PlatformBleEvent>? eventStream,
-      this.logger})
-      : _methods = methods ?? const MethodChannel(_methodChannelName),
-        _events = events ?? const EventChannel(_eventChannelName),
-        _eventStream = eventStream;
+  PlatformBleBackend({
+    MethodChannel? methods,
+    EventChannel? events,
+    Stream<PlatformBleEvent>? eventStream,
+    this.logger,
+  }) : _methods = methods ?? const MethodChannel(_methodChannelName),
+       _events = events ?? const EventChannel(_eventChannelName),
+       _eventStream = eventStream;
 
   static const _methodChannelName =
       'dev.localpeerconnections.local_peer_connections/backend';
@@ -34,23 +34,24 @@ class PlatformBleBackend {
   /// Optional diagnostic sink. Raw GATT fragment bytes are summarized and
   /// never included in log output.
   final void Function(String message)? logger;
-  late final Stream<PlatformBleEvent> _sharedEvents = (_eventStream ??
-          _events.receiveBroadcastStream().map((Object? value) {
-            final map = value is Map ? value : const <Object?, Object?>{};
-            final type = map['type'];
-            final endpoint = map['endpointId'];
-            final key = '$type:$endpoint';
-            final now = DateTime.now();
-            final previous = _lastEventLog[key];
-            if (previous == null ||
-                now.difference(previous) >= const Duration(seconds: 5) ||
-                type != 'endpointFound') {
-              _lastEventLog[key] = now;
-              _log('native ${_eventSummary(value)}');
-            }
-            return PlatformBleEvent.fromPlatform(value);
-          }))
-      .asBroadcastStream();
+  late final Stream<PlatformBleEvent> _sharedEvents =
+      (_eventStream ??
+              _events.receiveBroadcastStream().map((Object? value) {
+                final map = value is Map ? value : const <Object?, Object?>{};
+                final type = map['type'];
+                final endpoint = map['endpointId'];
+                final key = '$type:$endpoint';
+                final now = DateTime.now();
+                final previous = _lastEventLog[key];
+                if (previous == null ||
+                    now.difference(previous) >= const Duration(seconds: 5) ||
+                    type != 'endpointFound') {
+                  _lastEventLog[key] = now;
+                  _log('native ${_eventSummary(value)}');
+                }
+                return PlatformBleEvent.fromPlatform(value);
+              }))
+          .asBroadcastStream();
   final Map<String, DateTime> _lastEventLog = <String, DateTime>{};
 
   void _log(String message) {
@@ -75,20 +76,26 @@ class PlatformBleBackend {
     for (final entry in raw) {
       if (entry is! String) {
         throw const LpcException(
-            LpcErrorCode.platformError, 'invalid native capability response');
+          LpcErrorCode.platformError,
+          'invalid native capability response',
+        );
       }
       final capability = _capabilitiesByWireName[entry];
       if (capability == null) {
         throw const LpcException(
-            LpcErrorCode.platformError, 'unknown native capability');
+          LpcErrorCode.platformError,
+          'unknown native capability',
+        );
       }
       capabilities.add(capability);
     }
     return LocalRuntimeCapabilityBitmap(capabilities);
   }
 
-  Future<void> startAdvertising(List<int> serviceUuid,
-      {String? localName}) async {
+  Future<void> startAdvertising(
+    List<int> serviceUuid, {
+    String? localName,
+  }) async {
     await _invoke<void>('startAdvertising', {
       'serviceUuid': _serviceUuid(serviceUuid),
       if (localName != null) 'localName': localName,
@@ -98,7 +105,9 @@ class PlatformBleBackend {
   Future<void> stopAdvertising() => _invoke<void>('stopAdvertising');
 
   Future<void> startDiscovery(List<int> serviceUuid) => _invoke<void>(
-      'startDiscovery', {'serviceUuid': _serviceUuid(serviceUuid)});
+    'startDiscovery',
+    {'serviceUuid': _serviceUuid(serviceUuid)},
+  );
 
   Future<void> stopDiscovery() => _invoke<void>('stopDiscovery');
 
@@ -114,10 +123,21 @@ class PlatformBleBackend {
   Future<void> connectGatt(String discoveryEndpointId) =>
       _invoke<void>('connectGatt', {'endpointId': discoveryEndpointId});
 
+  /// Associates an authenticated LPC PeerId with a native GATT endpoint.
+  /// Platform identifiers can rotate while central/peripheral links coexist;
+  /// native lifecycle cleanup must use the authenticated protocol identity.
+  Future<void> associateGattPeer(String endpointId, PeerId peerId) =>
+      _invoke<void>('associateGattPeer', {
+        'endpointId': endpointId,
+        'peerId': peerId.bytes,
+      });
+
   Future<GattFragmentSubmission> submitGattFragment(
-      String endpointId, Uint8List fragment,
-      {required GattFragmentTransmission transmission,
-      int? connectionGeneration}) async {
+    String endpointId,
+    Uint8List fragment, {
+    required GattFragmentTransmission transmission,
+    int? connectionGeneration,
+  }) async {
     final result = await _invoke<String>('submitGattFragment', {
       'endpointId': endpointId,
       'fragment': fragment,
@@ -130,17 +150,22 @@ class PlatformBleBackend {
       'temporarilyUnavailable' => GattFragmentSubmission.temporarilyUnavailable,
       'terminalFailure' => GattFragmentSubmission.terminalFailure,
       _ => throw const LpcException(
-          LpcErrorCode.platformError, 'invalid GATT submission response'),
+        LpcErrorCode.platformError,
+        'invalid GATT submission response',
+      ),
     };
   }
 
-  Future<void> closeGattConnection(String endpointId,
-          {int? connectionGeneration}) =>
-      _invoke<void>('closeGattConnection', {
-        'endpointId': endpointId,
-        if (connectionGeneration != null)
-          'connectionGeneration': connectionGeneration,
-      });
+  Future<void> closeGattConnection(
+    String endpointId, {
+    int? connectionGeneration,
+    bool preserveSharedLink = false,
+  }) => _invoke<void>('closeGattConnection', {
+    'endpointId': endpointId,
+    if (connectionGeneration != null)
+      'connectionGeneration': connectionGeneration,
+    if (preserveSharedLink) 'preserveSharedLink': true,
+  });
 
   Uint8List _serviceUuid(List<int> value) {
     if (value.length != 16) {
@@ -164,9 +189,12 @@ class PlatformBleBackend {
       return result;
     } on PlatformException catch (error) {
       _log(
-          'invoke failed method=$method code=${error.code} message=${error.message ?? 'none'}');
-      throw LpcException(_errorCodes[error.code] ?? LpcErrorCode.platformError,
-          error.message ?? 'native backend failure');
+        'invoke failed method=$method code=${error.code} message=${error.message ?? 'none'}',
+      );
+      throw LpcException(
+        _errorCodes[error.code] ?? LpcErrorCode.platformError,
+        error.message ?? 'native backend failure',
+      );
     } on MissingPluginException {
       _log('invoke failed method=$method code=missing-plugin');
       throw const LpcException(LpcErrorCode.unsupportedCapability);
@@ -182,10 +210,10 @@ String _argumentsSummary(Map<String, Object?>? arguments) {
     final summary = value is Uint8List
         ? 'bytes(${value.length})'
         : value is List<int>
-            ? 'list(${value.length})'
-            : value is List
-                ? 'list(${value.length})'
-                : '$value';
+        ? 'list(${value.length})'
+        : value is List
+        ? 'list(${value.length})'
+        : '$value';
     parts.add('${entry.key}=$summary');
   }
   return ' ${parts.join(' ')}';
@@ -207,7 +235,8 @@ String _eventSummary(Object? value) {
 /// Flutter binding of the Section 44 GATT fragment submission boundary.
 /// Received fragments and native writable/close events are deliberately
 /// delivered separately to the owning [GattBackendConnection].
-class PlatformGattFragmentPlatform implements GattFragmentPlatform {
+class PlatformGattFragmentPlatform
+    implements GattFragmentPlatform, DeferredGattClosePlatform {
   PlatformGattFragmentPlatform({
     required PlatformBleBackend backend,
     required this.endpointId,
@@ -216,8 +245,10 @@ class PlatformGattFragmentPlatform implements GattFragmentPlatform {
     this.onCloseRequested,
   }) : _backend = backend {
     if (platformSafeWriteSize <= 7) {
-      throw const LpcException(LpcErrorCode.resourceExhausted,
-          'platform GATT write size is unusable');
+      throw const LpcException(
+        LpcErrorCode.resourceExhausted,
+        'platform GATT write size is unusable',
+      );
     }
   }
 
@@ -225,16 +256,31 @@ class PlatformGattFragmentPlatform implements GattFragmentPlatform {
   final String endpointId;
   final int? connectionGeneration;
   final void Function()? onCloseRequested;
+  // Android may expose simultaneous central/peripheral GATT links to one
+  // authenticated peer through a shared ACL. Closing the losing central can
+  // tear down the selected server link, especially when privacy addresses
+  // changed between the two observations. This is set only after PeerId-based
+  // duplicate arbitration; it is never inferred from an endpoint ID.
+  bool _preserveSharedLinkOnClose = false;
+
+  @override
+  void preserveNativeLinkOnClose() {
+    _preserveSharedLinkOnClose = true;
+  }
+
   @override
   final int platformSafeWriteSize;
 
   @override
-  Future<GattFragmentSubmission> submitGattFragment(Uint8List fragment,
-          {GattFragmentTransmission transmission =
-              GattFragmentTransmission.normal}) =>
-      _backend.submitGattFragment(endpointId, fragment,
-          transmission: transmission,
-          connectionGeneration: connectionGeneration);
+  Future<GattFragmentSubmission> submitGattFragment(
+    Uint8List fragment, {
+    GattFragmentTransmission transmission = GattFragmentTransmission.normal,
+  }) => _backend.submitGattFragment(
+    endpointId,
+    fragment,
+    transmission: transmission,
+    connectionGeneration: connectionGeneration,
+  );
 
   @override
   Future<void> close() {
@@ -244,8 +290,11 @@ class PlatformGattFragmentPlatform implements GattFragmentPlatform {
     // later cleanup only detaches Dart listeners and does not submit a second
     // close to the native stack.
     onCloseRequested?.call();
-    return _backend.closeGattConnection(endpointId,
-        connectionGeneration: connectionGeneration);
+    return _backend.closeGattConnection(
+      endpointId,
+      connectionGeneration: connectionGeneration,
+      preserveSharedLink: _preserveSharedLinkOnClose,
+    );
   }
 }
 
@@ -258,31 +307,28 @@ class PlatformGattConnectionBinding {
     required this.connection,
     this.connectionGeneration,
   }) {
-    _subscription = backend.events.listen(
-      (event) {
-        if (event is PlatformGattDisconnected &&
-            event.endpointId == endpointId) {
-          connection.logger?.call(
-              'platform disconnect eventGeneration=${event.connectionGeneration} bindingGeneration=$connectionGeneration');
-        }
-        if (event is PlatformGattFragment &&
-            event.endpointId == endpointId &&
-            _matchesGeneration(event.connectionGeneration)) {
-          connection.receiveGattFragment(event.bytes);
-        }
-        if (event is PlatformGattDisconnected &&
-            event.endpointId == endpointId &&
-            _matchesGeneration(event.connectionGeneration)) {
-          connection.terminalFailure();
-        }
-        if (event is PlatformGattWritable &&
-            (event.endpointId == null || event.endpointId == endpointId) &&
-            _matchesGeneration(event.connectionGeneration)) {
-          connection.writable();
-        }
-      },
-      onError: (_, __) => connection.terminalFailure(),
-    );
+    _subscription = backend.events.listen((event) {
+      if (event is PlatformGattDisconnected && event.endpointId == endpointId) {
+        connection.logger?.call(
+          'platform disconnect eventGeneration=${event.connectionGeneration} bindingGeneration=$connectionGeneration',
+        );
+      }
+      if (event is PlatformGattFragment &&
+          event.endpointId == endpointId &&
+          _matchesGeneration(event.connectionGeneration)) {
+        connection.receiveGattFragment(event.bytes);
+      }
+      if (event is PlatformGattDisconnected &&
+          event.endpointId == endpointId &&
+          _matchesGeneration(event.connectionGeneration)) {
+        connection.terminalFailure();
+      }
+      if (event is PlatformGattWritable &&
+          (event.endpointId == null || event.endpointId == endpointId) &&
+          _matchesGeneration(event.connectionGeneration)) {
+        connection.writable();
+      }
+    }, onError: (_, __) => connection.terminalFailure());
   }
 
   final String endpointId;
@@ -298,7 +344,17 @@ class PlatformGattConnectionBinding {
       eventGeneration == null ||
       connectionGeneration == eventGeneration;
 
-  Future<void> close() => _subscription.cancel();
+  Future<void> close() async {
+    // Cancelling the native-event subscription alone leaves the portable GATT
+    // backend open. During a CoreBluetooth duplicate/replacement race that
+    // strands the old HandshakeConnection waiting forever and allows several
+    // Dart bindings for one endpoint to accumulate. Retire the old portable
+    // transport as well, without closing the native endpoint here; the caller
+    // may be replacing the Dart handshake on the same authenticated physical
+    // link and will decide separately whether the native link should close.
+    await _subscription.cancel();
+    connection.terminalFailure();
+  }
 }
 
 sealed class PlatformBleEvent {
@@ -307,15 +363,20 @@ sealed class PlatformBleEvent {
   factory PlatformBleEvent.fromPlatform(Object? value) {
     if (value is! Map) {
       throw const LpcException(
-          LpcErrorCode.platformError, 'invalid native backend event');
+        LpcErrorCode.platformError,
+        'invalid native backend event',
+      );
     }
     final type = value['type'];
     if (type == 'endpointFound' &&
         value['endpointId'] is String &&
         (value['localName'] == null || value['localName'] is String) &&
         value['rssi'] is int) {
-      return PlatformEndpointFound(value['endpointId'] as String,
-          localName: value['localName'] as String?, rssi: value['rssi'] as int);
+      return PlatformEndpointFound(
+        value['endpointId'] as String,
+        localName: value['localName'] as String?,
+        rssi: value['rssi'] as int,
+      );
     }
     if (type == 'gattConnected' &&
         value['endpointId'] is String &&
@@ -323,11 +384,16 @@ sealed class PlatformBleEvent {
       final role = value['localRole'] as String;
       if (role == 'central' || role == 'peripheral') {
         final safeWriteSize = value['platformSafeWriteSize'];
-        return PlatformGattConnected(value['endpointId'] as String, role,
-            platformSafeWriteSize:
-                safeWriteSize is int && safeWriteSize > 7 ? safeWriteSize : 20,
-            connectionGeneration:
-                (value['connectionGeneration'] as num?)?.toInt());
+        return PlatformGattConnected(
+          value['endpointId'] as String,
+          role,
+          platformSafeWriteSize: safeWriteSize is int && safeWriteSize > 7
+              ? safeWriteSize
+              : 20,
+          physicalEndpointId: value['physicalEndpointId'] as String?,
+          connectionGeneration: (value['connectionGeneration'] as num?)
+              ?.toInt(),
+        );
       }
     }
     if (type == 'gattFragment' &&
@@ -337,33 +403,42 @@ sealed class PlatformBleEvent {
       // Android ByteArray payloads may arrive as signed values; normalize
       // them here as a defensive compatibility measure.
       if (bytes.every((byte) => byte is int && byte >= -128 && byte <= 255)) {
-        return PlatformGattFragment(value['endpointId'] as String,
-            bytes.cast<int>().map((byte) => byte & 0xff).toList(),
-            connectionGeneration:
-                (value['connectionGeneration'] as num?)?.toInt());
+        return PlatformGattFragment(
+          value['endpointId'] as String,
+          bytes.cast<int>().map((byte) => byte & 0xff).toList(),
+          connectionGeneration: (value['connectionGeneration'] as num?)
+              ?.toInt(),
+        );
       }
     }
     if (type == 'gattDisconnected' && value['endpointId'] is String) {
-      return PlatformGattDisconnected(value['endpointId'] as String,
-          connectionGeneration:
-              (value['connectionGeneration'] as num?)?.toInt(),
-          status: (value['status'] as num?)?.toInt());
+      return PlatformGattDisconnected(
+        value['endpointId'] as String,
+        connectionGeneration: (value['connectionGeneration'] as num?)?.toInt(),
+        status: (value['status'] as num?)?.toInt(),
+      );
     }
     if (type == 'gattWritable' &&
         (value['endpointId'] == null || value['endpointId'] is String)) {
-      return PlatformGattWritable(value['endpointId'] as String?,
-          connectionGeneration:
-              (value['connectionGeneration'] as num?)?.toInt());
+      return PlatformGattWritable(
+        value['endpointId'] as String?,
+        connectionGeneration: (value['connectionGeneration'] as num?)?.toInt(),
+      );
     }
     throw const LpcException(
-        LpcErrorCode.platformError, 'unknown native backend event');
+      LpcErrorCode.platformError,
+      'unknown native backend event',
+    );
   }
 }
 
 /// A platform-scoped discovery identifier. It is never a protocol PeerId.
 class PlatformEndpointFound extends PlatformBleEvent {
-  const PlatformEndpointFound(this.endpointId,
-      {required this.rssi, this.localName});
+  const PlatformEndpointFound(
+    this.endpointId, {
+    required this.rssi,
+    this.localName,
+  });
   final String endpointId;
   final String? localName;
   final int rssi;
@@ -372,26 +447,40 @@ class PlatformEndpointFound extends PlatformBleEvent {
 /// A physical GATT link has completed Section 11 service discovery. Its
 /// endpoint ID remains platform-local and cannot be used as a protocol PeerId.
 class PlatformGattConnected extends PlatformBleEvent {
-  const PlatformGattConnected(this.endpointId, this.localRole,
-      {this.platformSafeWriteSize = 20, this.connectionGeneration});
+  const PlatformGattConnected(
+    this.endpointId,
+    this.localRole, {
+    this.platformSafeWriteSize = 20,
+    this.physicalEndpointId,
+    this.connectionGeneration,
+  });
   final String endpointId;
   final String localRole;
   final int platformSafeWriteSize;
+
+  /// Platform-only correlation with a discovery endpoint. This is never an
+  /// LPC identity or trust input; authenticated PeerIds remain authoritative.
+  final String? physicalEndpointId;
   final int? connectionGeneration;
 }
 
 class PlatformGattFragment extends PlatformBleEvent {
-  PlatformGattFragment(this.endpointId, List<int> bytes,
-      {this.connectionGeneration})
-      : bytes = Uint8List.fromList(bytes);
+  PlatformGattFragment(
+    this.endpointId,
+    List<int> bytes, {
+    this.connectionGeneration,
+  }) : bytes = Uint8List.fromList(bytes);
   final String endpointId;
   final Uint8List bytes;
   final int? connectionGeneration;
 }
 
 class PlatformGattDisconnected extends PlatformBleEvent {
-  const PlatformGattDisconnected(this.endpointId,
-      {this.connectionGeneration, this.status});
+  const PlatformGattDisconnected(
+    this.endpointId, {
+    this.connectionGeneration,
+    this.status,
+  });
   final String endpointId;
   final int? connectionGeneration;
 

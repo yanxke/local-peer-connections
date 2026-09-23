@@ -11,61 +11,70 @@ import 'frame.dart';
 /// Section 26.1 candidate traffic key. Candidate RESUME control frames always
 /// use this key with generation 0, independently of normal traffic keys.
 Future<Uint8List> candidateTrafficKey(
-    List<int> candidateSessionRootKey, int direction) async {
+  List<int> candidateSessionRootKey,
+  int direction,
+) async {
   if (candidateSessionRootKey.length != 32 || direction < 0 || direction > 1) {
     throw ArgumentError('invalid candidate traffic key input');
   }
   final key = await Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(
-      secretKey: SecretKey(candidateSessionRootKey),
-      nonce: const [],
-      info: [...ascii.encode('LPC1-candidate'), direction]);
+    secretKey: SecretKey(candidateSessionRootKey),
+    nonce: const [],
+    info: [...ascii.encode('LPC1-candidate'), direction],
+  );
   return Uint8List.fromList(await key.extractBytes());
 }
 
-Future<Uint8List> resumeRequestProof(
-        {required List<int> resumeSecret,
-        required List<int> sessionId,
-        required List<int> nonceA,
-        required List<int> transcript}) async =>
-    Uint8List.fromList((await Hmac.sha256().calculateMac([
-      ...ascii.encode('LPC1-resume-request'),
-      ...sessionId,
-      ...nonceA,
-      ...transcript
-    ], secretKey: SecretKey(resumeSecret)))
-        .bytes);
+Future<Uint8List> resumeRequestProof({
+  required List<int> resumeSecret,
+  required List<int> sessionId,
+  required List<int> nonceA,
+  required List<int> transcript,
+}) async => Uint8List.fromList(
+  (await Hmac.sha256().calculateMac([
+    ...ascii.encode('LPC1-resume-request'),
+    ...sessionId,
+    ...nonceA,
+    ...transcript,
+  ], secretKey: SecretKey(resumeSecret))).bytes,
+);
 
 /// Verifies Section 26.2's requester proof before the responder accepts a
 /// candidate RESUME. Invalid proofs are rejected under the candidate session.
-Future<void> verifyResumeRequestProof(
-    {required List<int> resumeSecret,
-    required List<int> sessionId,
-    required List<int> nonceA,
-    required List<int> transcript,
-    required List<int> proof}) async {
+Future<void> verifyResumeRequestProof({
+  required List<int> resumeSecret,
+  required List<int> sessionId,
+  required List<int> nonceA,
+  required List<int> transcript,
+  required List<int> proof,
+}) async {
   final expected = await resumeRequestProof(
-      resumeSecret: resumeSecret,
-      sessionId: sessionId,
-      nonceA: nonceA,
-      transcript: transcript);
+    resumeSecret: resumeSecret,
+    sessionId: sessionId,
+    nonceA: nonceA,
+    transcript: transcript,
+  );
   if (!_same(expected, proof)) {
     throw const LpcException(
-        LpcErrorCode.resumeRejected, 'invalid RESUME_REQUEST proof');
+      LpcErrorCode.resumeRejected,
+      'invalid RESUME_REQUEST proof',
+    );
   }
 }
 
 class ResumeRequest {
-  ResumeRequest(
-      {required List<int> sessionId,
-      required List<int> nonceA,
-      required this.previousGeneration,
-      required List<int> proof})
-      : sessionId = Uint8List.fromList(sessionId),
-        nonceA = Uint8List.fromList(nonceA),
-        proof = Uint8List.fromList(proof) {
+  ResumeRequest({
+    required List<int> sessionId,
+    required List<int> nonceA,
+    required this.previousGeneration,
+    required List<int> proof,
+  }) : sessionId = Uint8List.fromList(sessionId),
+       nonceA = Uint8List.fromList(nonceA),
+       proof = Uint8List.fromList(proof) {
     if (this.sessionId.length != 16 ||
         this.nonceA.length != 16 ||
-        this.proof.length != 32) throw ArgumentError('invalid RESUME_REQUEST');
+        this.proof.length != 32)
+      throw ArgumentError('invalid RESUME_REQUEST');
   }
   final Uint8List sessionId, nonceA, proof;
   final int previousGeneration;
@@ -82,16 +91,17 @@ class ResumeRequest {
     if (b.length != 68) throw const LpcException(LpcErrorCode.protocolMismatch);
     final d = ByteData.sublistView(Uint8List.fromList(b));
     return ResumeRequest(
-        sessionId: b.sublist(0, 16),
-        nonceA: b.sublist(16, 32),
-        previousGeneration: d.getUint32(32),
-        proof: b.sublist(36));
+      sessionId: b.sublist(0, 16),
+      nonceA: b.sublist(16, 32),
+      previousGeneration: d.getUint32(32),
+      proof: b.sublist(36),
+    );
   }
 }
 
 class ResumeReady {
   ResumeReady(List<int> sessionId, this.generation)
-      : sessionId = Uint8List.fromList(sessionId) {
+    : sessionId = Uint8List.fromList(sessionId) {
     if (this.sessionId.length != 16)
       throw ArgumentError.value(sessionId, 'sessionId');
   }
@@ -106,68 +116,77 @@ class ResumeReady {
 
   static ResumeReady decode(List<int> b) {
     if (b.length != 20) throw const LpcException(LpcErrorCode.protocolMismatch);
-    return ResumeReady(b.sublist(0, 16),
-        ByteData.sublistView(Uint8List.fromList(b)).getUint32(16));
+    return ResumeReady(
+      b.sublist(0, 16),
+      ByteData.sublistView(Uint8List.fromList(b)).getUint32(16),
+    );
   }
 }
 
-Future<Uint8List> resumeAcceptProof(
-    {required List<int> resumeSecret,
-    required List<int> sessionId,
-    required List<int> nonceA,
-    required List<int> nonceB,
-    required List<int> transcript,
-    required int generation}) async {
+Future<Uint8List> resumeAcceptProof({
+  required List<int> resumeSecret,
+  required List<int> sessionId,
+  required List<int> nonceA,
+  required List<int> nonceB,
+  required List<int> transcript,
+  required int generation,
+}) async {
   final g = ByteData(4)..setUint32(0, generation);
-  return Uint8List.fromList((await Hmac.sha256().calculateMac([
-    ...ascii.encode('LPC1-resume-accept'),
-    ...sessionId,
-    ...nonceA,
-    ...nonceB,
-    ...transcript,
-    ...g.buffer.asUint8List()
-  ], secretKey: SecretKey(resumeSecret)))
-      .bytes);
+  return Uint8List.fromList(
+    (await Hmac.sha256().calculateMac([
+      ...ascii.encode('LPC1-resume-accept'),
+      ...sessionId,
+      ...nonceA,
+      ...nonceB,
+      ...transcript,
+      ...g.buffer.asUint8List(),
+    ], secretKey: SecretKey(resumeSecret))).bytes,
+  );
 }
 
 /// Verifies Section 26.3's responder proof before switching to the resumed
 /// logical session.
-Future<void> verifyResumeAcceptProof(
-    {required List<int> resumeSecret,
-    required List<int> sessionId,
-    required List<int> nonceA,
-    required List<int> nonceB,
-    required List<int> transcript,
-    required int generation,
-    required List<int> proof}) async {
+Future<void> verifyResumeAcceptProof({
+  required List<int> resumeSecret,
+  required List<int> sessionId,
+  required List<int> nonceA,
+  required List<int> nonceB,
+  required List<int> transcript,
+  required int generation,
+  required List<int> proof,
+}) async {
   final expected = await resumeAcceptProof(
-      resumeSecret: resumeSecret,
-      sessionId: sessionId,
-      nonceA: nonceA,
-      nonceB: nonceB,
-      transcript: transcript,
-      generation: generation);
+    resumeSecret: resumeSecret,
+    sessionId: sessionId,
+    nonceA: nonceA,
+    nonceB: nonceB,
+    transcript: transcript,
+    generation: generation,
+  );
   if (!_same(expected, proof)) {
     throw const LpcException(
-        LpcErrorCode.resumeRejected, 'invalid RESUME_ACCEPT proof');
+      LpcErrorCode.resumeRejected,
+      'invalid RESUME_ACCEPT proof',
+    );
   }
 }
 
 class ResumeAccept {
-  ResumeAccept(
-      {required List<int> sessionId,
-      required List<int> nonceA,
-      required List<int> nonceB,
-      required this.generation,
-      required List<int> proof})
-      : sessionId = Uint8List.fromList(sessionId),
-        nonceA = Uint8List.fromList(nonceA),
-        nonceB = Uint8List.fromList(nonceB),
-        proof = Uint8List.fromList(proof) {
+  ResumeAccept({
+    required List<int> sessionId,
+    required List<int> nonceA,
+    required List<int> nonceB,
+    required this.generation,
+    required List<int> proof,
+  }) : sessionId = Uint8List.fromList(sessionId),
+       nonceA = Uint8List.fromList(nonceA),
+       nonceB = Uint8List.fromList(nonceB),
+       proof = Uint8List.fromList(proof) {
     if (this.sessionId.length != 16 ||
         this.nonceA.length != 16 ||
         this.nonceB.length != 16 ||
-        this.proof.length != 32) throw ArgumentError('invalid RESUME_ACCEPT');
+        this.proof.length != 32)
+      throw ArgumentError('invalid RESUME_ACCEPT');
   }
   final Uint8List sessionId, nonceA, nonceB, proof;
   final int generation;
@@ -185,18 +204,19 @@ class ResumeAccept {
     if (b.length != 84) throw const LpcException(LpcErrorCode.protocolMismatch);
     final d = ByteData.sublistView(Uint8List.fromList(b));
     return ResumeAccept(
-        sessionId: b.sublist(0, 16),
-        nonceA: b.sublist(16, 32),
-        nonceB: b.sublist(32, 48),
-        generation: d.getUint32(48),
-        proof: b.sublist(52));
+      sessionId: b.sublist(0, 16),
+      nonceA: b.sublist(16, 32),
+      nonceB: b.sublist(32, 48),
+      generation: d.getUint32(48),
+      proof: b.sublist(52),
+    );
   }
 }
 
 class ResumedSecrets {
   ResumedSecrets(List<int> root, List<int> resume)
-      : sessionRootKey = Uint8List.fromList(root),
-        resumeSecret = Uint8List.fromList(resume);
+    : sessionRootKey = Uint8List.fromList(root),
+      resumeSecret = Uint8List.fromList(resume);
   final Uint8List sessionRootKey, resumeSecret;
 }
 
@@ -209,9 +229,9 @@ class ResumedSession {
     required List<int> resumeSecret,
     required List<int> sessionId,
     required this.generation,
-  })  : sessionRootKey = Uint8List.fromList(sessionRootKey),
-        resumeSecret = Uint8List.fromList(resumeSecret),
-        sessionId = Uint8List.fromList(sessionId);
+  }) : sessionRootKey = Uint8List.fromList(sessionRootKey),
+       resumeSecret = Uint8List.fromList(resumeSecret),
+       sessionId = Uint8List.fromList(sessionId);
 
   final Uint8List sessionRootKey, resumeSecret, sessionId;
   final int generation;
@@ -237,15 +257,15 @@ class CandidateResumeConnection {
     required this.requester,
     List<int> Function()? randomNonce,
     List<int>? initialEncodedFrame,
-  })  : _candidateSessionRootKey = Uint8List.fromList(candidateSessionRootKey),
-        _candidateSessionId = Uint8List.fromList(candidateSessionId),
-        _candidateTranscript = Uint8List.fromList(candidateTranscript),
-        _previousSessionId = Uint8List.fromList(previousSessionId),
-        _previousResumeSecret = Uint8List.fromList(previousResumeSecret),
-        _randomNonce = randomNonce ?? _secureNonce,
-        _initialEncodedFrame = initialEncodedFrame == null
-            ? null
-            : Uint8List.fromList(initialEncodedFrame) {
+  }) : _candidateSessionRootKey = Uint8List.fromList(candidateSessionRootKey),
+       _candidateSessionId = Uint8List.fromList(candidateSessionId),
+       _candidateTranscript = Uint8List.fromList(candidateTranscript),
+       _previousSessionId = Uint8List.fromList(previousSessionId),
+       _previousResumeSecret = Uint8List.fromList(previousResumeSecret),
+       _randomNonce = randomNonce ?? _secureNonce,
+       _initialEncodedFrame = initialEncodedFrame == null
+           ? null
+           : Uint8List.fromList(initialEncodedFrame) {
     if (_candidateSessionRootKey.length != 32 ||
         _candidateSessionId.length != 16 ||
         _candidateTranscript.length != 32 ||
@@ -282,16 +302,58 @@ class CandidateResumeConnection {
 
   Future<ResumedSession> get completed => _completed.future;
 
+  /// Sends the authenticated Section 26 rejection when the responder has
+  /// authenticated the fresh candidate but no longer has the prior logical
+  /// session (for example, the remote application was restarted).  Keeping
+  /// this as a candidate-key helper lets the requester abandon RESUME
+  /// immediately and try a normal authenticated connection instead of
+  /// waiting for the full reconnect watchdog.
+  static Future<void> sendReject({
+    required BackendConnection backend,
+    required List<int> candidateSessionRootKey,
+    required List<int> candidateSessionId,
+    required PeerId localPeerId,
+    required PeerId remotePeerId,
+    required LpcErrorCode error,
+  }) async {
+    final key = await candidateTrafficKey(
+      candidateSessionRootKey,
+      _direction(localPeerId, remotePeerId),
+    );
+    final payload = ByteData(2)..setUint16(0, error.value);
+    final protected = await const FrameProtector().encrypt(
+      LpcFrame(
+        type: FrameType.resumeReject,
+        flags: 0,
+        transportGeneration: 0,
+        sequenceNumber: 1,
+        messageId: List.filled(8, 0),
+        sessionId: candidateSessionId,
+        nonce: List.filled(12, 0),
+        payload: payload.buffer.asUint8List(),
+      ),
+      await key,
+    );
+    final result = await backend.write(protected.encode()).completion;
+    if (result != TransportWriteState.submittedToPlatform) {
+      throw const LpcException(LpcErrorCode.transportClosed);
+    }
+  }
+
   /// Starts the candidate control exchange. The requester sends exactly one
   /// RESUME_REQUEST; a responder waits for that authenticated request.
   Future<void> start() async {
     if (_started) {
       throw const LpcException(
-          LpcErrorCode.invalidState, 'candidate RESUME already started');
+        LpcErrorCode.invalidState,
+        'candidate RESUME already started',
+      );
     }
     _started = true;
-    _subscription = backend.events.listen(_onBackendEvent,
-        onError: (Object error, StackTrace stack) => _fail(error, stack));
+    _subscription = backend.events.listen(
+      _onBackendEvent,
+      onError: (Object error, StackTrace stack) => _fail(error, stack),
+    );
     final initial = _initialEncodedFrame;
     if (initial != null) {
       // The selectable handshake owns exactly the first RESUME_REQUEST, then
@@ -305,18 +367,20 @@ class CandidateResumeConnection {
       throw ArgumentError('randomNonce must return 16 bytes');
     _nonceA = nonce;
     final proof = await resumeRequestProof(
-        resumeSecret: _previousResumeSecret,
+      resumeSecret: _previousResumeSecret,
+      sessionId: _previousSessionId,
+      nonceA: nonce,
+      transcript: _candidateTranscript,
+    );
+    await _sendCandidate(
+      FrameType.resumeRequest,
+      ResumeRequest(
         sessionId: _previousSessionId,
         nonceA: nonce,
-        transcript: _candidateTranscript);
-    await _sendCandidate(
-        FrameType.resumeRequest,
-        ResumeRequest(
-                sessionId: _previousSessionId,
-                nonceA: nonce,
-                previousGeneration: previousGeneration,
-                proof: proof)
-            .encode());
+        previousGeneration: previousGeneration,
+        proof: proof,
+      ).encode(),
+    );
   }
 
   void _onBackendEvent(BackendConnectionEvent event) {
@@ -354,10 +418,14 @@ class CandidateResumeConnection {
             frame.type != FrameType.resumeAccept &&
             frame.type != FrameType.resumeReject)) {
       throw const LpcException(
-          LpcErrorCode.protocolMismatch, 'invalid candidate RESUME frame');
+        LpcErrorCode.protocolMismatch,
+        'invalid candidate RESUME frame',
+      );
     }
     final key = await candidateTrafficKey(
-        _candidateSessionRootKey, _direction(remotePeerId, localPeerId));
+      _candidateSessionRootKey,
+      _direction(remotePeerId, localPeerId),
+    );
     final clear = await const FrameProtector().decrypt(frame, key);
     _nextCandidateInbound++;
     switch (clear.type) {
@@ -390,33 +458,36 @@ class CandidateResumeConnection {
       throw const LpcException(LpcErrorCode.resumeRejected);
     }
     await verifyResumeRequestProof(
-        resumeSecret: _previousResumeSecret,
-        sessionId: _previousSessionId,
-        nonceA: request.nonceA,
-        transcript: _candidateTranscript,
-        proof: request.proof);
+      resumeSecret: _previousResumeSecret,
+      sessionId: _previousSessionId,
+      nonceA: request.nonceA,
+      transcript: _candidateTranscript,
+      proof: request.proof,
+    );
     _nonceA = request.nonceA;
     _nonceB = Uint8List.fromList(_randomNonce());
     if (_nonceB!.length != 16)
       throw ArgumentError('randomNonce must return 16 bytes');
     _generation = previousGeneration + 1;
     final proof = await resumeAcceptProof(
-        resumeSecret: _previousResumeSecret,
+      resumeSecret: _previousResumeSecret,
+      sessionId: _previousSessionId,
+      nonceA: _nonceA!,
+      nonceB: _nonceB!,
+      transcript: _candidateTranscript,
+      generation: _generation!,
+    );
+    await _deriveResumedSecrets();
+    await _sendCandidate(
+      FrameType.resumeAccept,
+      ResumeAccept(
         sessionId: _previousSessionId,
         nonceA: _nonceA!,
         nonceB: _nonceB!,
-        transcript: _candidateTranscript,
-        generation: _generation!);
-    await _deriveResumedSecrets();
-    await _sendCandidate(
-        FrameType.resumeAccept,
-        ResumeAccept(
-                sessionId: _previousSessionId,
-                nonceA: _nonceA!,
-                nonceB: _nonceB!,
-                generation: _generation!,
-                proof: proof)
-            .encode());
+        generation: _generation!,
+        proof: proof,
+      ).encode(),
+    );
     await _sendResumedReady();
   }
 
@@ -431,13 +502,14 @@ class CandidateResumeConnection {
       throw const LpcException(LpcErrorCode.resumeRejected);
     }
     await verifyResumeAcceptProof(
-        resumeSecret: _previousResumeSecret,
-        sessionId: _previousSessionId,
-        nonceA: _nonceA!,
-        nonceB: accept.nonceB,
-        transcript: _candidateTranscript,
-        generation: accept.generation,
-        proof: accept.proof);
+      resumeSecret: _previousResumeSecret,
+      sessionId: _previousSessionId,
+      nonceA: _nonceA!,
+      nonceB: accept.nonceB,
+      transcript: _candidateTranscript,
+      generation: accept.generation,
+      proof: accept.proof,
+    );
     _nonceB = accept.nonceB;
     _generation = accept.generation;
     await _deriveResumedSecrets();
@@ -446,25 +518,29 @@ class CandidateResumeConnection {
 
   Future<void> _deriveResumedSecrets() async {
     _resumedSecrets = await deriveResumedSecrets(
-        candidateSessionRootKey: _candidateSessionRootKey,
-        previousResumeSecret: _previousResumeSecret,
-        sessionId: _previousSessionId,
-        nonceA: _nonceA!,
-        nonceB: _nonceB!,
-        generation: _generation!);
+      candidateSessionRootKey: _candidateSessionRootKey,
+      previousResumeSecret: _previousResumeSecret,
+      sessionId: _previousSessionId,
+      nonceA: _nonceA!,
+      nonceB: _nonceB!,
+      generation: _generation!,
+    );
   }
 
   Future<void> _sendCandidate(FrameType type, List<int> payload) async {
     final sequence = _nextCandidateOutbound++;
     final key = await candidateTrafficKey(
-        _candidateSessionRootKey, _direction(localPeerId, remotePeerId));
+      _candidateSessionRootKey,
+      _direction(localPeerId, remotePeerId),
+    );
     await _writeEncrypted(
-        type: type,
-        generation: 0,
-        sequence: sequence,
-        sessionId: _candidateSessionId,
-        payload: payload,
-        key: key);
+      type: type,
+      generation: 0,
+      sequence: sequence,
+      sessionId: _candidateSessionId,
+      payload: payload,
+      key: key,
+    );
   }
 
   /// Section 26.3 rejection is still authenticated under candidate keys.
@@ -476,15 +552,19 @@ class CandidateResumeConnection {
   Future<void> _sendResumedReady() async {
     final secrets = _resumedSecrets!;
     final generation = _generation!;
-    final key = await trafficKey(secrets.sessionRootKey, generation,
-        _direction(localPeerId, remotePeerId));
+    final key = await trafficKey(
+      secrets.sessionRootKey,
+      generation,
+      _direction(localPeerId, remotePeerId),
+    );
     await _writeEncrypted(
-        type: FrameType.resumeReady,
-        generation: generation,
-        sequence: 1,
-        sessionId: _previousSessionId,
-        payload: ResumeReady(_previousSessionId, generation).encode(),
-        key: await key.extractBytes());
+      type: FrameType.resumeReady,
+      generation: generation,
+      sequence: 1,
+      sessionId: _previousSessionId,
+      payload: ResumeReady(_previousSessionId, generation).encode(),
+      key: await key.extractBytes(),
+    );
     _sentReady = true;
     _completeIfReady();
   }
@@ -501,12 +581,19 @@ class CandidateResumeConnection {
         !_same(frame.sessionId, _previousSessionId) ||
         frame.messageId.any((byte) => byte != 0)) {
       throw const LpcException(
-          LpcErrorCode.protocolMismatch, 'invalid RESUME_READY frame');
+        LpcErrorCode.protocolMismatch,
+        'invalid RESUME_READY frame',
+      );
     }
-    final key = await trafficKey(secrets.sessionRootKey, generation,
-        _direction(remotePeerId, localPeerId));
-    final clear =
-        await const FrameProtector().decrypt(frame, await key.extractBytes());
+    final key = await trafficKey(
+      secrets.sessionRootKey,
+      generation,
+      _direction(remotePeerId, localPeerId),
+    );
+    final clear = await const FrameProtector().decrypt(
+      frame,
+      await key.extractBytes(),
+    );
     final ready = ResumeReady.decode(clear.payload);
     if (!_same(ready.sessionId, _previousSessionId) ||
         ready.generation != generation ||
@@ -517,24 +604,27 @@ class CandidateResumeConnection {
     _completeIfReady();
   }
 
-  Future<void> _writeEncrypted(
-      {required FrameType type,
-      required int generation,
-      required int sequence,
-      required List<int> sessionId,
-      required List<int> payload,
-      required List<int> key}) async {
+  Future<void> _writeEncrypted({
+    required FrameType type,
+    required int generation,
+    required int sequence,
+    required List<int> sessionId,
+    required List<int> payload,
+    required List<int> key,
+  }) async {
     final protected = await const FrameProtector().encrypt(
-        LpcFrame(
-            type: type,
-            flags: 0,
-            transportGeneration: generation,
-            sequenceNumber: sequence,
-            messageId: List.filled(8, 0),
-            sessionId: sessionId,
-            nonce: List.filled(12, 0),
-            payload: payload),
-        key);
+      LpcFrame(
+        type: type,
+        flags: 0,
+        transportGeneration: generation,
+        sequenceNumber: sequence,
+        messageId: List.filled(8, 0),
+        sessionId: sessionId,
+        nonce: List.filled(12, 0),
+        payload: payload,
+      ),
+      key,
+    );
     final result = await backend.write(protected.encode()).completion;
     if (result != TransportWriteState.submittedToPlatform) {
       throw const LpcException(LpcErrorCode.transportClosed);
@@ -544,11 +634,14 @@ class CandidateResumeConnection {
   void _completeIfReady() {
     if (!_sentReady || !_receivedReady || _completed.isCompleted) return;
     final secrets = _resumedSecrets!;
-    _completed.complete(ResumedSession(
+    _completed.complete(
+      ResumedSession(
         sessionRootKey: secrets.sessionRootKey,
         resumeSecret: secrets.resumeSecret,
         sessionId: _previousSessionId,
-        generation: _generation!));
+        generation: _generation!,
+      ),
+    );
     unawaited(_subscription?.cancel());
   }
 
@@ -577,34 +670,38 @@ int _compare(List<int> a, List<int> b) {
 List<int> _secureNonce() =>
     List<int>.generate(16, (_) => Random.secure().nextInt(256));
 
-Future<ResumedSecrets> deriveResumedSecrets(
-    {required List<int> candidateSessionRootKey,
-    required List<int> previousResumeSecret,
-    required List<int> sessionId,
-    required List<int> nonceA,
-    required List<int> nonceB,
-    required int generation}) async {
+Future<ResumedSecrets> deriveResumedSecrets({
+  required List<int> candidateSessionRootKey,
+  required List<int> previousResumeSecret,
+  required List<int> sessionId,
+  required List<int> nonceA,
+  required List<int> nonceB,
+  required int generation,
+}) async {
   if (candidateSessionRootKey.length != 32 ||
       previousResumeSecret.length != 32 ||
       sessionId.length != 16 ||
       nonceA.length != 16 ||
-      nonceB.length != 16) throw ArgumentError('invalid resumed root input');
+      nonceB.length != 16)
+    throw ArgumentError('invalid resumed root input');
   final g = ByteData(4)..setUint32(0, generation);
   final rootKey = await Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(
-      secretKey: SecretKey(candidateSessionRootKey),
-      nonce: previousResumeSecret,
-      info: [
-        ...ascii.encode('LPC1-resumed-root'),
-        ...sessionId,
-        ...nonceA,
-        ...nonceB,
-        ...g.buffer.asUint8List()
-      ]);
+    secretKey: SecretKey(candidateSessionRootKey),
+    nonce: previousResumeSecret,
+    info: [
+      ...ascii.encode('LPC1-resumed-root'),
+      ...sessionId,
+      ...nonceA,
+      ...nonceB,
+      ...g.buffer.asUint8List(),
+    ],
+  );
   final root = await rootKey.extractBytes();
   final next = await Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(
-      secretKey: SecretKey(root),
-      nonce: const [],
-      info: ascii.encode('LPC1-resume-secret'));
+    secretKey: SecretKey(root),
+    nonce: const [],
+    info: ascii.encode('LPC1-resume-secret'),
+  );
   return ResumedSecrets(root, await next.extractBytes());
 }
 

@@ -7,8 +7,7 @@ import 'package:local_peer_connections/local_peer_connections.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('AUTO_GROUP merge converges one coordinator and routes broadcasts',
-      () async {
+  test('AUTO_GROUP merge converges one coordinator and routes broadcasts', () async {
     final link = await _RuntimeLink.create();
     final host = link.b.createHostSession(HostConfig(autoAccept: true));
     await host.startAdvertising();
@@ -55,23 +54,27 @@ void main() {
     expect(eventAtB.bytes, [1, 2, 3]);
     expect(eventAtB.sourcePeerId, link.a.localPeerId);
     expect(
-        await fromA.completed.timeout(
-          const Duration(seconds: 3),
-          onTimeout: () => throw StateError(
-              'A broadcast acknowledgment timed out: A=${groupA.coordinatorPeerId}/${groupA.isCoordinator}/${groupA.members.length}, '
-              'B=${groupB.coordinatorPeerId}/${groupB.isCoordinator}/${groupB.members.length}'),
+      await fromA.completed.timeout(
+        const Duration(seconds: 3),
+        onTimeout: () => throw StateError(
+          'A broadcast acknowledgment timed out: A=${groupA.coordinatorPeerId}/${groupA.isCoordinator}/${groupA.members.length}, '
+          'B=${groupB.coordinatorPeerId}/${groupB.isCoordinator}/${groupB.members.length}',
         ),
-        BroadcastState.completed);
+      ),
+      BroadcastState.completed,
+    );
 
     final fromB = groupB.broadcast([4, 5, 6], options: reliable);
     expect(
-        await fromB.completed.timeout(
-          const Duration(seconds: 3),
-          onTimeout: () => throw StateError(
-              'B broadcast timed out: A=${groupA.coordinatorPeerId}/${groupA.isCoordinator}/${groupA.members.length}, '
-              'B=${groupB.coordinatorPeerId}/${groupB.isCoordinator}/${groupB.members.length}'),
+      await fromB.completed.timeout(
+        const Duration(seconds: 3),
+        onTimeout: () => throw StateError(
+          'B broadcast timed out: A=${groupA.coordinatorPeerId}/${groupA.isCoordinator}/${groupA.members.length}, '
+          'B=${groupB.coordinatorPeerId}/${groupB.isCoordinator}/${groupB.members.length}',
         ),
-        BroadcastState.completed);
+      ),
+      BroadcastState.completed,
+    );
     final eventAtA = await receivedByA.future.timeout(
       const Duration(seconds: 3),
       onTimeout: () => throw StateError('B broadcast was not received by A'),
@@ -84,59 +87,65 @@ void main() {
     await link.close();
   });
 
-  test('UT-199 direct and group ownership reuse one authenticated connection',
-      () async {
-    final link = await _RuntimeLink.create();
-    final host = link.b.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
+  test(
+    'UT-199 direct and group ownership reuse one authenticated connection',
+    () async {
+      final link = await _RuntimeLink.create();
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
 
-    final attempt = link.a.connect('link');
-    final connection = await _connectedPeer(attempt);
-    await _hostPeer(host);
-    final group = link.a.joinOrCreateGroup(_groupConfig());
-    group.commitMembership([
-      GroupMember(link.a.localPeerId, 8),
-      GroupMember(link.b.localPeerId, 8),
-    ], coordinator: link.a.localPeerId);
-    await Future<void>.delayed(Duration.zero);
+      final attempt = link.a.connect('link');
+      final connection = await _connectedPeer(attempt);
+      await _hostPeer(host);
+      final group = link.a.joinOrCreateGroup(_groupConfig());
+      group.commitMembership([
+        GroupMember(link.a.localPeerId, 8),
+        GroupMember(link.b.localPeerId, 8),
+      ], coordinator: link.a.localPeerId);
+      await Future<void>.delayed(Duration.zero);
 
-    expect(group.members.map((member) => member.peerId),
-        contains(link.b.localPeerId));
-    expect(connection.state, PeerConnectionState.ready);
-    expect((await _hostPeer(host)).state, PeerConnectionState.ready);
-    expect(link.aGattConnected, 1);
-    expect(link.bGattConnected, 0);
+      expect(
+        group.members.map((member) => member.peerId),
+        contains(link.b.localPeerId),
+      );
+      expect(connection.state, PeerConnectionState.ready);
+      expect((await _hostPeer(host)).state, PeerConnectionState.ready);
+      expect(link.aGattConnected, 1);
+      expect(link.bGattConnected, 0);
 
-    await link.close();
-  });
+      await link.close();
+    },
+  );
 
-  test('UT-200 releasing HostSession ownership preserves group ownership',
-      () async {
-    final link = await _RuntimeLink.create();
-    final host = link.a.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
+  test(
+    'UT-200 releasing HostSession ownership preserves group ownership',
+    () async {
+      final link = await _RuntimeLink.create();
+      final host = link.a.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
 
-    final attempt = link.b.connect('link');
-    final connection = await _connectedPeer(attempt);
-    final hostPeer = await _hostPeer(host);
-    final hostSnapshot = host.peers();
-    expect(hostSnapshot, hasLength(1));
-    expect(() => hostSnapshot.clear(), throwsUnsupportedError);
-    final group = link.a.joinOrCreateGroup(_groupConfig());
-    group.commitMembership([
-      GroupMember(link.a.localPeerId, 8),
-      GroupMember(link.b.localPeerId, 8),
-    ], coordinator: link.a.localPeerId);
-    await Future<void>.delayed(Duration.zero);
+      final attempt = link.b.connect('link');
+      final connection = await _connectedPeer(attempt);
+      final hostPeer = await _hostPeer(host);
+      final hostSnapshot = host.peers();
+      expect(hostSnapshot, hasLength(1));
+      expect(() => hostSnapshot.clear(), throwsUnsupportedError);
+      final group = link.a.joinOrCreateGroup(_groupConfig());
+      group.commitMembership([
+        GroupMember(link.a.localPeerId, 8),
+        GroupMember(link.b.localPeerId, 8),
+      ], coordinator: link.a.localPeerId);
+      await Future<void>.delayed(Duration.zero);
 
-    await host.disconnect(hostPeer.peerId);
-    expect(host.peers(), isEmpty);
-    expect(hostSnapshot, hasLength(1));
-    expect(connection.state, PeerConnectionState.ready);
-    expect(link.aCloseCalls, 0);
+      await host.disconnect(hostPeer.peerId);
+      expect(host.peers(), isEmpty);
+      expect(hostSnapshot, hasLength(1));
+      expect(connection.state, PeerConnectionState.ready);
+      expect(link.aCloseCalls, 0);
 
-    await link.close();
-  });
+      await link.close();
+    },
+  );
 
   test('terminal ConnectionAttempt cancellation is a no-op', () async {
     final link = await _RuntimeLink.create();
@@ -163,11 +172,13 @@ void main() {
     // Simulate a native inbound link that reached the platform-ready point
     // but has not completed HELLO/AUTH/READY yet. There is no PeerConnection
     // owner to disconnect, so runtime shutdown must close the raw binding.
-    link._aEvents.add(const PlatformGattConnected(
-      'inbound',
-      'peripheral',
-      connectionGeneration: 1,
-    ));
+    link._aEvents.add(
+      const PlatformGattConnected(
+        'inbound',
+        'peripheral',
+        connectionGeneration: 1,
+      ),
+    );
     await Future<void>.delayed(Duration.zero);
     expect(link.aCloseCalls, 0);
     await link.a.close();
@@ -227,20 +238,24 @@ void main() {
     final connection = await _connectedPeer(attempt);
     await _hostPeer(host);
 
-    final group = link.a.joinOrCreateGroup(GroupConfig(
-      applicationNamespace: const [1],
-      groupJoinToken: List<int>.filled(16, 2),
-      groupTrustMode: GroupTrustMode.groupPsk32,
-      groupPsk32: List<int>.filled(32, 4),
-    ));
+    final group = link.a.joinOrCreateGroup(
+      GroupConfig(
+        applicationNamespace: const [1],
+        groupJoinToken: List<int>.filled(16, 2),
+        groupTrustMode: GroupTrustMode.groupPsk32,
+        groupPsk32: List<int>.filled(32, 4),
+      ),
+    );
     group.commitMembership([
       GroupMember(link.a.localPeerId, 8),
       GroupMember(link.b.localPeerId, 8),
     ], coordinator: link.a.localPeerId);
     await Future<void>.delayed(Duration.zero);
 
-    expect(group.members.map((member) => member.peerId),
-        contains(connection.peerId));
+    expect(
+      group.members.map((member) => member.peerId),
+      contains(connection.peerId),
+    );
     final send = group.send(connection.peerId, [1]);
     expect(await send.completed, SendState.failed);
     expect(connection.state, PeerConnectionState.ready);
@@ -251,30 +266,33 @@ void main() {
   test('UT-204 releasePeerRetention invalidates known-peer cache', () async {
     final resolver = _CountingKnownPeerResolver();
     final link = await _RuntimeLink.create(
-        configA: RuntimeConfig(
-          trustMode: HandshakeTrustMode.tofu,
-          autoReconnect: false,
-          autoConnectKnownPeers: true,
-          knownPeerResolver: resolver,
-          reconnectTimeoutMs: 1000,
-        ),
-        configB: const RuntimeConfig(
-          trustMode: HandshakeTrustMode.tofu,
-          autoReconnect: false,
-        ));
+      configA: RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: false,
+        autoConnectKnownPeers: true,
+        knownPeerResolver: resolver,
+        reconnectTimeoutMs: 1000,
+      ),
+      configB: const RuntimeConfig(
+        trustMode: HandshakeTrustMode.tofu,
+        autoReconnect: false,
+      ),
+    );
     final host = link.b.createHostSession(HostConfig(autoAccept: true));
     await host.startAdvertising();
     final discovery = await link.a.startDiscovery();
-    final first =
-        link.a.events.firstWhere((event) => event is KnownPeerConnected);
+    final first = link.a.events.firstWhere(
+      (event) => event is KnownPeerConnected,
+    );
     link.discoverA('known-endpoint');
     final firstEvent = await first as KnownPeerConnected;
     await Future<void>.delayed(const Duration(milliseconds: 50));
     await link.a.releasePeerRetention(firstEvent.connection.peerId);
     expect(resolver.lookups, 1);
 
-    final second =
-        link.a.events.firstWhere((event) => event is KnownPeerConnected);
+    final second = link.a.events.firstWhere(
+      (event) => event is KnownPeerConnected,
+    );
     link.discoverA('known-endpoint');
     await second;
     expect(resolver.lookups, 2);
@@ -355,8 +373,11 @@ void main() {
 
     link.dropBoth();
     await _waitForState(connection, PeerConnectionState.reconnecting);
-    await _waitForState(connection, PeerConnectionState.ready,
-        timeout: const Duration(seconds: 3));
+    await _waitForState(
+      connection,
+      PeerConnectionState.ready,
+      timeout: const Duration(seconds: 3),
+    );
 
     expect(connection.state, PeerConnectionState.ready);
     expect(link.aGattConnected, 2);
@@ -364,6 +385,32 @@ void main() {
 
     await link.close();
   });
+
+  test(
+    'UT-260 automatic known-peer probes are answered without a host',
+    () async {
+      final resolver = _CountingKnownPeerResolver();
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+        ),
+        configB: const RuntimeConfig(trustMode: HandshakeTrustMode.tofu),
+      );
+
+      // B initiates the physical connection, but A has no HostSession or group
+      // owner. A must still answer the authenticated candidate because this is
+      // the responder half of automatic known-peer discovery. The resolver,
+      // rather than the transport callback, decides whether A retains it.
+      final connection = await _connectedPeer(link.b.connect('link'));
+      await _waitFor(() => resolver.lookups == 1);
+
+      expect(connection.state, PeerConnectionState.ready);
+      expect(resolver.peerIds, hasLength(1));
+      await link.close();
+    },
+  );
 
   test('UT-242 late disconnect does not repeat native GATT cleanup', () async {
     final link = await _RuntimeLink.create(
@@ -379,184 +426,284 @@ void main() {
     // The first callback removes the binding and requests the native close.
     // A second callback models the delayed/echoed platform callback that can
     // follow after the Dart binding has already gone away.
-    link._aEvents
-        .add(const PlatformGattDisconnected('link', connectionGeneration: 1));
+    link._aEvents.add(
+      const PlatformGattDisconnected('link', connectionGeneration: 1),
+    );
     await _waitFor(() => link.aCloseCalls == 1);
-    link._aEvents
-        .add(const PlatformGattDisconnected('link', connectionGeneration: 1));
+    link._aEvents.add(
+      const PlatformGattDisconnected('link', connectionGeneration: 1),
+    );
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
     expect(link.aCloseCalls, 1);
     await link.close();
   });
 
-  test('UT-243 peripheral-side loss recovers from a local discovery candidate',
-      () async {
-    final link = await _RuntimeLink.create(
-      configA: const RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoReconnect: true,
-        reconnectTimeoutMs: 4000,
-      ),
-      // Disable the remote central-side scheduler so this test proves that
-      // the locally peripheral-side runtime can recover without an
-      // application-selected reconnect direction.
-      configB: const RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoReconnect: false,
-        reconnectTimeoutMs: 4000,
-      ),
-    );
-    final hostA = link.a.createHostSession(HostConfig(autoAccept: true));
-    final hostB = link.b.createHostSession(HostConfig(autoAccept: true));
-    await hostA.startAdvertising();
-    await hostB.startAdvertising();
-    final initial = await _connectedPeer(link.b.connect('link'));
-    final hostPeer = await _hostPeer(hostA);
-    final sessionId = hostPeer.sessionId;
-    final discovery = await link.a.startDiscovery();
+  test(
+    'UT-243 peripheral-side loss recovers from a local discovery candidate',
+    () async {
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: true,
+          reconnectTimeoutMs: 4000,
+        ),
+        // Disable the remote central-side scheduler so this test proves that
+        // the locally peripheral-side runtime can recover without an
+        // application-selected reconnect direction.
+        configB: const RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: false,
+          reconnectTimeoutMs: 4000,
+        ),
+      );
+      final hostA = link.a.createHostSession(HostConfig(autoAccept: true));
+      final hostB = link.b.createHostSession(HostConfig(autoAccept: true));
+      await hostA.startAdvertising();
+      await hostB.startAdvertising();
+      final initial = await _connectedPeer(link.b.connect('link'));
+      final hostPeer = await _hostPeer(hostA);
+      final sessionId = hostPeer.sessionId;
+      final discovery = await link.a.startDiscovery();
 
-    link.dropBoth();
-    await _waitForState(hostPeer, PeerConnectionState.reconnecting);
-    // The old endpoint is still present in the logical index while native
-    // teardown completes. The later observation must be allowed to start a
-    // fresh central candidate only after that cleanup has run.
-    await Future<void>.delayed(const Duration(milliseconds: 50));
-    link.discoverA('link');
-    await _waitForState(hostPeer, PeerConnectionState.ready,
-        timeout: const Duration(seconds: 3));
+      link.dropBoth();
+      await _waitForState(hostPeer, PeerConnectionState.reconnecting);
+      // The old endpoint is still present in the logical index while native
+      // teardown completes. The later observation must be allowed to start a
+      // fresh central candidate only after that cleanup has run.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      link.discoverA('link');
+      await _waitForState(
+        hostPeer,
+        PeerConnectionState.ready,
+        timeout: const Duration(seconds: 3),
+      );
 
-    expect(hostPeer.sessionId, sessionId);
-    expect(initial.state, PeerConnectionState.ready);
-    expect(link.aGattConnected, greaterThanOrEqualTo(1));
+      expect(hostPeer.sessionId, sessionId);
+      expect(initial.state, PeerConnectionState.ready);
+      expect(link.aGattConnected, greaterThanOrEqualTo(1));
 
-    await discovery.stop();
-    await link.close();
-  });
+      await discovery.stop();
+      await link.close();
+    },
+  );
 
   test(
-      'UT-254 central-side loss can recover through a rotated discovery endpoint',
-      () async {
-    final link = await _RuntimeLink.create(
-      configA: const RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoReconnect: true,
-        reconnectTimeoutMs: 4000,
-      ),
-      configB: const RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoReconnect: true,
-        reconnectTimeoutMs: 4000,
-      ),
-    );
-    final host = link.b.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
-    final connection = await _connectedPeer(link.a.connect('link'));
-    await _hostPeer(host);
-    final discovery = await link.a.startDiscovery();
+    'UT-254 central-side loss can recover through a rotated discovery endpoint',
+    () async {
+      final resolver = _CountingKnownPeerResolver();
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: true,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          reconnectTimeoutMs: 4000,
+        ),
+        configB: const RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: true,
+          reconnectTimeoutMs: 4000,
+        ),
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final connection = await _connectedPeer(link.a.connect('link'));
+      await _hostPeer(host);
+      final discovery = await link.a.startDiscovery();
+      final runtimeEvents = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(runtimeEvents.add);
 
-    // Keep the old central endpoint unavailable after the physical loss.
-    // A real iOS/Android address rotation has the same effect even though a
-    // scan now reports the peer through a different DiscoveryEndpointId.
-    link.stallAEndpoint('link');
-    link.dropBoth();
-    await _waitForState(connection, PeerConnectionState.reconnecting);
-    await Future<void>.delayed(const Duration(milliseconds: 400));
-    link.discoverA('rotated-endpoint');
-    await _waitForState(connection, PeerConnectionState.ready,
-        timeout: const Duration(seconds: 3));
+      // Keep the old central endpoint unavailable after the physical loss.
+      // A real iOS/Android address rotation has the same effect even though a
+      // scan now reports the peer through a different DiscoveryEndpointId.
+      link.stallAEndpoint('link');
+      link.dropBoth();
+      await _waitForState(connection, PeerConnectionState.reconnecting);
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      link.discoverA('rotated-endpoint');
+      await _waitFor(
+        () => runtimeEvents.whereType<KnownPeerConnected>().isNotEmpty,
+        timeout: const Duration(seconds: 3),
+      );
 
-    expect(connection.state, PeerConnectionState.ready);
-    expect(connection.sessionId, isNotEmpty);
-    expect(host.peers(), hasLength(1));
+      final replacement = runtimeEvents
+          .whereType<KnownPeerConnected>()
+          .last
+          .connection;
+      expect(replacement.state, PeerConnectionState.ready);
+      expect(identical(replacement, connection), isFalse);
+      expect(connection.sessionId, isNotEmpty);
+      expect(host.peers(), hasLength(1));
 
-    await discovery.stop();
-    await link.close();
-  });
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
 
-  test('UT-253 reconnect discovery defers to an active known-peer probe',
-      () async {
-    final resolver = _CountingKnownPeerResolver();
-    final link = await _RuntimeLink.create(
-      configA: RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoReconnect: true,
-        autoConnectKnownPeers: true,
-        knownPeerResolver: resolver,
-        reconnectTimeoutMs: 2000,
-      ),
-      configB: const RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoReconnect: false,
-        reconnectTimeoutMs: 2000,
-      ),
-    );
-    final host = link.a.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
-    final connection = await _connectedPeer(link.b.connect('link'));
-    final hostPeer = await _hostPeer(host);
-    final discovery = await link.a.startDiscovery();
-    final runtimeEvents = <RuntimeEvent>[];
-    final subscription = link.a.events.listen(runtimeEvents.add);
+  test(
+    'UT-265 unassociated discovery is authenticated before reconnect RESUME',
+    () async {
+      final resolver = _CountingKnownPeerResolver();
+      final logs = <String>[];
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: true,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          reconnectTimeoutMs: 2000,
+          logger: logs.add,
+        ),
+        configB: const RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: false,
+        ),
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final connection = await _connectedPeer(link.a.connect('link'));
+      await _hostPeer(host);
+      final discovery = await link.a.startDiscovery();
+      final runtimeEvents = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(runtimeEvents.add);
 
-    // Reserve an unrelated endpoint with a known-peer probe and leave its
-    // handshake open. Then the existing peripheral-side logical peer enters
-    // reconnecting state. A repeated advertisement for the reserved endpoint
-    // must not make the reconnect scheduler open a second physical link.
-    link.discoverA('probe');
-    await _waitFor(
-        () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 1);
-    link.dropBoth();
-    await _waitForState(hostPeer, PeerConnectionState.reconnecting);
-    link.discoverA('probe');
-    await Future<void>.delayed(const Duration(milliseconds: 50));
+      // Keep the previously authenticated endpoint unavailable so the next
+      // observation has no authenticated endpoint association. The endpoint
+      // below represents a different nearby device, even though this is the
+      // only logical peer currently reconnecting.
+      link.stallAEndpoint('link');
+      link.dropBoth();
+      await _waitForState(connection, PeerConnectionState.reconnecting);
+      logs.clear();
 
-    expect(runtimeEvents.whereType<KnownPeerProbeStarted>(), hasLength(1));
-    expect(link.aGattConnected, 1);
-    expect(connection.state, isNot(PeerConnectionState.ready));
+      link.discoverA('unassociated-nearby-peer');
+      await _waitFor(
+        () => logs.any(
+          (message) => message.contains(
+            'known probe started endpoint=unassociated-nearby-peer',
+          ),
+        ),
+      );
+      expect(
+        logs,
+        isNot(
+          contains(
+            'reconnect discovery candidate endpoint=unassociated-nearby-peer',
+          ),
+        ),
+      );
 
-    await subscription.cancel();
-    await discovery.stop();
-    await link.close();
-  });
+      await _waitFor(
+        () => runtimeEvents.whereType<KnownPeerConnected>().isNotEmpty,
+        timeout: const Duration(seconds: 3),
+      );
+      final replacement = runtimeEvents
+          .whereType<KnownPeerConnected>()
+          .last
+          .connection;
+      expect(replacement.state, PeerConnectionState.ready);
+      expect(identical(replacement, connection), isFalse);
+      expect(resolver.lookups, greaterThanOrEqualTo(1));
 
-  test('reconnect releases a stale native client before retrying connectGatt',
-      () async {
-    final link = await _RuntimeLink.create(
-      configA: RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoReconnect: true,
-        reconnectTimeoutMs: 3000,
-      ),
-      configB: RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoReconnect: true,
-        reconnectTimeoutMs: 3000,
-      ),
-      rejectAConnectWhileNativeLinkOpen: true,
-    );
-    final host = link.b.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
-    final connection = await _connectedPeer(link.a.connect('link'));
-    await _hostPeer(host);
-    link.failNextAFragment();
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
 
-    // The first post-READY write fails inside the native transport. The
-    // native client handle is intentionally left marked open, reproducing
-    // Android's ENDPOINT_BUSY response if reconnect calls connectGatt too
-    // early. Runtime must close that stale generation first.
-    final send = connection.send([1, 2, 3]);
-    await _waitForState(connection, PeerConnectionState.reconnecting);
-    await _waitForState(connection, PeerConnectionState.ready,
-        timeout: const Duration(seconds: 3));
+  test(
+    'UT-253 reconnect discovery defers to an active known-peer probe',
+    () async {
+      final resolver = _CountingKnownPeerResolver();
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: true,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          reconnectTimeoutMs: 2000,
+        ),
+        configB: const RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: false,
+          reconnectTimeoutMs: 2000,
+        ),
+      );
+      final host = link.a.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final connection = await _connectedPeer(link.b.connect('link'));
+      final hostPeer = await _hostPeer(host);
+      final discovery = await link.a.startDiscovery();
+      final runtimeEvents = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(runtimeEvents.add);
 
-    expect(await send.completed, isNot(SendState.remoteAcknowledged));
-    expect(link.aCloseCalls, greaterThanOrEqualTo(1));
-    expect(link.aGattConnected, greaterThanOrEqualTo(2));
-    expect(connection.state, PeerConnectionState.ready);
+      // Reserve an unrelated endpoint with a known-peer probe and leave its
+      // handshake open. Then the existing peripheral-side logical peer enters
+      // reconnecting state. A repeated advertisement for the reserved endpoint
+      // must not make the reconnect scheduler open a second physical link.
+      link.discoverA('probe');
+      await _waitFor(
+        () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 1,
+      );
+      link.dropBoth();
+      await _waitForState(hostPeer, PeerConnectionState.reconnecting);
+      link.discoverA('probe');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
 
-    await link.close();
-  });
+      expect(runtimeEvents.whereType<KnownPeerProbeStarted>(), hasLength(1));
+      expect(link.aGattConnected, 1);
+      expect(connection.state, isNot(PeerConnectionState.ready));
+
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
+
+  test(
+    'reconnect releases a stale native client before retrying connectGatt',
+    () async {
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: true,
+          reconnectTimeoutMs: 3000,
+        ),
+        configB: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: true,
+          reconnectTimeoutMs: 3000,
+        ),
+        rejectAConnectWhileNativeLinkOpen: true,
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final connection = await _connectedPeer(link.a.connect('link'));
+      await _hostPeer(host);
+      link.failNextAFragment();
+
+      // The first post-READY write fails inside the native transport. The
+      // native client handle is intentionally left marked open, reproducing
+      // Android's ENDPOINT_BUSY response if reconnect calls connectGatt too
+      // early. Runtime must close that stale generation first.
+      final send = connection.send([1, 2, 3]);
+      await _waitForState(connection, PeerConnectionState.reconnecting);
+      await _waitForState(
+        connection,
+        PeerConnectionState.ready,
+        timeout: const Duration(seconds: 3),
+      );
+
+      expect(await send.completed, isNot(SendState.remoteAcknowledged));
+      expect(link.aCloseCalls, greaterThanOrEqualTo(1));
+      expect(link.aGattConnected, greaterThanOrEqualTo(2));
+      expect(connection.state, PeerConnectionState.ready);
+
+      await link.close();
+    },
+  );
 
   test('reconnect expiry closes an in-progress resume candidate', () async {
     final link = await _RuntimeLink.create(
@@ -579,8 +726,11 @@ void main() {
 
     link.dropBoth();
     await _waitForState(connection, PeerConnectionState.reconnecting);
-    await _waitForState(connection, PeerConnectionState.disconnected,
-        timeout: const Duration(seconds: 2));
+    await _waitForState(
+      connection,
+      PeerConnectionState.disconnected,
+      timeout: const Duration(seconds: 2),
+    );
 
     // The candidate received a native connected callback, so expiry must
     // close that candidate even though the core still owns the old, already
@@ -640,10 +790,15 @@ void main() {
 
     link.dropBoth(suppressReconnects: true);
     await _waitForState(connection, PeerConnectionState.reconnecting);
-    await _waitForState(connection, PeerConnectionState.disconnected,
-        timeout: const Duration(seconds: 2));
-    await _waitFor(() => host.peers().isEmpty,
-        timeout: const Duration(seconds: 2));
+    await _waitForState(
+      connection,
+      PeerConnectionState.disconnected,
+      timeout: const Duration(seconds: 2),
+    );
+    await _waitFor(
+      () => host.peers().isEmpty,
+      timeout: const Duration(seconds: 2),
+    );
 
     expect(host.peers(), isEmpty);
     expect(link.aGattConnected, 2);
@@ -652,42 +807,44 @@ void main() {
     await link.close();
   });
 
-  test('known-peer resolver runs after authentication and retains once',
-      () async {
-    final resolver = _CountingKnownPeerResolver();
-    final link = await _RuntimeLink.create(
-      configA: RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoConnectKnownPeers: true,
-        knownPeerResolver: resolver,
-        reconnectTimeoutMs: 1000,
-      ),
-    );
-    final host = link.b.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
-    final discovery = await link.a.startDiscovery();
-    final events = <RuntimeEvent>[];
-    final subscription = link.a.events.listen(events.add);
+  test(
+    'known-peer resolver runs after authentication and retains once',
+    () async {
+      final resolver = _CountingKnownPeerResolver();
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          reconnectTimeoutMs: 1000,
+        ),
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final discovery = await link.a.startDiscovery();
+      final events = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(events.add);
 
-    link.discoverA('known-endpoint');
-    await _waitFor(() => events.whereType<KnownPeerConnected>().length == 1);
-    final connected = events.whereType<KnownPeerConnected>().single;
+      link.discoverA('known-endpoint');
+      await _waitFor(() => events.whereType<KnownPeerConnected>().length == 1);
+      final connected = events.whereType<KnownPeerConnected>().single;
 
-    expect(resolver.lookups, 1);
-    expect(resolver.peerIds, [link.b.localPeerId]);
-    expect(connected.discoveryEndpointId, 'known-endpoint');
-    expect(connected.connection.state, PeerConnectionState.ready);
+      expect(resolver.lookups, 1);
+      expect(resolver.peerIds, [link.b.localPeerId]);
+      expect(connected.discoveryEndpointId, 'known-endpoint');
+      expect(connected.connection.state, PeerConnectionState.ready);
 
-    link.discoverA('known-endpoint');
-    await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(events.whereType<KnownPeerConnected>(), hasLength(1));
-    expect(resolver.lookups, 1);
+      link.discoverA('known-endpoint');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(events.whereType<KnownPeerConnected>(), hasLength(1));
+      expect(resolver.lookups, 1);
 
-    await subscription.cancel();
-    await discovery.stop();
-    expect(connected.connection.state, PeerConnectionState.ready);
-    await link.close();
-  });
+      await subscription.cancel();
+      await discovery.stop();
+      expect(connected.connection.state, PeerConnectionState.ready);
+      await link.close();
+    },
+  );
 
   test('READY peer leaves unauthenticated probes independent', () async {
     final resolver = _CountingKnownPeerResolver();
@@ -718,7 +875,8 @@ void main() {
     // possible unrelated nearby peer.
     link.discoverA('competing-endpoint');
     await _waitFor(
-        () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 1);
+      () => runtimeEvents.whereType<KnownPeerProbeStarted>().length == 1,
+    );
     final closeCallsBeforeOwner = link.aCloseCalls;
     final connection = await _connectedPeer(link.a.connect('link'));
     await _hostPeer(host);
@@ -739,8 +897,11 @@ void main() {
     // RECONNECTING and back to READY.
     link.dropBoth();
     await _waitForState(connection, PeerConnectionState.reconnecting);
-    await _waitForState(connection, PeerConnectionState.ready,
-        timeout: const Duration(seconds: 3));
+    await _waitForState(
+      connection,
+      PeerConnectionState.ready,
+      timeout: const Duration(seconds: 3),
+    );
     expect(connection.state, PeerConnectionState.ready);
     expect(link.aGattConnected, greaterThanOrEqualTo(2));
 
@@ -749,216 +910,344 @@ void main() {
     await link.close();
   });
 
-  test('UT-252 authenticated duplicate probes for one PeerId are arbitrated',
-      () async {
-    final resolver = _CountingKnownPeerResolver();
-    final link = await _RuntimeLink.create(
-      configA: RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoConnectKnownPeers: true,
-        knownPeerResolver: resolver,
-        maxConcurrentKnownPeerProbes: 2,
-      ),
-      configB: const RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoReconnect: true,
-      ),
-    );
-    final host = link.b.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
-    final events = <RuntimeEvent>[];
-    final subscription = link.a.events.listen(events.add);
-    final discovery = await link.a.startDiscovery();
+  test(
+    'UT-252 authenticated duplicate probes for one PeerId are arbitrated',
+    () async {
+      final resolver = _CountingKnownPeerResolver();
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          maxConcurrentKnownPeerProbes: 2,
+        ),
+        configB: const RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: true,
+        ),
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final events = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(events.add);
+      final discovery = await link.a.startDiscovery();
 
-    // Both transient endpoints resolve to the same authenticated PeerId in
-    // this fixture. They may race independently through authentication, but
-    // only one logical peer may remain owned by the runtime.
-    link.discoverA('duplicate-a');
-    await _waitFor(() => events.whereType<KnownPeerConnected>().length == 1);
-    link.discoverA('duplicate-b');
-    await _waitFor(() => link.aCloseCalls > 0);
-    await _hostPeer(host);
+      // Both transient endpoints resolve to the same authenticated PeerId in
+      // this fixture. They may race independently through authentication, but
+      // only one logical peer may remain owned by the runtime.
+      link.discoverA('duplicate-a');
+      await _waitFor(() => events.whereType<KnownPeerConnected>().length == 1);
+      link.discoverA('duplicate-b');
+      await _waitFor(() => link.aCloseCalls > 0);
+      await _hostPeer(host);
 
-    // The duplicate is rejected by authenticated ownership/rank arbitration
-    // before it needs a second known-peer lookup.
-    expect(resolver.lookups, 1);
-    expect(host.peers(), hasLength(1));
-    expect(events.whereType<KnownPeerConnected>(), hasLength(2));
+      // The duplicate is rejected by authenticated ownership/rank arbitration
+      // before it needs a second known-peer lookup.
+      expect(resolver.lookups, 1);
+      expect(host.peers(), hasLength(1));
+      expect(events.whereType<KnownPeerConnected>(), hasLength(2));
 
-    await subscription.cancel();
-    await discovery.stop();
-    await link.close();
-  });
-
-  test('unknown automatic probe emits identification and releases peer',
-      () async {
-    final resolver = _CountingKnownPeerResolver(result: false);
-    final link = await _RuntimeLink.create(
-      configA: RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoConnectKnownPeers: true,
-        knownPeerResolver: resolver,
-        reconnectTimeoutMs: 1000,
-      ),
-    );
-    final host = link.b.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
-    final discovery = await link.a.startDiscovery();
-    final events = <RuntimeEvent>[];
-    final subscription = link.a.events.listen(events.add);
-
-    link.discoverA('unknown-endpoint');
-    await _waitFor(() => events.whereType<UnknownPeerIdentified>().length == 1);
-    final unknown = events.whereType<UnknownPeerIdentified>().single;
-
-    expect(resolver.peerIds, [link.b.localPeerId]);
-    expect(unknown.discoveryEndpointId, 'unknown-endpoint');
-    expect(events.whereType<KnownPeerConnected>(), isEmpty);
-    await _waitForState(unknown.connection, PeerConnectionState.disconnected);
-
-    await subscription.cancel();
-    await discovery.stop();
-    await link.close();
-  });
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
 
   test(
-      'UT-241 unknown probe stays open briefly for an auto-accept host handoff',
-      () async {
-    final resolver = _CountingKnownPeerResolver(result: false);
-    final link = await _RuntimeLink.create(
-      configA: RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoConnectKnownPeers: true,
-        knownPeerResolver: resolver,
-        reconnectTimeoutMs: 1000,
-      ),
-    );
-    final localHost = link.a.createHostSession(HostConfig(autoAccept: true));
-    await localHost.startAdvertising();
-    final remoteHost = link.b.createHostSession(HostConfig(autoAccept: true));
-    await remoteHost.startAdvertising();
-    final discovery = await link.a.startDiscovery();
-    final events = <RuntimeEvent>[];
-    final subscription = link.a.events.listen(events.add);
+    'UT-262 late authenticated duplicate does not replace a healthy owner',
+    () async {
+      final resolver = _CountingKnownPeerResolver();
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          reconnectTimeoutMs: 1000,
+        ),
+        configB: const RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: false,
+        ),
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final events = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(events.add);
+      final discovery = await link.a.startDiscovery();
 
-    link.discoverA('auto-accept-handoff-endpoint');
-    await _waitFor(() => events.whereType<UnknownPeerIdentified>().length == 1);
-    final unknown = events.whereType<UnknownPeerIdentified>().single;
+      link.discoverA('late-owner');
+      await _waitFor(() => events.whereType<KnownPeerConnected>().length == 1);
+      final first = events.whereType<KnownPeerConnected>().single.connection;
+      expect(first.state, PeerConnectionState.ready);
+      final closeCallsBeforeLateCandidate = link.aCloseCalls;
 
-    expect(unknown.discoveryEndpointId, 'auto-accept-handoff-endpoint');
-    expect(events.whereType<KnownPeerConnected>(), isEmpty);
-    expect(unknown.connection.state, PeerConnectionState.ready);
+      // This endpoint starts only after the authenticated owner is already
+      // READY. It still authenticates the same PeerId, but its new nonce must
+      // never replace the usable owner through rank arbitration.
+      link.discoverA('late-duplicate');
+      await _waitFor(() => events.whereType<KnownPeerConnected>().length == 2);
+      final second = events.whereType<KnownPeerConnected>().last.connection;
 
-    // The application can explicitly release the probe once its handoff
-    // decision is complete; the bounded fallback timer is not needed here.
-    await link.a.releasePeerRetention(unknown.connection.peerId);
-    await _waitForState(unknown.connection, PeerConnectionState.disconnected);
+      expect(identical(second, first), isTrue);
+      expect(first.state, PeerConnectionState.ready);
+      expect(host.peers(), hasLength(1));
+      expect(resolver.lookups, 1);
+      expect(link.aCloseCalls, greaterThan(closeCallsBeforeLateCandidate));
 
-    await subscription.cancel();
-    await discovery.stop();
-    await localHost.close();
-    await remoteHost.close();
-    await link.close();
-  });
-
-  test('UT-185 resolver failure is conservative for an automatic probe',
-      () async {
-    final link = await _RuntimeLink.create(
-      configA: RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoConnectKnownPeers: true,
-        knownPeerResolver: _ThrowingKnownPeerResolver(),
-        reconnectTimeoutMs: 1000,
-      ),
-    );
-    final host = link.b.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
-    final discovery = await link.a.startDiscovery();
-    final events = <RuntimeEvent>[];
-    final subscription = link.a.events.listen(events.add);
-
-    link.discoverA('resolver-failure-endpoint');
-    await _waitFor(() => events.whereType<UnknownPeerIdentified>().length == 1);
-    final unknown = events.whereType<UnknownPeerIdentified>().single;
-
-    expect(unknown.discoveryEndpointId, 'resolver-failure-endpoint');
-    expect(events.whereType<KnownPeerConnected>(), isEmpty);
-    await _waitForState(unknown.connection, PeerConnectionState.disconnected);
-
-    await subscription.cancel();
-    await discovery.stop();
-    await link.close();
-  });
-
-  test('UT-185 resolver timeout is conservative for an automatic probe',
-      () async {
-    final resolver = _SlowKnownPeerResolver();
-    final link = await _RuntimeLink.create(
-      configA: RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoConnectKnownPeers: true,
-        knownPeerResolver: resolver,
-        knownPeerLookupTimeoutMs: 100,
-        reconnectTimeoutMs: 1000,
-      ),
-    );
-    final host = link.b.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
-    final discovery = await link.a.startDiscovery();
-    final events = <RuntimeEvent>[];
-    final subscription = link.a.events.listen(events.add);
-
-    link.discoverA('resolver-timeout-endpoint');
-    await _waitFor(() => events.whereType<UnknownPeerIdentified>().length == 1,
-        timeout: const Duration(seconds: 2));
-    final unknown = events.whereType<UnknownPeerIdentified>().single;
-
-    expect(unknown.discoveryEndpointId, 'resolver-timeout-endpoint');
-    expect(events.whereType<KnownPeerConnected>(), isEmpty);
-    resolver.complete();
-    await _waitForState(unknown.connection, PeerConnectionState.disconnected);
-
-    await subscription.cancel();
-    await discovery.stop();
-    await link.close();
-  });
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
 
   test(
-      'UT-249 resolver completion after candidate loss does not publish connected',
-      () async {
-    final resolver = _SlowKnownPeerResolver();
-    final link = await _RuntimeLink.create(
-      configA: RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoConnectKnownPeers: true,
-        knownPeerResolver: resolver,
-        reconnectTimeoutMs: 1000,
-      ),
-    );
-    final host = link.b.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
-    final discovery = await link.a.startDiscovery();
-    final events = <RuntimeEvent>[];
-    final subscription = link.a.events.listen(events.add);
+    'UT-264 failed candidate timing is not reused for a later probe',
+    () async {
+      final resolver = _CountingKnownPeerResolver();
+      final logs = <String>[];
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          reconnectTimeoutMs: 1000,
+          logger: logs.add,
+        ),
+        configB: const RuntimeConfig(trustMode: HandshakeTrustMode.tofu),
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final events = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(events.add);
+      final discovery = await link.a.startDiscovery();
 
-    link.discoverA('resolver-disconnect-endpoint');
-    await _waitFor(() => resolver.started);
-    link.suppressReconnects = true;
+      // Fail a candidate before an owner exists. The fake backend does not
+      // send a second native disconnect callback for this terminal write
+      // failure, which reproduces the Android failure path that originally
+      // left _gattCandidateStartedAtMs stale.
+      link.failNextAFragment();
+      link.discoverA('reused-timestamp');
+      await _waitFor(
+        () => events.whereType<KnownPeerProbeFailed>().length == 1,
+      );
+      // The failed automatic probe has the normal bounded retry backoff and
+      // endpoint jitter. Let that eligibility window expire before reusing
+      // the same discovery endpoint.
+      await Future<void>.delayed(const Duration(seconds: 7));
 
-    // The candidate can lose its physical transport while application-owned
-    // resolver work is still pending. Let the bounded reconnect probe expire
-    // so the candidate is terminal before the lookup completes.
-    link._aEvents
-        .add(const PlatformGattDisconnected('resolver-disconnect-endpoint'));
-    await Future<void>.delayed(const Duration(milliseconds: 1100));
-    resolver.complete();
-    await _waitFor(() => events.whereType<KnownPeerProbeFailed>().isNotEmpty);
-    expect(events.whereType<KnownPeerConnected>(), isEmpty);
+      // Establish a healthy owner through another endpoint, then observe the
+      // failed endpoint again. Its new candidate is later than this owner and
+      // must be closed as a late duplicate, not compared using the failed
+      // attempt's old timestamp.
+      final owner = await _connectedPeer(link.a.connect('healthy-owner'));
+      await _hostPeer(host);
+      link.discoverA('reused-timestamp');
+      await _waitFor(() => events.whereType<KnownPeerConnected>().length == 1);
 
-    await subscription.cancel();
-    await discovery.stop();
-    await link.close();
-  });
+      expect(owner.state, PeerConnectionState.ready);
+      expect(host.peers(), hasLength(1));
+      expect(
+        logs.any(
+          (entry) => entry.contains(
+            'duplicate candidate closed peer=${link.b.localPeerId} '
+            'reason=late-candidate-existing-owner',
+          ),
+        ),
+        isTrue,
+      );
+
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
+
+  test(
+    'unknown automatic probe emits identification and releases peer',
+    () async {
+      final resolver = _CountingKnownPeerResolver(result: false);
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          reconnectTimeoutMs: 1000,
+        ),
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final discovery = await link.a.startDiscovery();
+      final events = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(events.add);
+
+      link.discoverA('unknown-endpoint');
+      await _waitFor(
+        () => events.whereType<UnknownPeerIdentified>().length == 1,
+      );
+      final unknown = events.whereType<UnknownPeerIdentified>().single;
+
+      expect(resolver.peerIds, [link.b.localPeerId]);
+      expect(unknown.discoveryEndpointId, 'unknown-endpoint');
+      expect(events.whereType<KnownPeerConnected>(), isEmpty);
+      await _waitForState(unknown.connection, PeerConnectionState.disconnected);
+
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
+
+  test(
+    'UT-241 unknown probe stays open briefly for an auto-accept host handoff',
+    () async {
+      final resolver = _CountingKnownPeerResolver(result: false);
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          reconnectTimeoutMs: 1000,
+        ),
+      );
+      final localHost = link.a.createHostSession(HostConfig(autoAccept: true));
+      await localHost.startAdvertising();
+      final remoteHost = link.b.createHostSession(HostConfig(autoAccept: true));
+      await remoteHost.startAdvertising();
+      final discovery = await link.a.startDiscovery();
+      final events = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(events.add);
+
+      link.discoverA('auto-accept-handoff-endpoint');
+      await _waitFor(
+        () => events.whereType<UnknownPeerIdentified>().length == 1,
+      );
+      final unknown = events.whereType<UnknownPeerIdentified>().single;
+
+      expect(unknown.discoveryEndpointId, 'auto-accept-handoff-endpoint');
+      expect(events.whereType<KnownPeerConnected>(), isEmpty);
+      expect(unknown.connection.state, PeerConnectionState.ready);
+
+      // The application can explicitly release the probe once its handoff
+      // decision is complete; the bounded fallback timer is not needed here.
+      await link.a.releasePeerRetention(unknown.connection.peerId);
+      await _waitForState(unknown.connection, PeerConnectionState.disconnected);
+
+      await subscription.cancel();
+      await discovery.stop();
+      await localHost.close();
+      await remoteHost.close();
+      await link.close();
+    },
+  );
+
+  test(
+    'UT-185 resolver failure is conservative for an automatic probe',
+    () async {
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: _ThrowingKnownPeerResolver(),
+          reconnectTimeoutMs: 1000,
+        ),
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final discovery = await link.a.startDiscovery();
+      final events = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(events.add);
+
+      link.discoverA('resolver-failure-endpoint');
+      await _waitFor(
+        () => events.whereType<UnknownPeerIdentified>().length == 1,
+      );
+      final unknown = events.whereType<UnknownPeerIdentified>().single;
+
+      expect(unknown.discoveryEndpointId, 'resolver-failure-endpoint');
+      expect(events.whereType<KnownPeerConnected>(), isEmpty);
+      await _waitForState(unknown.connection, PeerConnectionState.disconnected);
+
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
+
+  test(
+    'UT-185 resolver timeout is conservative for an automatic probe',
+    () async {
+      final resolver = _SlowKnownPeerResolver();
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          knownPeerLookupTimeoutMs: 100,
+          reconnectTimeoutMs: 1000,
+        ),
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final discovery = await link.a.startDiscovery();
+      final events = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(events.add);
+
+      link.discoverA('resolver-timeout-endpoint');
+      await _waitFor(
+        () => events.whereType<UnknownPeerIdentified>().length == 1,
+        timeout: const Duration(seconds: 2),
+      );
+      final unknown = events.whereType<UnknownPeerIdentified>().single;
+
+      expect(unknown.discoveryEndpointId, 'resolver-timeout-endpoint');
+      expect(events.whereType<KnownPeerConnected>(), isEmpty);
+      resolver.complete();
+      await _waitForState(unknown.connection, PeerConnectionState.disconnected);
+
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
+
+  test(
+    'UT-249 resolver completion after candidate loss does not publish connected',
+    () async {
+      final resolver = _SlowKnownPeerResolver();
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          reconnectTimeoutMs: 1000,
+        ),
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final discovery = await link.a.startDiscovery();
+      final events = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(events.add);
+
+      link.discoverA('resolver-disconnect-endpoint');
+      await _waitFor(() => resolver.started);
+      link.suppressReconnects = true;
+
+      // The candidate can lose its physical transport while application-owned
+      // resolver work is still pending. Let the bounded reconnect probe expire
+      // so the candidate is terminal before the lookup completes.
+      link._aEvents.add(
+        const PlatformGattDisconnected('resolver-disconnect-endpoint'),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      resolver.complete();
+      await _waitFor(() => events.whereType<KnownPeerProbeFailed>().isNotEmpty);
+      expect(events.whereType<KnownPeerConnected>(), isEmpty);
+
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
 
   test('known peer can be rediscovered through a new endpoint', () async {
     final resolver = _CountingKnownPeerResolver();
@@ -996,51 +1285,53 @@ void main() {
   });
 
   test(
-      'UT-256 completed known-peer probe is reusable after terminal disconnect',
-      () async {
-    final resolver = _CountingKnownPeerResolver();
-    final link = await _RuntimeLink.create(
-      configA: RuntimeConfig(
-        trustMode: HandshakeTrustMode.tofu,
-        autoReconnect: false,
-        autoConnectKnownPeers: true,
-        knownPeerResolver: resolver,
-      ),
-    );
-    final host = link.b.createHostSession(HostConfig(autoAccept: true));
-    await host.startAdvertising();
-    final discovery = await link.a.startDiscovery();
-    final events = <RuntimeEvent>[];
-    final subscription = link.a.events.listen(events.add);
+    'UT-256 completed known-peer probe is reusable after terminal disconnect',
+    () async {
+      final resolver = _CountingKnownPeerResolver();
+      final link = await _RuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoReconnect: false,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+        ),
+      );
+      final host = link.b.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final discovery = await link.a.startDiscovery();
+      final events = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(events.add);
 
-    link.discoverA('reusable-endpoint');
-    await _waitFor(() => events.whereType<KnownPeerConnected>().length == 1);
-    final first = events.whereType<KnownPeerConnected>().single;
-    await link.a.releasePeerRetention(first.connection.peerId);
-    await _waitForState(first.connection, PeerConnectionState.disconnected);
+      link.discoverA('reusable-endpoint');
+      await _waitFor(() => events.whereType<KnownPeerConnected>().length == 1);
+      final first = events.whereType<KnownPeerConnected>().single;
+      await link.a.releasePeerRetention(first.connection.peerId);
+      await _waitForState(first.connection, PeerConnectionState.disconnected);
 
-    // A late duplicate native callback must not leave the endpoint's
-    // completed-probe suppression in an unrecoverable state.
-    link._aEvents.add(const PlatformGattDisconnected('reusable-endpoint'));
-    link.discoverA('reusable-endpoint');
-    await _waitFor(() => events.whereType<KnownPeerConnected>().length == 2);
-    expect(resolver.lookups, 2);
+      // A late duplicate native callback must not leave the endpoint's
+      // completed-probe suppression in an unrecoverable state.
+      link._aEvents.add(const PlatformGattDisconnected('reusable-endpoint'));
+      link.discoverA('reusable-endpoint');
+      await _waitFor(() => events.whereType<KnownPeerConnected>().length == 2);
+      expect(resolver.lookups, 2);
 
-    await subscription.cancel();
-    await discovery.stop();
-    await link.close();
-  });
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
 }
 
 GroupConfig _groupConfig() => GroupConfig(
-      applicationNamespace: const [1],
-      groupJoinToken: List<int>.filled(16, 2),
-      groupTrustMode: GroupTrustMode.openTofu,
-    );
+  applicationNamespace: const [1],
+  groupJoinToken: List<int>.filled(16, 2),
+  groupTrustMode: GroupTrustMode.openTofu,
+);
 
 Future<PeerConnection> _connectedPeer(ConnectionAttempt attempt) async {
-  final event = await attempt.events
-      .firstWhere((event) => event is ConnectionAttemptConnected);
+  final event = await attempt.events.firstWhere(
+    (event) => event is ConnectionAttemptConnected,
+  );
   return (event as ConnectionAttemptConnected).connection;
 }
 
@@ -1053,8 +1344,11 @@ Future<PeerConnection> _hostPeer(HostSession host) async {
   return peers.single;
 }
 
-Future<void> _waitForState(PeerConnection connection, PeerConnectionState state,
-    {Duration timeout = const Duration(seconds: 1)}) async {
+Future<void> _waitForState(
+  PeerConnection connection,
+  PeerConnectionState state, {
+  Duration timeout = const Duration(seconds: 1),
+}) async {
   final deadline = DateTime.now().add(timeout);
   while (connection.state != state && DateTime.now().isBefore(deadline)) {
     await Future<void>.delayed(const Duration(milliseconds: 10));
@@ -1062,8 +1356,10 @@ Future<void> _waitForState(PeerConnection connection, PeerConnectionState state,
   expect(connection.state, state);
 }
 
-Future<void> _waitFor(bool Function() condition,
-    {Duration timeout = const Duration(seconds: 1)}) async {
+Future<void> _waitFor(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 1),
+}) async {
   final deadline = DateTime.now().add(timeout);
   while (!condition() && DateTime.now().isBefore(deadline)) {
     await Future<void>.delayed(const Duration(milliseconds: 10));
@@ -1105,15 +1401,20 @@ class _RuntimeLink {
 
   void failNextAFragment() => _failNextAFragment = true;
 
-  static Future<_RuntimeLink> create(
-      {RuntimeConfig? configA,
-      RuntimeConfig? configB,
-      bool duplicateGattCallbacks = false,
-      Set<String> stalledAEndpoints = const <String>{},
-      bool rejectAConnectWhileNativeLinkOpen = false,
-      bool stallAReconnectHandshake = false}) async {
-    final link = _RuntimeLink._(duplicateGattCallbacks, stalledAEndpoints,
-        rejectAConnectWhileNativeLinkOpen, stallAReconnectHandshake);
+  static Future<_RuntimeLink> create({
+    RuntimeConfig? configA,
+    RuntimeConfig? configB,
+    bool duplicateGattCallbacks = false,
+    Set<String> stalledAEndpoints = const <String>{},
+    bool rejectAConnectWhileNativeLinkOpen = false,
+    bool stallAReconnectHandshake = false,
+  }) async {
+    final link = _RuntimeLink._(
+      duplicateGattCallbacks,
+      stalledAEndpoints,
+      rejectAConnectWhileNativeLinkOpen,
+      stallAReconnectHandshake,
+    );
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(link._aMethods, link._handleA);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -1138,9 +1439,12 @@ class _RuntimeLink {
     return link;
   }
 
-  _RuntimeLink._(this.duplicateGattCallbacks, Set<String> stalledAEndpoints,
-      this.rejectAConnectWhileNativeLinkOpen, this.stallAReconnectHandshake)
-      : stalledAEndpoints = Set.from(stalledAEndpoints);
+  _RuntimeLink._(
+    this.duplicateGattCallbacks,
+    Set<String> stalledAEndpoints,
+    this.rejectAConnectWhileNativeLinkOpen,
+    this.stallAReconnectHandshake,
+  ) : stalledAEndpoints = Set.from(stalledAEndpoints);
 
   Future<Object?> _handleA(MethodCall call) => _handle(call, true);
   Future<Object?> _handleB(MethodCall call) => _handle(call, false);
@@ -1156,8 +1460,9 @@ class _RuntimeLink {
       case 'connectGatt':
         if (fromA && rejectAConnectWhileNativeLinkOpen && _aNativeLinkOpen) {
           throw PlatformException(
-              code: 'ENDPOINT_BUSY',
-              message: 'GATT endpoint already has a client link');
+            code: 'ENDPOINT_BUSY',
+            message: 'GATT endpoint already has a client link',
+          );
         }
         if (fromA) _aNativeLinkOpen = true;
         final generation = ++_nextGeneration;
@@ -1180,8 +1485,13 @@ class _RuntimeLink {
           // Leave the native link open and report only the local connected
           // callback. This models a candidate RESUME that never receives a
           // peer response before the reconnect deadline.
-          ownEvents.add(PlatformGattConnected(linkEndpoint, 'central',
-              connectionGeneration: generation));
+          ownEvents.add(
+            PlatformGattConnected(
+              linkEndpoint,
+              'central',
+              connectionGeneration: generation,
+            ),
+          );
           return null;
         }
         final callbacks = duplicateGattCallbacks ? 2 : 1;
@@ -1193,10 +1503,20 @@ class _RuntimeLink {
             bGattCallbacks++;
             aGattCallbacks++;
           }
-          ownEvents.add(PlatformGattConnected(linkEndpoint, 'central',
-              connectionGeneration: generation));
-          peerEvents.add(PlatformGattConnected(linkEndpoint, 'peripheral',
-              connectionGeneration: generation));
+          ownEvents.add(
+            PlatformGattConnected(
+              linkEndpoint,
+              'central',
+              connectionGeneration: generation,
+            ),
+          );
+          peerEvents.add(
+            PlatformGattConnected(
+              linkEndpoint,
+              'peripheral',
+              connectionGeneration: generation,
+            ),
+          );
         }
         return null;
       case 'submitGattFragment':
@@ -1216,8 +1536,12 @@ class _RuntimeLink {
         } else {
           bCloseCalls++;
         }
-        peerEvents.add(PlatformGattDisconnected(endpoint ?? 'link',
-            connectionGeneration: requestedGeneration ?? generation));
+        peerEvents.add(
+          PlatformGattDisconnected(
+            endpoint ?? 'link',
+            connectionGeneration: requestedGeneration ?? generation,
+          ),
+        );
         return null;
       default:
         return null;

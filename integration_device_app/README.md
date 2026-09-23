@@ -45,6 +45,13 @@ flutter run --debug -d macos \
   --dart-define=LPC_TEST_PORT=8765
 ```
 
+Run only one macOS fixture at a time. Before starting a new deployment, check
+for an older `lpc_integration_device_app` process and its matching Flutter
+launch wrapper, and terminate that stale pair first. Also verify that only the
+intended process owns port `8765` with `lsof -nP -iTCP:8765 -sTCP:LISTEN`.
+Two macOS fixtures advertise the same LPC service and can produce duplicate
+endpoint candidates and reconnect flip-flopping for the same PeerId.
+
 The macOS control API is available directly at `http://127.0.0.1:8765`. For an
 iOS device, forward its control port with `iproxy 18766 8765 <udid>`; both
 fixtures then use the same HTTP commands and LPC automatically probes known
@@ -197,7 +204,10 @@ python3 tool/device_integration_runner.py \
 
 It sends 64-byte `reliableAcked` packets at 5 packets/second from each device,
 checks that both links remain ready, and requires every application-level ACK
-to arrive before reporting a pass.
+to arrive before reporting a pass. The runner also samples every selected link
+during the traffic phase and for a further 30 seconds after bounded traffic
+draining; any logical reconnect, disconnect, or transport oscillation fails the
+scenario even if the final snapshot is READY.
 
 For the staged large-message/backpressure run, use `IT-043`:
 

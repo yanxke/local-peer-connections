@@ -28,13 +28,17 @@ void main() {
     final subscription = link.a.events.listen(events.add);
 
     link.discoverA('one-first');
-    await _waitUntil(() => events.whereType<KnownPeerConnected>().length == 1,
-        description: 'first known peer connects');
+    await _waitUntil(
+      () => events.whereType<KnownPeerConnected>().length == 1,
+      description: 'first known peer connects',
+    );
     final first = events.whereType<KnownPeerConnected>().first;
 
     link.discoverA('two-first');
-    await _waitUntil(() => events.whereType<KnownPeerConnected>().length == 2,
-        description: 'second known peer connects');
+    await _waitUntil(
+      () => events.whereType<KnownPeerConnected>().length == 2,
+      description: 'second known peer connects',
+    );
     final second = events.whereType<KnownPeerConnected>().last;
     expect(second.connection.peerId, isNot(first.connection.peerId));
     expect(resolver.lookups, 2);
@@ -43,8 +47,10 @@ void main() {
     // A new platform endpoint for the same authenticated PeerId must therefore
     // perform a future resolver lookup instead of relying on endpoint identity.
     link.discoverA('one-second');
-    await _waitUntil(() => resolver.lookups == 3,
-        description: 'evicted known peer is looked up again');
+    await _waitUntil(
+      () => resolver.lookups == 3,
+      description: 'evicted known peer is looked up again',
+    );
     await Future<void>.delayed(Duration.zero);
     expect(events.whereType<KnownPeerConnected>(), hasLength(3));
     final rediscovered = events.whereType<KnownPeerConnected>().last;
@@ -57,11 +63,55 @@ void main() {
     await discovery.stop();
     await link.close();
   });
+
+  test(
+    'UT-258 negative resolver results are rechecked after relationship change',
+    () async {
+      final resolver = _MutableResolver(false);
+      final link = await _ThreeRuntimeLink.create(
+        configA: RuntimeConfig(
+          trustMode: HandshakeTrustMode.tofu,
+          autoConnectKnownPeers: true,
+          knownPeerResolver: resolver,
+          reconnectTimeoutMs: 1000,
+        ),
+      );
+      final host = link.one.createHostSession(HostConfig(autoAccept: true));
+      await host.startAdvertising();
+      final discovery = await link.a.startDiscovery();
+      final events = <RuntimeEvent>[];
+      final subscription = link.a.events.listen(events.add);
+
+      link.discoverA('negative-first');
+      await _waitUntil(
+        () => resolver.lookups == 1,
+        description: 'initial relationship lookup is negative',
+      );
+      expect(resolver.lookups, 1);
+
+      // The application relationship changes while the Runtime remains alive.
+      // A fresh endpoint for the same authenticated PeerId must consult the
+      // resolver again instead of reusing an indefinitely stale negative.
+      resolver.result = true;
+      link.discoverA('negative-second');
+      await _waitUntil(
+        () => events.whereType<KnownPeerConnected>().isNotEmpty,
+        description: 'newly accepted relationship is observed',
+      );
+      expect(resolver.lookups, 2);
+
+      await subscription.cancel();
+      await discovery.stop();
+      await link.close();
+    },
+  );
 }
 
-Future<void> _waitUntil(bool Function() condition,
-    {required String description,
-    Duration timeout = const Duration(seconds: 10)}) async {
+Future<void> _waitUntil(
+  bool Function() condition, {
+  required String description,
+  Duration timeout = const Duration(seconds: 10),
+}) async {
   final deadline = DateTime.now().add(timeout);
   while (!condition() && DateTime.now().isBefore(deadline)) {
     await Future<void>.delayed(const Duration(milliseconds: 10));
@@ -79,14 +129,29 @@ class _CountingResolver implements KnownPeerResolver {
   }
 }
 
+class _MutableResolver implements KnownPeerResolver {
+  _MutableResolver(this.result);
+
+  bool result;
+  int lookups = 0;
+
+  @override
+  Future<bool> isKnownPeer(PeerId peerId) async {
+    lookups++;
+    return result;
+  }
+}
+
 class _ThreeRuntimeLink {
   _ThreeRuntimeLink._();
 
   final MethodChannel _aMethods = const MethodChannel('runtime-cache-link-a');
-  final MethodChannel _oneMethods =
-      const MethodChannel('runtime-cache-link-one');
-  final MethodChannel _twoMethods =
-      const MethodChannel('runtime-cache-link-two');
+  final MethodChannel _oneMethods = const MethodChannel(
+    'runtime-cache-link-one',
+  );
+  final MethodChannel _twoMethods = const MethodChannel(
+    'runtime-cache-link-two',
+  );
   final StreamController<PlatformBleEvent> _aEvents =
       StreamController<PlatformBleEvent>.broadcast();
   final StreamController<PlatformBleEvent> _oneEvents =
@@ -149,7 +214,8 @@ class _ThreeRuntimeLink {
         return null;
       case 'submitGattFragment':
         remote.add(
-            PlatformGattFragment(endpoint, arguments['fragment'] as Uint8List));
+          PlatformGattFragment(endpoint, arguments['fragment'] as Uint8List),
+        );
         return 'submitted';
       case 'closeGattConnection':
         remote.add(PlatformGattDisconnected(endpoint));
@@ -171,7 +237,8 @@ class _ThreeRuntimeLink {
     switch (call.method) {
       case 'submitGattFragment':
         _aEvents.add(
-            PlatformGattFragment(endpoint, arguments['fragment'] as Uint8List));
+          PlatformGattFragment(endpoint, arguments['fragment'] as Uint8List),
+        );
         return 'submitted';
       case 'closeGattConnection':
         _aEvents.add(PlatformGattDisconnected(endpoint));

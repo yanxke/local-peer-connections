@@ -51,21 +51,29 @@ sealed class RuntimeEvent {
 
 class KnownPeerProbeStarted extends RuntimeEvent {
   const KnownPeerProbeStarted(
-      super.monotonicTimestampMs, this.discoveryEndpointId);
+    super.monotonicTimestampMs,
+    this.discoveryEndpointId,
+  );
   final String discoveryEndpointId;
 }
 
 /// Terminal outcome of a bounded automatic nearby-known-peer probe.
 class KnownPeerProbeFailed extends RuntimeEvent {
   const KnownPeerProbeFailed(
-      super.monotonicTimestampMs, this.discoveryEndpointId, this.error);
+    super.monotonicTimestampMs,
+    this.discoveryEndpointId,
+    this.error,
+  );
   final String discoveryEndpointId;
   final LpcException error;
 }
 
 class UnknownPeerIdentified extends RuntimeEvent {
-  const UnknownPeerIdentified(super.monotonicTimestampMs, this.connection,
-      {this.discoveryEndpointId});
+  const UnknownPeerIdentified(
+    super.monotonicTimestampMs,
+    this.connection, {
+    this.discoveryEndpointId,
+  });
 
   /// The authenticated connection used for this bounded automatic probe.
   /// It is emitted before the Runtime releases its negative known-peer probe
@@ -77,8 +85,11 @@ class UnknownPeerIdentified extends RuntimeEvent {
 }
 
 class KnownPeerConnected extends RuntimeEvent {
-  const KnownPeerConnected(super.monotonicTimestampMs, this.connection,
-      {this.discoveryEndpointId});
+  const KnownPeerConnected(
+    super.monotonicTimestampMs,
+    this.connection, {
+    this.discoveryEndpointId,
+  });
   final PeerConnection connection;
   final String? discoveryEndpointId;
 }
@@ -193,7 +204,9 @@ class ConnectionAttempt {
   Future<void> confirmPeerVerification(bool accepted) async {
     if (_terminal || _confirmVerification == null) {
       throw const LpcException(
-          LpcErrorCode.invalidState, 'no peer verification is pending');
+        LpcErrorCode.invalidState,
+        'no peer verification is pending',
+      );
     }
     final confirm = _confirmVerification!;
     _confirmVerification = null;
@@ -201,7 +214,10 @@ class ConnectionAttempt {
   }
 
   void _verificationRequired(
-      PeerId peerId, String sas, Future<void> Function(bool) confirm) {
+    PeerId peerId,
+    String sas,
+    Future<void> Function(bool) confirm,
+  ) {
     if (_terminal || _confirmVerification != null) return;
     _confirmVerification = confirm;
     _events.add(PeerVerificationRequired(peerId, sas));
@@ -210,7 +226,7 @@ class ConnectionAttempt {
 
 class PeerMessageReceived {
   PeerMessageReceived(List<int> value, this.deliveryMode)
-      : bytes = List.unmodifiable(value);
+    : bytes = List.unmodifiable(value);
   final List<int> bytes;
   final DeliveryMode deliveryMode;
 }
@@ -219,7 +235,7 @@ class PeerMessageReceived {
 /// per-channel latest-sequence filter.
 class PeerRealtimeDatagramReceived {
   PeerRealtimeDatagramReceived(this.channelId, this.senderTick, List<int> value)
-      : bytes = List.unmodifiable(value);
+    : bytes = List.unmodifiable(value);
   final int channelId, senderTick;
   final List<int> bytes;
 }
@@ -237,8 +253,10 @@ class PeerReconnecting extends PeerConnectionEvent {
 
 class PeerReconnected extends PeerConnectionEvent {
   PeerReconnected(
-      super.monotonicTimestampMs, List<int> sessionId, this.transport)
-      : sessionId = List.unmodifiable(sessionId);
+    super.monotonicTimestampMs,
+    List<int> sessionId,
+    this.transport,
+  ) : sessionId = List.unmodifiable(sessionId);
   final List<int> sessionId;
   final TransportType transport;
 }
@@ -250,15 +268,15 @@ class PeerDisconnected extends PeerConnectionEvent {
 /// Public authenticated point-to-point connection. Group routing remains the
 /// separate Section 43 owner; this class exposes the direct Section 36 path.
 class PeerConnection {
-  PeerConnection._(this._core,
-      {required this.securityLevel,
-      List<int> remoteApplicationMetadata = const [],
-      void Function(PeerConnection)? onDisconnected,
-      void Function(PeerConnection)? onReconnecting})
-      : remoteApplicationMetadata =
-            List.unmodifiable(remoteApplicationMetadata),
-        _onDisconnected = onDisconnected,
-        _onReconnecting = onReconnecting {
+  PeerConnection._(
+    this._core, {
+    required this.securityLevel,
+    List<int> remoteApplicationMetadata = const [],
+    void Function(PeerConnection)? onDisconnected,
+    void Function(PeerConnection)? onReconnecting,
+  }) : remoteApplicationMetadata = List.unmodifiable(remoteApplicationMetadata),
+       _onDisconnected = onDisconnected,
+       _onReconnecting = onReconnecting {
     _frames = _core.receivedFrames.listen(_onFrame);
     _connectionTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
       unawaited(_core.pollKeepalive());
@@ -272,8 +290,13 @@ class PeerConnection {
       }
       if (_core.state == PeerConnectionState.ready && _reconnectNotified) {
         _reconnectNotified = false;
-        _events.add(PeerReconnected(_core.monotonicNowMs, _core.sessionId,
-            _core.backend.transportType));
+        _events.add(
+          PeerReconnected(
+            _core.monotonicNowMs,
+            _core.sessionId,
+            _core.backend.transportType,
+          ),
+        );
       }
     });
   }
@@ -290,9 +313,9 @@ class PeerConnection {
       <PeerMessageReceived>[];
   late final StreamController<PeerMessageReceived> _messages =
       StreamController<PeerMessageReceived>.broadcast(
-    sync: true,
-    onListen: _flushMessagesBeforeListener,
-  );
+        sync: true,
+        onListen: _flushMessagesBeforeListener,
+      );
   final StreamController<PeerRealtimeDatagramReceived> _realtimeMessages =
       StreamController<PeerRealtimeDatagramReceived>.broadcast(sync: true);
   final StreamController<PeerConnectionEvent> _events =
@@ -310,50 +333,65 @@ class PeerConnection {
 
   /// Negotiated link MTU for transports that expose one (currently GATT).
   int? get negotiatedMtu => switch (_core.backend) {
-        GattBackendConnection connection => connection.negotiatedMtu,
-        _ => null,
-      };
+    GattBackendConnection connection => connection.negotiatedMtu,
+    _ => null,
+  };
   Stream<PeerMessageReceived> get messages => _messages.stream;
   Stream<PeerRealtimeDatagramReceived> get realtimeMessages =>
       _realtimeMessages.stream;
   Stream<PeerConnectionEvent> get events => _events.stream;
   Stream<LpcFrame> get groupFrames => _groupFrames.stream;
-  SendHandle send(List<int> bytes,
-      {SendOptions options = const SendOptions()}) {
+  SendHandle send(
+    List<int> bytes, {
+    SendOptions options = const SendOptions(),
+  }) {
     if (_disconnected || _core.state != PeerConnectionState.ready) {
       throw const LpcException(LpcErrorCode.invalidState);
     }
     if (options.deliveryMode == DeliveryMode.realtimeLatest) {
       throw const LpcException(
-          LpcErrorCode.invalidState, 'use sendRealtime for REALTIME_LATEST');
+        LpcErrorCode.invalidState,
+        'use sendRealtime for REALTIME_LATEST',
+      );
     }
     final allocator = _core.messageIdAllocator;
     if (allocator == null) {
       throw const LpcException(
-          LpcErrorCode.invalidState, 'missing MessageId allocator');
+        LpcErrorCode.invalidState,
+        'missing MessageId allocator',
+      );
     }
     return _core.submitReliableDataWithHandle(
-        bytes: bytes,
-        deliveryMode: options.deliveryMode,
-        priority: options.priority,
-        messageId: allocator.allocate(),
-        nowMs: _core.monotonicNowMs);
+      bytes: bytes,
+      deliveryMode: options.deliveryMode,
+      priority: options.priority,
+      messageId: allocator.allocate(),
+      nowMs: _core.monotonicNowMs,
+    );
   }
 
-  RealtimeSendHandle sendRealtime(int channelId, List<int> bytes,
-      {RealtimeOptions options = const RealtimeOptions()}) {
+  RealtimeSendHandle sendRealtime(
+    int channelId,
+    List<int> bytes, {
+    RealtimeOptions options = const RealtimeOptions(),
+  }) {
     if (_disconnected || options.expiryMs < 1) {
       throw const LpcException(LpcErrorCode.invalidState);
     }
     final datagram = _core.allocateRealtimeDatagram(
-        channelId: channelId, senderTick: options.senderTick, bytes: bytes);
+      channelId: channelId,
+      senderTick: options.senderTick,
+      bytes: bytes,
+    );
     final controller = RealtimeSendHandleController.queued(
-        onCancel: () => _queuedRealtime.remove(channelId));
+      onCancel: () => _queuedRealtime.remove(channelId),
+    );
     final previous = _queuedRealtime[channelId];
     _queuedRealtime[channelId] = _QueuedRealtime(
-        datagram: datagram,
-        expiresAtMs: _core.monotonicNowMs + options.expiryMs,
-        controller: controller);
+      datagram: datagram,
+      expiresAtMs: _core.monotonicNowMs + options.expiryMs,
+      controller: controller,
+    );
     previous?.controller.complete(SendState.superseded);
     unawaited(_pollRealtimeQueue());
     return controller.handle;
@@ -383,6 +421,27 @@ class PeerConnection {
     _core.transportLost();
   }
 
+  /// Publishes the reconnect completion at the same point the runtime commits
+  /// a RESUME generation.  Normally the 50 ms lifecycle timer observes this
+  /// transition, but a crossed central/peripheral handoff can commit READY
+  /// while that timer is busy processing the competing candidate.  In that
+  /// case the core state is READY but upper layers remain stuck on their last
+  /// RECONNECTING snapshot.  The runtime calls this after [completeResume]
+  /// commits state; the flag makes the normal timer path and this explicit
+  /// path mutually exclusive.
+  void _resumeCommitted() {
+    if (_disconnected || _core.state != PeerConnectionState.ready) return;
+    if (!_reconnectNotified) return;
+    _reconnectNotified = false;
+    _events.add(
+      PeerReconnected(
+        _core.monotonicNowMs,
+        _core.sessionId,
+        _core.backend.transportType,
+      ),
+    );
+  }
+
   void _onFrame(LpcFrame frame) {
     if (frame.type == FrameType.groupReliable ||
         frame.type == FrameType.groupRealtimeDatagram ||
@@ -404,8 +463,13 @@ class PeerConnection {
     if (frame.type == FrameType.realtimeDatagram) {
       final datagram = _core.receiveRealtime(frame);
       if (datagram != null) {
-        _realtimeMessages.add(PeerRealtimeDatagramReceived(
-            datagram.channelId, datagram.senderTick, datagram.bytes));
+        _realtimeMessages.add(
+          PeerRealtimeDatagramReceived(
+            datagram.channelId,
+            datagram.senderTick,
+            datagram.bytes,
+          ),
+        );
       }
       return;
     }
@@ -415,8 +479,10 @@ class PeerConnection {
         final result = await _core.receiveDataFrame(frame);
         final delivered = result.delivered;
         if (delivered != null) {
-          final message =
-              PeerMessageReceived(delivered.bytes, delivered.deliveryMode);
+          final message = PeerMessageReceived(
+            delivered.bytes,
+            delivered.deliveryMode,
+          );
           // HostSession/GroupSession emits its connected event only after
           // runtime ownership and duplicate-link arbitration complete. A
           // peer can therefore deliver the first application frame before
@@ -432,7 +498,8 @@ class PeerConnection {
       } on Object catch (error) {
         // The core has already applied its terminal malformed-frame path.
         print(
-            'inbound data frame failed peer=${_core.remotePeerId} error=$error');
+          'inbound data frame failed peer=${_core.remotePeerId} error=$error',
+        );
       }
     }());
   }
@@ -464,9 +531,10 @@ class PeerConnection {
     try {
       final result = await _core.submitRealtime(queued.datagram);
       queued.controller.complete(
-          result == TransportWriteState.submittedToPlatform
-              ? SendState.sentToTransport
-              : SendState.failed);
+        result == TransportWriteState.submittedToPlatform
+            ? SendState.sentToTransport
+            : SendState.failed,
+      );
     } on Object {
       queued.controller.complete(SendState.failed);
     } finally {
@@ -477,10 +545,11 @@ class PeerConnection {
 }
 
 class _QueuedRealtime {
-  const _QueuedRealtime(
-      {required this.datagram,
-      required this.expiresAtMs,
-      required this.controller});
+  const _QueuedRealtime({
+    required this.datagram,
+    required this.expiresAtMs,
+    required this.controller,
+  });
   final RealtimeDatagram datagram;
   final int expiresAtMs;
   final RealtimeSendHandleController controller;
@@ -495,10 +564,10 @@ class HostSession {
     required Future<void> Function() stopAdvertising,
     required Future<void> Function(HostSession, PeerConnection) releasePeer,
     required void Function(HostSession host) onClosed,
-  })  : _startAdvertising = startAdvertising,
-        _stopAdvertising = stopAdvertising,
-        _releasePeer = releasePeer,
-        _onClosed = onClosed;
+  }) : _startAdvertising = startAdvertising,
+       _stopAdvertising = stopAdvertising,
+       _releasePeer = releasePeer,
+       _onClosed = onClosed;
 
   final HostConfig config;
   final Future<void> Function() _startAdvertising;
@@ -516,11 +585,15 @@ class HostSession {
   bool get isAdvertising => _advertising;
   bool get isClosed => _closed;
   Stream<HostSessionEvent> get events => _events.stream;
-  List<PeerConnection> peers() => List.unmodifiable(_peers.values.toList()
-    ..sort((a, b) => _comparePeerIdBytes(a.peerId, b.peerId)));
+  List<PeerConnection> peers() => List.unmodifiable(
+    _peers.values.toList()
+      ..sort((a, b) => _comparePeerIdBytes(a.peerId, b.peerId)),
+  );
 
-  void _peerConnected(PeerConnection connection,
-      {String? discoveryEndpointId}) {
+  void _peerConnected(
+    PeerConnection connection, {
+    String? discoveryEndpointId,
+  }) {
     if (_closed) {
       unawaited(connection.disconnect());
       return;
@@ -532,12 +605,16 @@ class HostSession {
         _peers.remove(connection.peerId);
       }
     });
-    _events.add(HostPeerConnected(connection,
-        discoveryEndpointId: discoveryEndpointId));
+    _events.add(
+      HostPeerConnected(connection, discoveryEndpointId: discoveryEndpointId),
+    );
   }
 
   void _peerVerificationRequired(
-      ConnectionAttempt attempt, PeerId peerId, String sas) {
+    ConnectionAttempt attempt,
+    PeerId peerId,
+    String sas,
+  ) {
     if (_closed) {
       unawaited(attempt.confirmPeerVerification(false));
       return;
@@ -560,15 +637,20 @@ class HostSession {
     final attempt = _pendingVerifications.remove(peerId);
     if (attempt == null) {
       throw const LpcException(
-          LpcErrorCode.invalidState, 'no peer verification is pending');
+        LpcErrorCode.invalidState,
+        'no peer verification is pending',
+      );
     }
     await attempt.confirmPeerVerification(accepted);
   }
 
   /// Sends directly to one authenticated peer admitted by this explicit-role
   /// host. GroupSession routing is intentionally not used by this API.
-  SendHandle send(PeerId peerId, List<int> bytes,
-      {SendOptions options = const SendOptions()}) {
+  SendHandle send(
+    PeerId peerId,
+    List<int> bytes, {
+    SendOptions options = const SendOptions(),
+  }) {
     if (_closed) throw const LpcException(LpcErrorCode.invalidState);
     final peer = _peers[peerId];
     if (peer == null) {
@@ -577,12 +659,14 @@ class HostSession {
     return peer.send(bytes, options: options);
   }
 
-  BroadcastHandle broadcast(List<int> bytes,
-      {SendOptions options = const SendOptions()}) {
+  BroadcastHandle broadcast(
+    List<int> bytes, {
+    SendOptions options = const SendOptions(),
+  }) {
     if (_closed) throw const LpcException(LpcErrorCode.invalidState);
     return BroadcastHandle({
       for (final peer in peers())
-        peer.peerId: peer.send(bytes, options: options)
+        peer.peerId: peer.send(bytes, options: options),
     });
   }
 
@@ -639,14 +723,14 @@ class DiscoveredEndpoint {
 /// Section 33.3 discovery lifecycle. Scanning is owned separately from any
 /// PeerConnection that may have been created from an endpoint.
 class DiscoverySession {
-  DiscoverySession(
-      {Future<void> Function()? stopPlatformScan,
-      Future<void> Function()? onStopped,
-      DateTime Function()? now,
-      this.endpointLostAfter = const Duration(seconds: 5)})
-      : _stopPlatformScan = stopPlatformScan ?? _noOp,
-        _onStopped = onStopped ?? _noOp,
-        _now = now ?? DateTime.now {
+  DiscoverySession({
+    Future<void> Function()? stopPlatformScan,
+    Future<void> Function()? onStopped,
+    DateTime Function()? now,
+    this.endpointLostAfter = const Duration(seconds: 5),
+  }) : _stopPlatformScan = stopPlatformScan ?? _noOp,
+       _onStopped = onStopped ?? _noOp,
+       _now = now ?? DateTime.now {
     if (endpointLostAfter <= Duration.zero) {
       throw ArgumentError.value(endpointLostAfter, 'endpointLostAfter');
     }
@@ -727,7 +811,9 @@ LpcException _asLpcError(Object error) => error is LpcException
     : LpcException(LpcErrorCode.platformError, error.toString());
 
 KnownPeerPolicy? _knownPeerPolicyFor(
-    RuntimeConfig config, HandshakeTrustMode trustMode) {
+  RuntimeConfig config,
+  HandshakeTrustMode trustMode,
+) {
   if (trustMode != HandshakeTrustMode.knownPeer) return null;
   final peer = config.expectedPeerId;
   return peer != null
@@ -736,22 +822,32 @@ KnownPeerPolicy? _knownPeerPolicyFor(
 }
 
 void _validateTrustCredentialsFor(
-    RuntimeConfig config, HandshakeTrustMode trustMode) {
+  RuntimeConfig config,
+  HandshakeTrustMode trustMode,
+) {
   if (trustMode == HandshakeTrustMode.psk32 && config.psk32?.length != 32) {
     throw const LpcException(
-        LpcErrorCode.invalidState, 'PSK_32 requires a 32-byte psk32');
+      LpcErrorCode.invalidState,
+      'PSK_32 requires a 32-byte psk32',
+    );
   }
   if (trustMode == HandshakeTrustMode.knownPeer &&
       config.expectedPeerId == null &&
       config.allowedPeerIds.isEmpty) {
     throw const LpcException(
-        LpcErrorCode.invalidState, 'KNOWN_PEER requires a peer policy');
+      LpcErrorCode.invalidState,
+      'KNOWN_PEER requires a peer policy',
+    );
   }
 }
 
 class _GattReconnect {
-  _GattReconnect(this.peer, this.endpointId, this.schedule,
-      {this.discoveryCandidate = false});
+  _GattReconnect(
+    this.peer,
+    this.endpointId,
+    this.schedule, {
+    this.discoveryCandidate = false,
+  });
   final PeerConnection peer;
   final String endpointId;
   final ReconnectSchedule schedule;
@@ -793,9 +889,31 @@ HandshakeTrustMode _resumeTrustMode(SecurityLevel securityLevel) =>
 /// Physical-link facts can change after RESUME.  Only a local GATT central
 /// owns a platform endpoint that may be passed back to `connectGatt`.
 class _GattLink {
-  _GattLink(this.endpointId, this.localCanInitiateReconnect);
+  _GattLink(
+    this.endpointId,
+    this.localCanInitiateReconnect, {
+    this.connectionGeneration,
+    this.candidateStartedAtMs,
+    this.readyAtMs,
+  });
   String endpointId;
   bool localCanInitiateReconnect;
+  int? connectionGeneration;
+  int? candidateStartedAtMs;
+  int? readyAtMs;
+}
+
+/// Returns whether a native disconnect can belong to the currently owned
+/// physical link. Platform backends that do not expose generations retain the
+/// wildcard behavior used by [PlatformGattConnectionBinding].
+@visibleForTesting
+bool gattConnectionGenerationMatches(
+  int? eventGeneration,
+  int? ownerGeneration,
+) {
+  return ownerGeneration == null ||
+      eventGeneration == null ||
+      eventGeneration == ownerGeneration;
 }
 
 /// The only GroupConfig information that must be selected before HELLO on a
@@ -803,16 +921,16 @@ class _GattLink {
 /// are deliberately excluded: they are authenticated GROUP_INFO data.
 class _AutoGroupHandshakeProfile {
   _AutoGroupHandshakeProfile(GroupConfig config)
-      : trustMode = switch (config.groupTrustMode) {
-          GroupTrustMode.openTofu => HandshakeTrustMode.tofu,
-          GroupTrustMode.groupPsk32 => HandshakeTrustMode.psk32,
-          GroupTrustMode.pairwiseSas => HandshakeTrustMode.sas,
-          GroupTrustMode.knownPeers => HandshakeTrustMode.knownPeer,
-        },
-        psk32 = config.groupPsk32 == null
-            ? null
-            : List<int>.unmodifiable(config.groupPsk32!),
-        allowedPeerIds = Set<PeerId>.unmodifiable(config.allowedPeerIds);
+    : trustMode = switch (config.groupTrustMode) {
+        GroupTrustMode.openTofu => HandshakeTrustMode.tofu,
+        GroupTrustMode.groupPsk32 => HandshakeTrustMode.psk32,
+        GroupTrustMode.pairwiseSas => HandshakeTrustMode.sas,
+        GroupTrustMode.knownPeers => HandshakeTrustMode.knownPeer,
+      },
+      psk32 = config.groupPsk32 == null
+          ? null
+          : List<int>.unmodifiable(config.groupPsk32!),
+      allowedPeerIds = Set<PeerId>.unmodifiable(config.allowedPeerIds);
 
   final HandshakeTrustMode trustMode;
   final List<int>? psk32;
@@ -820,8 +938,8 @@ class _AutoGroupHandshakeProfile {
 
   KnownPeerPolicy? get knownPeerPolicy =>
       trustMode == HandshakeTrustMode.knownPeer
-          ? AllowlistedPeers(allowedPeerIds)
-          : null;
+      ? AllowlistedPeers(allowedPeerIds)
+      : null;
 
   bool matches(_AutoGroupHandshakeProfile other) {
     if (trustMode != other.trustMode) return false;
@@ -844,10 +962,14 @@ bool _sameBytes(List<int>? a, List<int>? b) {
 /// the platform backend; this portable core intentionally owns no BLE types.
 class NearbyRuntime {
   NearbyRuntime._(
-      this.config, this.localPeerId, this._platformBleBackend, this._identity)
-      : _state = RuntimeState.ready {
-    _platformSubscription =
-        _platformBleBackend?.events.listen(_onPlatformEvent);
+    this.config,
+    this.localPeerId,
+    this._platformBleBackend,
+    this._identity,
+  ) : _state = RuntimeState.ready {
+    _platformSubscription = _platformBleBackend?.events.listen(
+      _onPlatformEvent,
+    );
   }
   final RuntimeConfig config;
   final PeerId localPeerId;
@@ -873,13 +995,17 @@ class NearbyRuntime {
   final Set<String> _nativeCloseRequestedEndpoints = <String>{};
   static const _maxNativeCloseGuards = 256;
 
-  void _rememberNativeCloseRequested(String endpointId,
-      {int? connectionGeneration}) {
-    _nativeCloseRequestedEndpoints
-        .add('$endpointId:${connectionGeneration ?? 'unknown'}');
+  void _rememberNativeCloseRequested(
+    String endpointId, {
+    int? connectionGeneration,
+  }) {
+    _nativeCloseRequestedEndpoints.add(
+      '$endpointId:${connectionGeneration ?? 'unknown'}',
+    );
     while (_nativeCloseRequestedEndpoints.length > _maxNativeCloseGuards) {
-      _nativeCloseRequestedEndpoints
-          .remove(_nativeCloseRequestedEndpoints.first);
+      _nativeCloseRequestedEndpoints.remove(
+        _nativeCloseRequestedEndpoints.first,
+      );
     }
   }
 
@@ -888,6 +1014,19 @@ class NearbyRuntime {
   // per endpoint so a duplicate platform event cannot replace the first
   // binding with a competing logical session.
   final Set<String> _startingGattEndpoints = <String>{};
+  // Keep the platform-ready metadata with the Dart binding. Peripheral-side
+  // endpoint IDs are opaque (for example, `server-1` on CoreBluetooth), so a
+  // later fragment is otherwise impossible to reattach to a fresh handshake
+  // if the old handshake task was lost during a runtime/app lifecycle race.
+  final Map<String, PlatformGattConnected> _gattConnectedEvents =
+      <String, PlatformGattConnected>{};
+  // Discovery advertisements identify only a transport candidate. Preserve
+  // when each physical candidate began so duplicate arbitration can
+  // distinguish an overlapping race from a later speculative probe. This is
+  // local lifecycle bookkeeping; it is never used as PeerId identity or sent
+  // on the wire.
+  final Map<String, int> _gattCandidateStartedAtMs = <String, int>{};
+  final Set<String> _recoveringOrphanedGattEndpoints = <String>{};
   final Map<String, _GattReconnect> _gattReconnects = {};
   final Map<String, PeerConnection> _gattPeersByEndpoint = {};
   final Map<PeerConnection, Timer> _gattReconnectExpiryTimers = {};
@@ -909,9 +1048,25 @@ class NearbyRuntime {
       <PeerConnection, ReconnectSchedule>{};
   final Map<PeerConnection, List<int>> _connectionRanks = {};
   final Set<PeerConnection> _peers = <PeerConnection>{};
+  // Native GATT callbacks expose a platform-only physical correlation key so
+  // an authenticated inbound server link can suppress a redundant central
+  // probe for that same device. This is not protocol identity: the map is
+  // populated only after HELLO/AUTH and never replaces PeerId arbitration.
+  final Map<String, PeerConnection> _authenticatedPeerByPhysicalEndpoint =
+      <String, PeerConnection>{};
   final Set<PeerId> _directRetainedPeers = <PeerId>{};
   final Set<PeerId> _knownRetainedPeers = <PeerId>{};
   final Set<String> _automaticProbeEndpoints = <String>{};
+  // Several Android BLE stacks cannot start two LE link procedures from one
+  // process concurrently. They report a successful connectGatt invocation
+  // for both requests, but the controller leaves one request pending with
+  // "cannot start new connection" until the first link is torn down. Keep
+  // only the physical link-establishment portion serialized; once the native
+  // GATT-connected callback arrives, the next unrelated probe may start while
+  // both protocol handshakes proceed independently. This is a platform
+  // lifecycle safeguard, not a reconnect direction or PeerId ownership
+  // decision.
+  String? _automaticGattConnectInFlight;
   // An endpoint becomes comparable to an existing logical owner only after
   // its HELLO/AUTH exchange has authenticated the remote PeerId. Keep this
   // short-lived classification so duplicate-link arbitration can suppress a
@@ -919,6 +1074,16 @@ class NearbyRuntime {
   // DiscoveryEndpointId values are ephemeral and are never used as identity.
   final Map<String, PeerId> _authenticatedAutomaticProbePeers =
       <String, PeerId>{};
+  // A reconnect candidate must not be assigned to an arbitrary logical peer
+  // just because its endpoint was observed while several peers are
+  // reconnecting.  Keep the most recent authenticated association as a
+  // scheduling hint only; HELLO/AUTH remains authoritative and the hint is
+  // never used as PeerId identity or trust.  This is important on macOS and
+  // Android, where a scan can report several nearby GATT endpoints while one
+  // app is restarting and the platform may deliver them in either order.
+  final Map<String, PeerId> _lastAuthenticatedPeerByEndpoint =
+      <String, PeerId>{};
+  static const _maxLastAuthenticatedEndpointHints = 128;
   final Set<String> _pendingKnownPeerProbes = <String>{};
   final Map<String, Timer> _knownPeerProbeTimers = <String, Timer>{};
   // A winning READY owner can race a probe started from another transient
@@ -928,10 +1093,25 @@ class NearbyRuntime {
   // delivered the winning inbound connection.
   final Map<String, PeerConnection> _knownProbeSuppressedByOwner =
       <String, PeerConnection>{};
+  // A READY duplicate can win after the previous owner has already begun its
+  // synchronous disconnect callback.  Keep the displaced discovery endpoint
+  // out of the automatic-probe scheduler until the new owner is published;
+  // otherwise the callback/scan ordering opens a third link to the same peer
+  // and can make the two valid links alternate indefinitely on mobile BLE.
+  final Set<String> _duplicateClosingEndpoints = <String>{};
   // A failed native probe can be reported while the endpoint is still
   // advertising. Do not start another GATT allocation on every advertisement
   // (Android vendor stacks can otherwise exhaust their native TCB table).
   final Map<String, int> _knownPeerProbeNotBeforeMs = <String, int>{};
+  // After a candidate RESUME is rejected because the remote process has no
+  // prior logical session, hand the same endpoint to one fresh normal probe.
+  // Without this short-lived guard, the rejection removes the reconnect record
+  // while the next advertisement can immediately create another RESUME
+  // candidate, producing a candidate/reject/close loop on mobile BLE.
+  final Set<String> _freshHandshakeHandoffEndpoints = <String>{};
+  final Map<String, PeerId> _freshHandshakeHandoffPeers = <String, PeerId>{};
+  final Map<String, Timer> _freshHandshakeHandoffTimers = <String, Timer>{};
+  static const _freshHandshakeHandoffTimeout = Duration(seconds: 10);
   static const _knownPeerProbeFailureBackoffMs = 5000;
   // BLE scan callbacks are intentionally frequent. Keep the full endpoint
   // event stream for discovery semantics, but sample its diagnostic line so
@@ -952,8 +1132,9 @@ class NearbyRuntime {
   final StreamController<RuntimeEvent> _events =
       StreamController<RuntimeEvent>.broadcast(sync: true);
   late String? _discoveryDisplayName = config.discoveryDisplayName;
-  late List<int> _applicationMetadata =
-      List<int>.unmodifiable(config.applicationMetadata);
+  late List<int> _applicationMetadata = List<int>.unmodifiable(
+    config.applicationMetadata,
+  );
   RuntimeState _state;
   final List<GroupSession> _groups = [];
   final Map<GroupSession, _RuntimeGroupRouteTransport> _groupRouting = {};
@@ -981,26 +1162,31 @@ class NearbyRuntime {
     }
   }
 
-  static Future<NearbyRuntime> create(
-      {RuntimeConfig config = const RuntimeConfig(),
-      PeerId? localPeerId,
-      IdentityStore? identityStore,
-      PlatformBleBackend? platformBleBackend}) async {
+  static Future<NearbyRuntime> create({
+    RuntimeConfig config = const RuntimeConfig(),
+    PeerId? localPeerId,
+    IdentityStore? identityStore,
+    PlatformBleBackend? platformBleBackend,
+  }) async {
     config.validate();
     if (localPeerId != null && identityStore != null) {
       throw ArgumentError('provide localPeerId or identityStore, not both');
     }
     LocalIdentity? identity;
     if (identityStore != null || localPeerId == null) {
-      identity = await LocalIdentity.load(identityStore ??
-          (platformBleBackend == null
-              ? InMemoryIdentityStore()
-              : PlatformIdentityStore()));
+      identity = await LocalIdentity.load(
+        identityStore ??
+            (platformBleBackend == null
+                ? InMemoryIdentityStore()
+                : PlatformIdentityStore()),
+      );
     }
     final peer = localPeerId ?? identity!.peerId;
     if (identity != null && peer != identity.peerId) {
-      throw const LpcException(LpcErrorCode.invalidState,
-          'localPeerId does not match the persistent identity');
+      throw const LpcException(
+        LpcErrorCode.invalidState,
+        'localPeerId does not match the persistent identity',
+      );
     }
     return NearbyRuntime._(config, peer, platformBleBackend, identity);
   }
@@ -1014,7 +1200,8 @@ class NearbyRuntime {
     final existing = _attempts[discoveryEndpointId];
     if (existing != null) {
       _log(
-          'connect adopt endpoint=$discoveryEndpointId automatic=${_automaticProbeEndpoints.contains(discoveryEndpointId)}');
+        'connect adopt endpoint=$discoveryEndpointId automatic=${_automaticProbeEndpoints.contains(discoveryEndpointId)}',
+      );
       if (_automaticProbeEndpoints.remove(discoveryEndpointId)) {
         _knownPeerProbeTimers.remove(discoveryEndpointId)?.cancel();
         _startNextKnownPeerProbe();
@@ -1026,7 +1213,8 @@ class NearbyRuntime {
         (existingPeer.state == PeerConnectionState.ready ||
             existingPeer.state == PeerConnectionState.reconnecting)) {
       _log(
-          'connect reuse endpoint=$discoveryEndpointId peer=${existingPeer.peerId} state=${existingPeer.state.name}');
+        'connect reuse endpoint=$discoveryEndpointId peer=${existingPeer.peerId} state=${existingPeer.state.name}',
+      );
       // An authenticated but not-yet-known probe is kept briefly when an
       // inbound host handshake is racing it. A user Connect arriving during
       // that handoff promotes the same logical peer to direct ownership.
@@ -1047,66 +1235,102 @@ class NearbyRuntime {
         }
       });
       if (existingPeer.state == PeerConnectionState.ready) {
-        unawaited(Future<void>.microtask(() {
-          unawaited(subscription.cancel());
-          attempt._connected(existingPeer);
-        }));
+        unawaited(
+          Future<void>.microtask(() {
+            unawaited(subscription.cancel());
+            attempt._connected(existingPeer);
+          }),
+        );
       }
       return attempt;
     }
     return _connect(discoveryEndpointId, automaticProbe: false);
   }
 
-  ConnectionAttempt _connect(String discoveryEndpointId,
-      {required bool automaticProbe}) {
+  ConnectionAttempt _connect(
+    String discoveryEndpointId, {
+    required bool automaticProbe,
+  }) {
     if (_state != RuntimeState.ready)
       throw const LpcException(LpcErrorCode.invalidState);
     if (!config.enableGatt) {
       throw const LpcException(
-          LpcErrorCode.unsupportedCapability, 'GATT is disabled');
+        LpcErrorCode.unsupportedCapability,
+        'GATT is disabled',
+      );
     }
     final backend = _platformBleBackend;
     final identity = _identity;
     if (backend == null || identity == null) {
-      throw const LpcException(LpcErrorCode.unsupportedCapability,
-          'GATT connect requires a platform backend and persistent identity');
+      throw const LpcException(
+        LpcErrorCode.unsupportedCapability,
+        'GATT connect requires a platform backend and persistent identity',
+      );
     }
     late final ConnectionAttempt attempt;
     attempt = ConnectionAttempt._(discoveryEndpointId, () async {
       _connectionAttemptTimers.remove(discoveryEndpointId)?.cancel();
       _attempts.remove(discoveryEndpointId);
+      // Cancellation ends this physical candidate even if the native backend
+      // omits its disconnect callback. Do not let a later probe inherit this
+      // attempt's start time and be mistaken for an overlapping duplicate.
+      _gattCandidateStartedAtMs.remove(discoveryEndpointId);
       await backend.closeGattConnection(discoveryEndpointId);
     });
     if (_attempts.containsKey(discoveryEndpointId)) {
       throw const LpcException(
-          LpcErrorCode.invalidState, 'connection attempt already active');
+        LpcErrorCode.invalidState,
+        'connection attempt already active',
+      );
     }
     _attempts[discoveryEndpointId] = attempt;
+    _gattCandidateStartedAtMs.putIfAbsent(
+      discoveryEndpointId,
+      () => _monotonicMs,
+    );
+    // Automatic known-peer probes share the bounded reconnect budget. On
+    // Android, service discovery and the first encrypted notifications can
+    // arrive after the low-level 10-second explicit-request timeout during
+    // process restart. If the two timers disagree, a valid late READY is
+    // discarded and the same endpoint is needlessly probed again. Keep the
+    // public explicit-connect timeout unchanged, but let automatic recovery
+    // use the configured reconnect window.
+    final requestTimeoutMs = automaticProbe
+        ? config.reconnectTimeoutMs
+        : _connectionRequestTimeoutMs;
     _connectionAttemptTimers[discoveryEndpointId] = Timer(
-      const Duration(milliseconds: _connectionRequestTimeoutMs),
+      Duration(milliseconds: requestTimeoutMs),
       () {
         if (_attempts[discoveryEndpointId] != attempt) return;
         _connectionAttemptTimers.remove(discoveryEndpointId);
         _attempts.remove(discoveryEndpointId);
-        attempt._failed(const LpcException(
-          LpcErrorCode.connectionTimeout,
-          'connection request timed out',
-        ));
+        // The timeout owns this attempt, so its candidate timestamp is no
+        // longer meaningful even when native GATT teardown is asynchronous.
+        _gattCandidateStartedAtMs.remove(discoveryEndpointId);
+        attempt._failed(
+          const LpcException(
+            LpcErrorCode.connectionTimeout,
+            'connection request timed out',
+          ),
+        );
         if (_automaticProbeEndpoints.remove(discoveryEndpointId)) {
           _knownPeerProbeTimers.remove(discoveryEndpointId)?.cancel();
           _startNextKnownPeerProbe();
         }
+        _releaseAutomaticGattConnectSlot(discoveryEndpointId);
         unawaited(
           backend.closeGattConnection(discoveryEndpointId).catchError((error) {
             _log(
-                'connection timeout cleanup failed endpoint=$discoveryEndpointId error=$error');
+              'connection timeout cleanup failed endpoint=$discoveryEndpointId error=$error',
+            );
           }),
         );
       },
     );
     if (automaticProbe) _automaticProbeEndpoints.add(discoveryEndpointId);
     _log(
-        'gatt connect requested endpoint=$discoveryEndpointId automatic=$automaticProbe activeAttempts=${_attempts.length}');
+      'gatt connect requested endpoint=$discoveryEndpointId automatic=$automaticProbe activeAttempts=${_attempts.length}',
+    );
     if (automaticProbe) {
       attempt.events.listen((event) {
         if (event is ConnectionAttemptConnected ||
@@ -1119,16 +1343,29 @@ class NearbyRuntime {
       });
     }
     unawaited(
-        backend.connectGatt(discoveryEndpointId).catchError((Object error) {
-      _log(
-          'gatt connect request failed endpoint=$discoveryEndpointId error=${_asLpcError(error).code.name} detail=$error');
-      attempt._failed(_asLpcError(error));
-      _connectionAttemptTimers.remove(discoveryEndpointId)?.cancel();
-      _attempts.remove(discoveryEndpointId);
-      if (_automaticProbeEndpoints.remove(discoveryEndpointId)) {
-        _startNextKnownPeerProbe();
-      }
-    }));
+      backend.connectGatt(discoveryEndpointId).catchError((Object error) {
+        // Android can retain a BluetoothGatt object after the remote app has
+        // gone away without delivering onConnectionStateChange. The next
+        // authenticated probe then fails immediately with ENDPOINT_BUSY even
+        // though Runtime owns no binding for this endpoint. Release that
+        // native handle before applying the normal bounded probe backoff;
+        // otherwise every later advertisement observes the same stale handle
+        // and the peer can never reconnect after an app restart.
+        if (_isEndpointBusyError(error)) {
+          unawaited(_closeBusyGattEndpoint(backend, discoveryEndpointId));
+        }
+        _log(
+          'gatt connect request failed endpoint=$discoveryEndpointId error=${_asLpcError(error).code.name} detail=$error',
+        );
+        attempt._failed(_asLpcError(error));
+        _connectionAttemptTimers.remove(discoveryEndpointId)?.cancel();
+        _attempts.remove(discoveryEndpointId);
+        if (_automaticProbeEndpoints.remove(discoveryEndpointId)) {
+          _startNextKnownPeerProbe();
+        }
+        _releaseAutomaticGattConnectSlot(discoveryEndpointId);
+      }),
+    );
     return attempt;
   }
 
@@ -1138,24 +1375,43 @@ class NearbyRuntime {
       if (previous == null || _monotonicMs - previous >= 5000) {
         _lastEndpointLogMs[event.endpointId] = _monotonicMs;
         _log(
-            'endpoint found endpoint=${event.endpointId} rssi=${event.rssi} name=${event.localName == null ? 'none' : 'present'}');
+          'endpoint found endpoint=${event.endpointId} rssi=${event.rssi} name=${event.localName == null ? 'none' : 'present'}',
+        );
+      }
+      final physicalOwner =
+          _authenticatedPeerByPhysicalEndpoint[event.endpointId];
+      if (physicalOwner != null &&
+          (physicalOwner.state == PeerConnectionState.ready ||
+              physicalOwner.state == PeerConnectionState.reconnecting)) {
+        // The native backend has already authenticated this physical device
+        // on an inbound server link. Keep the fast reconnect hint for a
+        // reconnecting owner, but do not open an independent known-peer probe
+        // that would compete with the selected GATT link.
+        _lastAuthenticatedPeerByEndpoint[event.endpointId] =
+            physicalOwner.peerId;
+        _knownProbeSuppressedByOwner[event.endpointId] = physicalOwner;
       }
       _scheduleReconnectProbe(event.endpointId);
       _scheduleKnownPeerProbe(event.endpointId);
       return;
     }
     if (event is PlatformGattDisconnected) {
+      _gattConnectedEvents.remove(event.endpointId);
+      _gattCandidateStartedAtMs.remove(event.endpointId);
+      _recoveringOrphanedGattEndpoints.remove(event.endpointId);
       _authenticatedAutomaticProbePeers.remove(event.endpointId);
       final binding = _gattBindings[event.endpointId];
       if (binding != null &&
           !binding.acceptsGeneration(event.connectionGeneration)) {
         _log(
-            'gatt disconnected ignored stale generation endpoint=${event.endpointId} eventGeneration=${event.connectionGeneration} currentGeneration=${binding.connectionGeneration}');
+          'gatt disconnected ignored stale generation endpoint=${event.endpointId} eventGeneration=${event.connectionGeneration} currentGeneration=${binding.connectionGeneration}',
+        );
         return;
       }
       final reconnect = _gattReconnects[event.endpointId];
       _log(
-          'gatt disconnected endpoint=${event.endpointId} generation=${event.connectionGeneration} status=${event.status ?? 'none'} hasBinding=${_gattBindings.containsKey(event.endpointId)} hasAttempt=${_attempts.containsKey(event.endpointId)}');
+        'gatt disconnected endpoint=${event.endpointId} generation=${event.connectionGeneration} status=${event.status ?? 'none'} hasBinding=${_gattBindings.containsKey(event.endpointId)} hasAttempt=${_attempts.containsKey(event.endpointId)}',
+      );
       // A duplicate READY candidate can be closed by the remote runtime while
       // this side is still unwinding the handshake.  Failing the automatic
       // probe here would erase its classification before _startGattHandshake
@@ -1164,37 +1420,67 @@ class NearbyRuntime {
       // attempts still fail immediately on transport loss.
       final automaticHandshakeDisconnect =
           _startingGattEndpoints.contains(event.endpointId) &&
-              _automaticProbeEndpoints.contains(event.endpointId);
-      // The binding normally observes this event too.  Keep an endpoint-to-
+          _automaticProbeEndpoints.contains(event.endpointId);
+      // The binding normally observes this event too. Keep an endpoint-to-
       // logical-peer index at the runtime boundary so a native disconnect
       // cannot leave an authenticated friend displayed as online if a
       // connection-scoped binding was already replaced by a duplicate probe.
-      _gattPeersByEndpoint[event.endpointId]?._platformTransportLost();
+      // CoreBluetooth can deliver the old generation's disconnect after a
+      // RESUME has installed a new binding for the same opaque endpoint ID.
+      // The binding generation guard filters that callback, so this fallback
+      // must apply the same guard before notifying the logical owner.
+      final mappedPeer = _gattPeersByEndpoint[event.endpointId];
+      final mappedLink = mappedPeer == null ? null : _gattLinks[mappedPeer];
+      final generationMatches =
+          mappedLink != null &&
+          mappedLink.endpointId == event.endpointId &&
+          gattConnectionGenerationMatches(
+            event.connectionGeneration,
+            mappedLink.connectionGeneration,
+          );
+      if (mappedPeer != null && generationMatches) {
+        mappedPeer._platformTransportLost();
+      } else if (mappedPeer != null) {
+        _log(
+          'gatt disconnected ignored stale owner endpoint=${event.endpointId} eventGeneration=${event.connectionGeneration} ownerEndpoint=${mappedLink?.endpointId} ownerGeneration=${mappedLink?.connectionGeneration}',
+        );
+      }
       _startingGattEndpoints.remove(event.endpointId);
       final closeKey =
           '${event.endpointId}:${event.connectionGeneration ?? 'unknown'}';
       final closeAlreadyRequested =
           _nativeCloseRequestedEndpoints.contains(closeKey) ||
-              (event.connectionGeneration == null &&
-                  !_gattBindings.containsKey(event.endpointId) &&
-                  _nativeCloseRequestedEndpoints
-                      .any((key) => key.startsWith('${event.endpointId}:')));
+          (event.connectionGeneration == null &&
+              !_gattBindings.containsKey(event.endpointId) &&
+              _nativeCloseRequestedEndpoints.any(
+                (key) => key.startsWith('${event.endpointId}:'),
+              ));
       if (!closeAlreadyRequested) {
-        unawaited(_closeGattBinding(event.endpointId,
-            connectionGeneration: event.connectionGeneration));
+        unawaited(
+          _closeGattBinding(
+            event.endpointId,
+            connectionGeneration: event.connectionGeneration,
+          ),
+        );
       }
       _connectionAttemptTimers.remove(event.endpointId)?.cancel();
       final attempt = _attempts.remove(event.endpointId);
       if (attempt != null && !automaticHandshakeDisconnect) {
-        final statusDetail =
-            event.status == null ? '' : ' (platform status ${event.status})';
-        attempt._failed(LpcException(LpcErrorCode.endpointLost,
-            'GATT endpoint disconnected$statusDetail'));
+        final statusDetail = event.status == null
+            ? ''
+            : ' (platform status ${event.status})';
+        attempt._failed(
+          LpcException(
+            LpcErrorCode.endpointLost,
+            'GATT endpoint disconnected$statusDetail',
+          ),
+        );
         _knownPeerProbeTimers.remove(event.endpointId)?.cancel();
         if (_automaticProbeEndpoints.remove(event.endpointId)) {
           _startNextKnownPeerProbe();
         }
       }
+      _releaseAutomaticGattConnectSlot(event.endpointId);
       // A reconnect candidate can fail before the RESUME handshake starts, so
       // there may be no ConnectionAttempt to report the transport loss. Feed
       // that native callback into the same bounded reconnect schedule instead
@@ -1206,25 +1492,39 @@ class NearbyRuntime {
       }
       return;
     }
+    if (event is PlatformGattFragment) {
+      _recoverOrphanedGattBinding(event);
+      return;
+    }
     if (event is! PlatformGattConnected) return;
-    _nativeCloseRequestedEndpoints
-        .removeWhere((key) => key.startsWith('${event.endpointId}:'));
+    _gattConnectedEvents[event.endpointId] = event;
+    _gattCandidateStartedAtMs.putIfAbsent(event.endpointId, () => _monotonicMs);
+    // The native GATT-connected callback completes the platform link
+    // procedure. Release only this physical-connect slot here; protocol
+    // handshakes for different authenticated candidates remain independent.
+    _releaseAutomaticGattConnectSlot(event.endpointId);
+    _nativeCloseRequestedEndpoints.removeWhere(
+      (key) => key.startsWith('${event.endpointId}:'),
+    );
     _log(
-        'gatt connected endpoint=${event.endpointId} role=${event.localRole} writeSize=${event.platformSafeWriteSize} reconnect=${_gattReconnects[event.endpointId] != null}');
+      'gatt connected endpoint=${event.endpointId} role=${event.localRole} writeSize=${event.platformSafeWriteSize} reconnect=${_gattReconnects[event.endpointId] != null}',
+    );
     final reconnect = _gattReconnects[event.endpointId];
     if (reconnect != null && reconnect.attempting) {
       if (_startingGattEndpoints.add(event.endpointId)) {
         _launchGattResume(event, reconnect);
       } else {
         _log(
-            'gatt connected ignored duplicate resume callback endpoint=${event.endpointId}');
+          'gatt connected ignored duplicate resume callback endpoint=${event.endpointId}',
+        );
       }
       return;
     }
     if (_startingGattEndpoints.contains(event.endpointId) ||
         _gattBindings.containsKey(event.endpointId)) {
       _log(
-          'gatt connected ignored duplicate endpoint=${event.endpointId} starting=${_startingGattEndpoints.contains(event.endpointId)} bound=${_gattBindings.containsKey(event.endpointId)}');
+        'gatt connected ignored duplicate endpoint=${event.endpointId} starting=${_startingGattEndpoints.contains(event.endpointId)} bound=${_gattBindings.containsKey(event.endpointId)}',
+      );
       return;
     }
     // Keep an outbound attempt registered through HELLO/AUTH/READY.  An
@@ -1242,17 +1542,35 @@ class NearbyRuntime {
       }
       final groupProfile = _autoGroupProfile;
       if (host == null && groupProfile == null) {
-        _log(
-            'gatt connected rejected endpoint=${event.endpointId} reason=no host/group owner');
-        return;
+        // A peer that is already connected through its peripheral-side GATT
+        // endpoint can still receive an automatic known-peer probe through a
+        // newly discovered central endpoint. Complete that authenticated
+        // handshake so both runtimes can compare PeerIds and suppress the
+        // duplicate candidate. Rejecting it here leaves the probing side
+        // with only transportClosed and causes a connect/close loop on every
+        // scan advertisement. This path never retains an unknown peer: the
+        // resolver classification below owns that decision.
+        if (!config.autoConnectKnownPeers || config.knownPeerResolver == null) {
+          _log(
+            'gatt connected rejected endpoint=${event.endpointId} reason=no host/group/known-peer owner',
+          );
+          return;
+        }
       }
       if (host != null && !host.config.autoAccept) return;
       final backend = _platformBleBackend!;
-      attempt = ConnectionAttempt._(event.endpointId,
-          () => backend.closeGattConnection(event.endpointId));
+      attempt = ConnectionAttempt._(
+        event.endpointId,
+        () => backend.closeGattConnection(event.endpointId),
+      );
       if (host == null) {
         if (_startingGattEndpoints.add(event.endpointId)) {
-          _launchGattHandshake(event, attempt, groupProfile: groupProfile);
+          _launchGattHandshake(
+            event,
+            attempt,
+            groupProfile: groupProfile,
+            knownPeerCandidate: groupProfile == null,
+          );
         }
         return;
       }
@@ -1262,29 +1580,106 @@ class NearbyRuntime {
     }
   }
 
+  /// Reattach an inbound GATT link whose native subscription survived a Dart
+  /// handshake/runtime lifecycle race. CoreBluetooth can keep a peripheral
+  /// subscription alive after the Dart handshake has been cancelled or an
+  /// application-level runtime has been recreated. In that state the native
+  /// endpoint still delivers the remote HELLO, but no HandshakeConnection is
+  /// listening, so both peers keep probing forever and neither becomes online.
+  ///
+  /// This is deliberately limited to an endpoint that already has a binding,
+  /// has no active handshake, and has no authenticated logical owner. It does
+  /// not cancel a competing unknown probe: authenticated PeerId comparison
+  /// and normal duplicate-link arbitration remain the ownership decisions.
+  void _recoverOrphanedGattBinding(PlatformGattFragment event) {
+    final endpointId = event.endpointId;
+    if (!_gattBindings.containsKey(endpointId) ||
+        _startingGattEndpoints.contains(endpointId) ||
+        _gattPeersByEndpoint.containsKey(endpointId) ||
+        !_recoveringOrphanedGattEndpoints.add(endpointId)) {
+      return;
+    }
+    final connected =
+        _gattConnectedEvents[endpointId] ??
+        PlatformGattConnected(
+          endpointId,
+          endpointId.startsWith('server-') ? 'peripheral' : 'central',
+          connectionGeneration: event.connectionGeneration,
+        );
+    HostSession? host;
+    for (final candidate in _advertisingHosts) {
+      if (candidate.config.autoAccept) {
+        host = candidate;
+        break;
+      }
+    }
+    final groupProfile = _autoGroupProfile;
+    if (host == null && groupProfile == null) {
+      _recoveringOrphanedGattEndpoints.remove(endpointId);
+      _log(
+        'orphaned GATT binding has no inbound owner endpoint=$endpointId; closing',
+      );
+      unawaited(_closeGattBinding(endpointId, preserveSharedLink: true));
+      return;
+    }
+    final backend = _platformBleBackend;
+    if (backend == null) {
+      _recoveringOrphanedGattEndpoints.remove(endpointId);
+      return;
+    }
+    final attempt = ConnectionAttempt._(
+      endpointId,
+      () => backend.closeGattConnection(
+        endpointId,
+        connectionGeneration: connected.connectionGeneration,
+      ),
+    );
+    _startingGattEndpoints.add(endpointId);
+    _log(
+      'recovering orphaned GATT binding endpoint=$endpointId generation=${connected.connectionGeneration}',
+    );
+    _launchGattHandshake(
+      connected,
+      attempt,
+      host: host,
+      groupProfile: host == null ? groupProfile : null,
+    );
+  }
+
   /// Closes both halves of a binding.  Cancelling the event subscription only
   /// stops Dart from consuming callbacks; it does not release the native GATT
   /// client.  This distinction matters when a reconnect candidate is still
   /// handshaking while the logical reconnect deadline expires.
-  Future<void> _closeGattBinding(String endpointId,
-      {int? connectionGeneration}) {
+  Future<void> _closeGattBinding(
+    String endpointId, {
+    int? connectionGeneration,
+    bool preserveSharedLink = false,
+  }) {
     final existing = _gattCloseOperations[endpointId];
     if (existing != null) return existing;
     _closingGattEndpoints.add(endpointId);
-    final cleanup = _performGattBindingClose(endpointId,
-        connectionGeneration: connectionGeneration);
+    final cleanup = _performGattBindingClose(
+      endpointId,
+      connectionGeneration: connectionGeneration,
+      preserveSharedLink: preserveSharedLink,
+    );
     _gattCloseOperations[endpointId] = cleanup;
-    unawaited(cleanup.then<void>((_) {
-      if (_gattCloseOperations[endpointId] == cleanup) {
-        _gattCloseOperations.remove(endpointId);
-        _closingGattEndpoints.remove(endpointId);
-      }
-    }));
+    unawaited(
+      cleanup.then<void>((_) {
+        if (_gattCloseOperations[endpointId] == cleanup) {
+          _gattCloseOperations.remove(endpointId);
+          _closingGattEndpoints.remove(endpointId);
+        }
+      }),
+    );
     return cleanup;
   }
 
-  Future<void> _performGattBindingClose(String endpointId,
-      {int? connectionGeneration}) async {
+  Future<void> _performGattBindingClose(
+    String endpointId, {
+    int? connectionGeneration,
+    bool preserveSharedLink = false,
+  }) async {
     final binding = _gattBindings.remove(endpointId);
     final generation = connectionGeneration ?? binding?.connectionGeneration;
     final closeKey = '$endpointId:${generation ?? 'unknown'}';
@@ -1292,6 +1687,12 @@ class NearbyRuntime {
     _rememberNativeCloseRequested(endpointId, connectionGeneration: generation);
     try {
       if (binding != null) {
+        // Only a central-side duplicate has an independently parkable native
+        // client handle. Peripheral-side links use ordinary teardown.
+        if (preserveSharedLink &&
+            binding.connection.localRole == GattLinkRole.central) {
+          binding.connection.preserveNativeLinkOnClose();
+        }
         await binding.close();
         await binding.connection.close();
       } else {
@@ -1303,12 +1704,16 @@ class NearbyRuntime {
         // ENDPOINT_BUSY. The native implementations also use the generation
         // guard where the platform exposes one, so this cannot close a newer
         // replacement generation accidentally.
-        await _platformBleBackend?.closeGattConnection(endpointId,
-            connectionGeneration: generation);
+        await _platformBleBackend?.closeGattConnection(
+          endpointId,
+          connectionGeneration: generation,
+          preserveSharedLink: preserveSharedLink,
+        );
       }
     } on Object catch (error) {
       _log(
-          'GATT binding transport close failed endpoint=$endpointId error=$error');
+        'GATT binding transport close failed endpoint=$endpointId error=$error',
+      );
     }
   }
 
@@ -1320,114 +1725,161 @@ class NearbyRuntime {
   /// Flutter "Unhandled Exception" messages.  Keep the endpoint startup lock
   /// and the Future error handling in one place for every handshake path.
   void _launchGattHandshake(
-      PlatformGattConnected event, ConnectionAttempt attempt,
-      {HostSession? host, _AutoGroupHandshakeProfile? groupProfile}) {
-    unawaited(_startGattHandshake(event, attempt,
-            host: host, groupProfile: groupProfile)
-        .then<void>((_) {
-      _startingGattEndpoints.remove(event.endpointId);
-    }, onError: (Object error, StackTrace stack) {
-      _startingGattEndpoints.remove(event.endpointId);
-      if (!_attempts.containsKey(event.endpointId)) {
-        _log(
-            'background handshake ended endpoint=${event.endpointId} code=${_asLpcError(error).code.name}');
-      } else {
-        attempt._failed(_asLpcError(error));
-      }
-    }));
+    PlatformGattConnected event,
+    ConnectionAttempt attempt, {
+    HostSession? host,
+    _AutoGroupHandshakeProfile? groupProfile,
+    bool knownPeerCandidate = false,
+  }) {
+    unawaited(
+      _startGattHandshake(
+        event,
+        attempt,
+        host: host,
+        groupProfile: groupProfile,
+        knownPeerCandidate: knownPeerCandidate,
+      ).then<void>(
+        (_) {
+          _startingGattEndpoints.remove(event.endpointId);
+          _recoveringOrphanedGattEndpoints.remove(event.endpointId);
+        },
+        onError: (Object error, StackTrace stack) {
+          _startingGattEndpoints.remove(event.endpointId);
+          _recoveringOrphanedGattEndpoints.remove(event.endpointId);
+          if (!_attempts.containsKey(event.endpointId)) {
+            _log(
+              'background handshake ended endpoint=${event.endpointId} code=${_asLpcError(error).code.name}',
+            );
+          } else {
+            attempt._failed(_asLpcError(error));
+          }
+        },
+      ),
+    );
   }
 
   /// Same containment boundary for automatic RESUME.  Resume failures are
   /// converted into the reconnect scheduler's next attempt by the method
   /// itself, but cleanup failures must not become unhandled Futures.
   void _launchGattResume(
-      PlatformGattConnected event, _GattReconnect reconnect) {
-    unawaited(_startGattResume(event, reconnect).then<void>((_) {
-      _startingGattEndpoints.remove(event.endpointId);
-    }, onError: (Object error, StackTrace stack) {
-      _startingGattEndpoints.remove(event.endpointId);
-      _log(
-          'background resume ended endpoint=${event.endpointId} peer=${reconnect.peer.peerId} code=${_asLpcError(error).code.name}');
-      _reconnectAttemptFailed(reconnect);
-    }));
+    PlatformGattConnected event,
+    _GattReconnect reconnect,
+  ) {
+    unawaited(
+      _startGattResume(event, reconnect).then<void>(
+        (_) {
+          _startingGattEndpoints.remove(event.endpointId);
+        },
+        onError: (Object error, StackTrace stack) {
+          _startingGattEndpoints.remove(event.endpointId);
+          _log(
+            'background resume ended endpoint=${event.endpointId} peer=${reconnect.peer.peerId} code=${_asLpcError(error).code.name}',
+          );
+          _reconnectAttemptFailed(reconnect);
+        },
+      ),
+    );
   }
 
   Future<void> _startGattHandshake(
-      PlatformGattConnected event, ConnectionAttempt attempt,
-      {HostSession? host, _AutoGroupHandshakeProfile? groupProfile}) async {
+    PlatformGattConnected event,
+    ConnectionAttempt attempt, {
+    HostSession? host,
+    _AutoGroupHandshakeProfile? groupProfile,
+    bool knownPeerCandidate = false,
+  }) async {
     final backend = _platformBleBackend!;
     final identity = _identity!;
     HandshakeConnection? handshake;
     try {
       _log(
-          'handshake start endpoint=${event.endpointId} role=${event.localRole} mode=${host != null ? 'host' : groupProfile != null ? 'group' : _automaticProbeEndpoints.contains(event.endpointId) ? 'known-probe' : 'direct'}');
+        'handshake start endpoint=${event.endpointId} role=${event.localRole} mode=${host != null
+            ? 'host'
+            : groupProfile != null
+            ? 'group'
+            : knownPeerCandidate
+            ? 'known-peer-responder'
+            : _automaticProbeEndpoints.contains(event.endpointId)
+            ? 'known-probe'
+            : 'direct'}',
+      );
       // A platform may reuse an opaque endpoint after a disconnect.  Replace
       // the old fragment-event binding before installing the new generation.
       await _gattBindings.remove(event.endpointId)?.close();
       final connection = GattBackendConnection(
-          connectionId: event.endpointId,
-          logger: (message) => _log(
-              'gatt endpoint=${event.endpointId} generation=${event.connectionGeneration} $message'),
-          platform: PlatformGattFragmentPlatform(
-              backend: backend,
-              endpointId: event.endpointId,
-              platformSafeWriteSize: event.platformSafeWriteSize,
-              connectionGeneration: event.connectionGeneration,
-              onCloseRequested: () => _rememberNativeCloseRequested(
-                  event.endpointId,
-                  connectionGeneration: event.connectionGeneration)),
-          localRole: event.localRole == 'central'
-              ? GattLinkRole.central
-              : GattLinkRole.peripheral,
-          maxQueuedBytes: config.maxQueuedBytesPerPeer,
-          fragmentTimeoutMs: config.gattFragmentInactivityTimeoutMs);
-      _gattBindings[event.endpointId] = PlatformGattConnectionBinding(
+        connectionId: event.endpointId,
+        logger: (message) => _log(
+          'gatt endpoint=${event.endpointId} generation=${event.connectionGeneration} $message',
+        ),
+        platform: PlatformGattFragmentPlatform(
           backend: backend,
           endpointId: event.endpointId,
-          connection: connection,
-          connectionGeneration: event.connectionGeneration);
+          platformSafeWriteSize: event.platformSafeWriteSize,
+          connectionGeneration: event.connectionGeneration,
+          onCloseRequested: () => _rememberNativeCloseRequested(
+            event.endpointId,
+            connectionGeneration: event.connectionGeneration,
+          ),
+        ),
+        localRole: event.localRole == 'central'
+            ? GattLinkRole.central
+            : GattLinkRole.peripheral,
+        maxQueuedBytes: config.maxQueuedBytesPerPeer,
+        fragmentTimeoutMs: config.gattFragmentInactivityTimeoutMs,
+      );
+      _gattBindings[event.endpointId] = PlatformGattConnectionBinding(
+        backend: backend,
+        endpointId: event.endpointId,
+        connection: connection,
+        connectionGeneration: event.connectionGeneration,
+      );
       _log('handshake transport bound endpoint=${event.endpointId}');
       final ephemeral = await X25519().newKeyPair();
       final ephemeralPublic = await ephemeral.extractPublicKey();
       final trustMode =
           groupProfile?.trustMode ?? host?.config.trustMode ?? config.trustMode;
       handshake = HandshakeConnection(
-          backend: connection,
-          localPeerId: localPeerId,
-          logger: (message) =>
-              _log('handshake endpoint=${event.endpointId} $message'),
-          // An accepted inbound physical link can be either an ordinary
-          // explicit-host connection or the responder side of Section 26
-          // reconnect.  Do not emit a normal READY before its first encrypted
-          // frame selects one of those two protocol paths.
-          acceptCandidateResume: host != null || groupProfile != null,
-          exchange: HandshakeExchange(
-              serviceUuid: config.serviceUuid,
-              localHello: HelloPayload(
-                  peerId: localPeerId,
-                  identityPublicKey: identity.publicKey.bytes,
-                  ephemeralPublicKey: ephemeralPublic.bytes,
-                  connectionNonce: List<int>.generate(
-                      16, (_) => Random.secure().nextInt(256)),
-                  peerCapabilities: PeerCapabilityBitmap(const [
-                    PeerCapability.gattBaseline,
-                    PeerCapability.resume
-                  ]).value,
-                  keepaliveIntervalMs: config.keepaliveIntervalMs,
-                  applicationMetadata:
-                      host?.config.applicationMetadata ?? _applicationMetadata,
-                  trustMode: trustMode),
-              localIdentityKeyPair: identity.keyPair,
-              localEphemeralKeyPair: ephemeral,
-              knownPeerPolicy: groupProfile?.knownPeerPolicy ??
-                  _knownPeerPolicyFor(config, trustMode),
-              tofuStore:
-                  trustMode == HandshakeTrustMode.tofu ? _tofuStore : null,
-              psk32: groupProfile?.psk32 ?? config.psk32),
-          onSasRequired: (peerId, sas) {
-            attempt._verificationRequired(peerId, sas, handshake!.confirmSas);
-            host?._peerVerificationRequired(attempt, peerId, sas);
-          });
+        backend: connection,
+        localPeerId: localPeerId,
+        logger: (message) =>
+            _log('handshake endpoint=${event.endpointId} $message'),
+        // An accepted inbound physical link can be either an ordinary
+        // explicit-host connection or the responder side of Section 26
+        // reconnect.  Do not emit a normal READY before its first encrypted
+        // frame selects one of those two protocol paths.
+        acceptCandidateResume: host != null || groupProfile != null,
+        exchange: HandshakeExchange(
+          serviceUuid: config.serviceUuid,
+          localHello: HelloPayload(
+            peerId: localPeerId,
+            identityPublicKey: identity.publicKey.bytes,
+            ephemeralPublicKey: ephemeralPublic.bytes,
+            connectionNonce: List<int>.generate(
+              16,
+              (_) => Random.secure().nextInt(256),
+            ),
+            peerCapabilities: PeerCapabilityBitmap(const [
+              PeerCapability.gattBaseline,
+              PeerCapability.resume,
+            ]).value,
+            keepaliveIntervalMs: config.keepaliveIntervalMs,
+            applicationMetadata:
+                host?.config.applicationMetadata ?? _applicationMetadata,
+            trustMode: trustMode,
+          ),
+          localIdentityKeyPair: identity.keyPair,
+          localEphemeralKeyPair: ephemeral,
+          knownPeerPolicy:
+              groupProfile?.knownPeerPolicy ??
+              _knownPeerPolicyFor(config, trustMode),
+          tofuStore: trustMode == HandshakeTrustMode.tofu ? _tofuStore : null,
+          psk32: groupProfile?.psk32 ?? config.psk32,
+        ),
+        onSasRequired: (peerId, sas) {
+          attempt._verificationRequired(peerId, sas, handshake!.confirmSas);
+          host?._peerVerificationRequired(attempt, peerId, sas);
+        },
+      );
       // The peer may answer HELLO while start() is still submitting the
       // local HELLO. Attach error observers before starting so a fast
       // protocol/transport failure is consumed by this handshake task rather
@@ -1443,35 +1895,111 @@ class NearbyRuntime {
       unawaited(candidateInitialFrame.then<void>((_) {}, onError: (_, __) {}));
       await handshake.start();
       _log('handshake HELLO submitted endpoint=${event.endpointId}');
-      if (host != null || groupProfile != null) {
+      // A known-peer probe can time out while the native stack is still
+      // delivering its delayed AUTH/READY frames.  ConnectionAttempt.cancel()
+      // closes the platform endpoint, but late callbacks can still complete
+      // this Dart handshake.  Never publish a late READY into Runtime
+      // ownership after the attempt has become terminal; doing so creates a
+      // peer that is immediately killed by the timeout cleanup, which is
+      // particularly visible on Android after an app restart.
+      if (attempt._terminal) {
+        _log(
+          'handshake discarded after cancelled attempt endpoint=${event.endpointId}',
+        );
+        await _closeGattBinding(
+          event.endpointId,
+          connectionGeneration: event.connectionGeneration,
+        );
+        return;
+      }
+      if (host != null || groupProfile != null || knownPeerCandidate) {
         final outcome = await Future.any<Object>([
           ready.then<Object>((core) => core),
           authenticated.then<Object>((candidate) => candidate),
         ]);
+        if (attempt._terminal) {
+          _log(
+            'handshake outcome discarded after cancelled attempt endpoint=${event.endpointId}',
+          );
+          await _closeGattBinding(
+            event.endpointId,
+            connectionGeneration: event.connectionGeneration,
+          );
+          return;
+        }
         if (outcome is HandshakeResult) {
           _log(
-              'candidate handshake authenticated endpoint=${event.endpointId} peer=${handshake.remotePeerId}; starting inbound resume');
+            'candidate handshake authenticated endpoint=${event.endpointId} peer=${handshake.remotePeerId}; starting inbound resume',
+          );
+          await backend.associateGattPeer(
+            event.endpointId,
+            handshake.remotePeerId!,
+          );
           await _completeInboundGattResume(
-              event, connection, handshake, outcome);
+            event,
+            connection,
+            handshake,
+            outcome,
+          );
           return;
         }
         final core = outcome as PeerConnectionCore;
         _log(
-            'inbound handshake READY endpoint=${event.endpointId} peer=${core.remotePeerId}');
-        final peer = await _ownPeer(core,
-            securityLevel:
-                handshake.exchange.result!.createReady().securityLevel,
-            gattEndpointId: event.endpointId,
-            connectionRank: await _rankFor(handshake),
-            remoteApplicationMetadata:
-                handshake.exchange.result!.remoteHello.applicationMetadata);
-        host?._peerConnected(peer, discoveryEndpointId: event.endpointId);
+          'inbound handshake READY endpoint=${event.endpointId} peer=${core.remotePeerId}',
+        );
+        await backend.associateGattPeer(event.endpointId, core.remotePeerId);
+        final peer = await _ownPeer(
+          core,
+          securityLevel: handshake.exchange.result!.createReady().securityLevel,
+          gattEndpointId: event.endpointId,
+          gattConnectionGeneration: event.connectionGeneration,
+          physicalEndpointId: event.physicalEndpointId,
+          connectionRank: await _rankFor(handshake),
+          remoteApplicationMetadata:
+              handshake.exchange.result!.remoteHello.applicationMetadata,
+        );
+        _releaseFreshHandshakeHandoffForPeer(peer.peerId);
+        if (host != null) {
+          host._peerConnected(peer, discoveryEndpointId: event.endpointId);
+        }
+        if (knownPeerCandidate) {
+          // This inbound connection was opened by the remote runtime's
+          // automatic known-peer scheduler. It must be classified by the
+          // local resolver as well; otherwise a nearby unknown endpoint
+          // would become a direct retained peer merely because this runtime
+          // answered its low-level handshake.
+          _suppressKnownProbeForOwner(event.endpointId, peer);
+          final classified = await _classifyKnownPeer(peer, event.endpointId);
+          if (!classified) {
+            _connectionAttemptTimers.remove(event.endpointId)?.cancel();
+            _attempts.remove(event.endpointId);
+            attempt._failed(
+              const LpcException(
+                LpcErrorCode.transportClosed,
+                'known-peer candidate disconnected before classification',
+              ),
+            );
+            return;
+          }
+        }
         attempt._connected(peer);
         return;
       }
       final core = await ready;
+      if (attempt._terminal) {
+        _log(
+          'handshake READY discarded after cancelled attempt endpoint=${event.endpointId}',
+        );
+        await _closeGattBinding(
+          event.endpointId,
+          connectionGeneration: event.connectionGeneration,
+        );
+        return;
+      }
       _log(
-          'handshake READY endpoint=${event.endpointId} peer=${core.remotePeerId}');
+        'handshake READY endpoint=${event.endpointId} peer=${core.remotePeerId}',
+      );
+      await backend.associateGattPeer(event.endpointId, core.remotePeerId);
       // Capture this immediately before ownership is assigned.  Duplicate
       // READY resolution can close the candidate transport synchronously
       // while _ownPeer returns the already-owned logical peer; that close
@@ -1479,8 +2007,9 @@ class NearbyRuntime {
       // automatic-probe set.  The candidate was still an automatic probe and
       // must be classified against the PeerId cache rather than silently
       // becoming a failed direct connection.
-      final automaticProbe =
-          _automaticProbeEndpoints.contains(event.endpointId);
+      final automaticProbe = _automaticProbeEndpoints.contains(
+        event.endpointId,
+      );
       if (automaticProbe) {
         // Before this point every endpoint is only a service-UUID
         // observation. Do not cancel another probe until this candidate has
@@ -1488,20 +2017,30 @@ class NearbyRuntime {
         // the race and starve an unrelated peer.
         _authenticatedAutomaticProbePeers[event.endpointId] = core.remotePeerId;
       }
-      final peer = await _ownPeer(core,
-          securityLevel: handshake.exchange.result!.createReady().securityLevel,
-          gattEndpointId: event.endpointId,
-          connectionRank: await _rankFor(handshake),
-          remoteApplicationMetadata:
-              handshake.exchange.result!.remoteHello.applicationMetadata);
+      final peer = await _ownPeer(
+        core,
+        securityLevel: handshake.exchange.result!.createReady().securityLevel,
+        gattEndpointId: event.endpointId,
+        gattConnectionGeneration: event.connectionGeneration,
+        physicalEndpointId: event.physicalEndpointId,
+        connectionRank: await _rankFor(handshake),
+        remoteApplicationMetadata:
+            handshake.exchange.result!.remoteHello.applicationMetadata,
+      );
+      _releaseFreshHandshakeHandoffForPeer(peer.peerId);
       if (automaticProbe) {
+        _suppressKnownProbeForOwner(event.endpointId, peer);
         final classified = await _classifyKnownPeer(peer, event.endpointId);
         _authenticatedAutomaticProbePeers.remove(event.endpointId);
         if (!classified) {
           _connectionAttemptTimers.remove(event.endpointId)?.cancel();
           _attempts.remove(event.endpointId);
-          attempt._failed(const LpcException(LpcErrorCode.transportClosed,
-              'known-peer candidate disconnected before classification'));
+          attempt._failed(
+            const LpcException(
+              LpcErrorCode.transportClosed,
+              'known-peer candidate disconnected before classification',
+            ),
+          );
           return;
         }
       } else {
@@ -1514,9 +2053,11 @@ class NearbyRuntime {
     } on Object catch (error) {
       final lpcError = _asLpcError(error);
       _log(
-          'handshake failed endpoint=${event.endpointId} code=${lpcError.code.name} detail=$error');
-      final automaticProbe =
-          _automaticProbeEndpoints.contains(event.endpointId);
+        'handshake failed endpoint=${event.endpointId} code=${lpcError.code.name} detail=$error',
+      );
+      final automaticProbe = _automaticProbeEndpoints.contains(
+        event.endpointId,
+      );
       _authenticatedAutomaticProbePeers.remove(event.endpointId);
       final exchange = handshake?.exchange;
       // A duplicate authenticated candidate may lose the physical-link rank
@@ -1528,11 +2069,14 @@ class NearbyRuntime {
           exchange?.state == HandshakeExchangeState.authenticated &&
           exchange?.remoteHello?.peerId != null) {
         final existing = _peers
-            .where((peer) =>
-                peer.peerId == exchange!.remoteHello!.peerId &&
-                peer.state == PeerConnectionState.ready)
+            .where(
+              (peer) =>
+                  peer.peerId == exchange!.remoteHello!.peerId &&
+                  peer.state == PeerConnectionState.ready,
+            )
             .firstOrNull;
         if (existing != null) {
+          _suppressKnownProbeForOwner(event.endpointId, existing);
           await _classifyKnownPeer(existing, event.endpointId);
         }
       }
@@ -1541,13 +2085,22 @@ class NearbyRuntime {
       // endpoint can be probed again on the next discovery observation.
       _connectionAttemptTimers.remove(event.endpointId)?.cancel();
       _attempts.remove(event.endpointId);
+      // A protocol-level handshake failure is another terminal end to the
+      // candidate lifecycle. Some Android stacks report no subsequent
+      // PlatformGattDisconnected after a failed write, leaving this map entry
+      // behind and causing a later probe to be classified against stale
+      // overlap timing.
+      _gattCandidateStartedAtMs.remove(event.endpointId);
       attempt._failed(lpcError);
       try {
-        await _closeGattBinding(event.endpointId,
-            connectionGeneration: event.connectionGeneration);
+        await _closeGattBinding(
+          event.endpointId,
+          connectionGeneration: event.connectionGeneration,
+        );
       } on Object catch (cleanupError) {
         _log(
-            'handshake binding cleanup failed endpoint=${event.endpointId} error=$cleanupError');
+          'handshake binding cleanup failed endpoint=${event.endpointId} error=$cleanupError',
+        );
       }
       if (_automaticProbeEndpoints.remove(event.endpointId)) {
         _startNextKnownPeerProbe();
@@ -1557,13 +2110,15 @@ class NearbyRuntime {
 
   void _scheduleKnownPeerProbe(String endpointId) {
     _clearStaleKnownPeerProbeState(endpointId);
-    final suppressedOwner = _knownProbeSuppressedByOwner[endpointId];
+    if (_freshHandshakeHandoffEndpoints.contains(endpointId)) return;
+    var suppressedOwner = _knownProbeSuppressedByOwner[endpointId];
     if (suppressedOwner != null) {
       if (suppressedOwner.state == PeerConnectionState.ready ||
           suppressedOwner.state == PeerConnectionState.reconnecting) {
         return;
       }
       _knownProbeSuppressedByOwner.remove(endpointId);
+      suppressedOwner = null;
     }
     final notBefore = _knownPeerProbeNotBeforeMs[endpointId];
     if (notBefore != null && _monotonicMs < notBefore) {
@@ -1572,6 +2127,7 @@ class NearbyRuntime {
     final existingPeer = _gattPeersByEndpoint[endpointId];
     if (!config.autoConnectKnownPeers ||
         _closingGattEndpoints.contains(endpointId) ||
+        _duplicateClosingEndpoints.contains(endpointId) ||
         _gattReconnects.containsKey(endpointId) ||
         // A transport endpoint may be in an explicit or inbound handshake
         // even before it has an owned PeerConnection. Do not open a second
@@ -1588,16 +2144,41 @@ class NearbyRuntime {
         _pendingKnownPeerProbes.contains(endpointId)) {
       return;
     }
-    if (_automaticProbeEndpoints.length >=
-        config.maxConcurrentKnownPeerProbes) {
+    if (_automaticGattConnectInFlight != null ||
+        _automaticProbeEndpoints.length >=
+            config.maxConcurrentKnownPeerProbes) {
       if (_pendingKnownPeerProbes.length < config.maxPendingKnownPeerProbes) {
         _pendingKnownPeerProbes.add(endpointId);
         _log(
-            'known probe queued endpoint=$endpointId pending=${_pendingKnownPeerProbes.length} active=${_automaticProbeEndpoints.length}');
+          'known probe queued endpoint=$endpointId pending=${_pendingKnownPeerProbes.length} active=${_automaticProbeEndpoints.length}',
+        );
       }
       return;
     }
     _startKnownPeerProbe(endpointId);
+  }
+
+  void _suppressKnownProbeForOwner(String endpointId, PeerConnection owner) {
+    if (owner.state != PeerConnectionState.ready &&
+        owner.state != PeerConnectionState.reconnecting) {
+      return;
+    }
+    // A duplicate candidate can be closed by the remote runtime after it has
+    // authenticated, before this side receives READY. The authenticated
+    // PeerId is still sufficient to prove that the discovery endpoint belongs
+    // to the already-owned logical peer. Retain suppression until that owner
+    // disconnects; otherwise every advertisement reopens the same losing
+    // candidate and creates a connect/close loop on iOS and Android.
+    final ownerEndpoint = _gattLinks[owner]?.endpointId;
+    if (ownerEndpoint == endpointId) return;
+    _knownProbeSuppressedByOwner[endpointId] = owner;
+    _knownPeerProbeEndpointsByPeer
+        .putIfAbsent(owner, () => <String>{})
+        .add(endpointId);
+    _knownPeerProbeNotBeforeMs.remove(endpointId);
+    _log(
+      'known probe suppressed endpoint=$endpointId owner=${owner.peerId} ownerEndpoint=${ownerEndpoint ?? 'none'}',
+    );
   }
 
   /// Discovery identifiers are ephemeral, but some platform backends can
@@ -1640,8 +2221,14 @@ class NearbyRuntime {
       }
     }
 
+    // A duplicate winner can be reached through an inbound opaque endpoint,
+    // while this displaced discovery endpoint remains only a scan result. It
+    // is therefore intentionally absent from _gattPeersByEndpoint; the
+    // suppression owner is still authoritative until that logical peer ends.
     final hasActiveOwner =
-        _gattPeersByEndpoint.containsKey(endpointId) || activeAssociatedOwner;
+        _gattPeersByEndpoint.containsKey(endpointId) ||
+        activeAssociatedOwner ||
+        suppressedOwner != null;
     if (!hasActiveOwner &&
         ((_completedKnownPeerProbeEndpoints.remove(endpointId) ?? false) ||
             _knownProbeSuppressedByOwner.remove(endpointId) != null)) {
@@ -1657,6 +2244,12 @@ class NearbyRuntime {
   /// candidate at a time per reconnecting peer so nearby devices cannot create
   /// an unbounded set of physical links.
   void _scheduleReconnectProbe(String endpointId) {
+    if (_freshHandshakeHandoffEndpoints.contains(endpointId)) {
+      _log(
+        'reconnect discovery candidate deferred endpoint=$endpointId reason=fresh-handshake-handoff',
+      );
+      return;
+    }
     final mappedPeer = _gattPeersByEndpoint[endpointId];
     final mappedReady = mappedPeer?.state == PeerConnectionState.ready;
     final mappedReconnecting =
@@ -1691,18 +2284,35 @@ class NearbyRuntime {
     // this newly observed endpoint.  RESUME/duplicate arbitration still
     // chooses the first authenticated candidate, so this does not assign a
     // permanent reconnect direction or create an unbounded set of links.
-    final peer = <PeerConnection>{
-      ..._reconnectWaitingForDiscovery,
-      ..._peers.where(
-        (candidate) => candidate.state == PeerConnectionState.reconnecting,
-      ),
-    }
-        .where((candidate) => !_gattReconnects.values.any((reconnect) =>
-            identical(reconnect.peer, candidate) &&
-            reconnect.discoveryCandidate))
+    final reconnectingPeers =
+        <PeerConnection>{
+          ..._reconnectWaitingForDiscovery,
+          ..._peers.where(
+            (candidate) => candidate.state == PeerConnectionState.reconnecting,
+          ),
+        }.where(
+          (candidate) => !_gattReconnects.values.any(
+            (reconnect) =>
+                identical(reconnect.peer, candidate) &&
+                reconnect.discoveryCandidate,
+          ),
+        );
+    final endpointHint = _lastAuthenticatedPeerByEndpoint[endpointId];
+    // A discovery observation without a recent authenticated endpoint hint is
+    // not evidence that it belongs to the only reconnecting peer.  In a
+    // multi-device BLE neighborhood it may be a different friend, and a
+    // speculative RESUME would send the wrong session to that endpoint. On
+    // Android, closing that wrong candidate can also tear down an inbound
+    // server link that shares the same controller ACL. Let the bounded
+    // known-peer probe authenticate the PeerId first; only a previously
+    // authenticated endpoint association may take the fast RESUME path.
+    if (endpointHint == null) return;
+    final peer = reconnectingPeers
+        .where((candidate) => candidate.peerId == endpointHint)
         .firstOrNull;
     if (peer == null) return;
-    final schedule = _reconnectWaitingSchedules[peer] ??
+    final schedule =
+        _reconnectWaitingSchedules[peer] ??
         _gattReconnects.values
             .where((reconnect) => identical(reconnect.peer, peer))
             .map((reconnect) => reconnect.schedule)
@@ -1723,65 +2333,99 @@ class NearbyRuntime {
           ..staleGenerationCleanupComplete = true;
     _gattReconnects[endpointId] = reconnect;
     _log(
-        'reconnect discovery candidate endpoint=$endpointId peer=${peer.peerId} timeoutMs=${config.reconnectTimeoutMs}');
+      'reconnect discovery candidate endpoint=$endpointId peer=${peer.peerId} timeoutMs=${config.reconnectTimeoutMs}',
+    );
     unawaited(() async {
       try {
         await backend.connectGatt(endpointId);
       } on Object catch (error) {
+        if (_isEndpointBusyError(error)) {
+          await _closeBusyGattEndpoint(backend, endpointId);
+        }
         _log(
-            'reconnect discovery candidate failed endpoint=$endpointId peer=${peer.peerId} error=$error');
+          'reconnect discovery candidate failed endpoint=$endpointId peer=${peer.peerId} error=$error',
+        );
         _reconnectAttemptFailed(reconnect);
       }
     }());
   }
 
   void _startKnownPeerProbe(String endpointId) {
+    _automaticGattConnectInFlight = endpointId;
     _automaticProbeEndpoints.add(endpointId);
     _log(
-        'known probe started endpoint=$endpointId timeoutMs=${config.reconnectTimeoutMs}');
+      'known probe started endpoint=$endpointId timeoutMs=${config.reconnectTimeoutMs}',
+    );
     _events.add(KnownPeerProbeStarted(_monotonicMs, endpointId));
     try {
       final attempt = _connect(endpointId, automaticProbe: true);
-      _knownPeerProbeTimers[endpointId] =
-          Timer(Duration(milliseconds: config.reconnectTimeoutMs), () {
-        _knownPeerProbeTimers.remove(endpointId);
-        if (!_automaticProbeEndpoints.remove(endpointId)) return;
-        _deferKnownPeerProbe(endpointId);
-        unawaited(attempt.cancel().catchError((_) {}));
-        _events.add(KnownPeerProbeFailed(
-            _monotonicMs,
-            endpointId,
-            const LpcException(LpcErrorCode.connectionTimeout,
-                'automatic known-peer probe timed out')));
-        _log('known probe timed out endpoint=$endpointId');
-        _startNextKnownPeerProbe();
-      });
+      _knownPeerProbeTimers[endpointId] = Timer(
+        Duration(milliseconds: config.reconnectTimeoutMs),
+        () {
+          _knownPeerProbeTimers.remove(endpointId);
+          _releaseFreshHandshakeHandoff(endpointId);
+          if (!_automaticProbeEndpoints.remove(endpointId)) return;
+          _deferKnownPeerProbe(endpointId);
+          unawaited(attempt.cancel().catchError((_) {}));
+          _events.add(
+            KnownPeerProbeFailed(
+              _monotonicMs,
+              endpointId,
+              const LpcException(
+                LpcErrorCode.connectionTimeout,
+                'automatic known-peer probe timed out',
+              ),
+            ),
+          );
+          _log('known probe timed out endpoint=$endpointId');
+          _startNextKnownPeerProbe();
+        },
+      );
       attempt.events.listen((event) {
         if (event is ConnectionAttemptFailed) {
           _knownPeerProbeTimers.remove(endpointId)?.cancel();
+          _releaseFreshHandshakeHandoff(endpointId);
           if (_shouldBackoffKnownPeerProbe(event.error)) {
             _deferKnownPeerProbe(endpointId);
           }
-          _events
-              .add(KnownPeerProbeFailed(_monotonicMs, endpointId, event.error));
+          _events.add(
+            KnownPeerProbeFailed(_monotonicMs, endpointId, event.error),
+          );
           _log(
-              'known probe failed endpoint=$endpointId code=${event.error.code.name} detail=${event.error.message}');
+            'known probe failed endpoint=$endpointId code=${event.error.code.name} detail=${event.error.message}',
+          );
+          _releaseAutomaticGattConnectSlot(endpointId);
         } else if (event is ConnectionAttemptConnected ||
             event is ConnectionAttemptCancelled) {
           _knownPeerProbeTimers.remove(endpointId)?.cancel();
+          _releaseFreshHandshakeHandoff(endpointId);
+          _releaseAutomaticGattConnectSlot(endpointId);
         }
       });
     } on Object catch (error) {
       _knownPeerProbeTimers.remove(endpointId)?.cancel();
+      _releaseFreshHandshakeHandoff(endpointId);
       _events.add(
-          KnownPeerProbeFailed(_monotonicMs, endpointId, _asLpcError(error)));
+        KnownPeerProbeFailed(_monotonicMs, endpointId, _asLpcError(error)),
+      );
       _log('known probe could not start endpoint=$endpointId error=$error');
       _automaticProbeEndpoints.remove(endpointId);
+      _releaseAutomaticGattConnectSlot(endpointId);
       if (_shouldBackoffKnownPeerProbe(_asLpcError(error))) {
         _deferKnownPeerProbe(endpointId);
       }
       _startNextKnownPeerProbe();
     }
+  }
+
+  /// Releases the serialized automatic-probe slot after the complete
+  /// application attempt has ended.  Do not release it from
+  /// PlatformGattConnected: that event precedes the protocol handshake and
+  /// is not proof that a usable PeerConnection exists.
+  void _releaseAutomaticGattConnectSlot(String endpointId) {
+    if (_automaticGattConnectInFlight != endpointId) return;
+    _automaticGattConnectInFlight = null;
+    _startNextKnownPeerProbe();
   }
 
   bool _shouldBackoffKnownPeerProbe(LpcException error) {
@@ -1795,10 +2439,44 @@ class NearbyRuntime {
     // link"). Discovery continues during that short native teardown window;
     // without the same bounded backoff used for transport failures, each
     // advertisement starts another probe and starves the real reconnect.
-    return error.code == LpcErrorCode.platformError &&
-        error.message
-            .toLowerCase()
-            .contains('endpoint already has a client link');
+    return _isEndpointBusyError(error) || _isServerLinkDuplicateError(error);
+  }
+
+  bool _isEndpointBusyError(Object error) {
+    final lpcError = _asLpcError(error);
+    return lpcError.code == LpcErrorCode.platformError &&
+        lpcError.message.toLowerCase().contains(
+          'endpoint already has a client link',
+        );
+  }
+
+  bool _isServerLinkDuplicateError(Object error) {
+    final lpcError = _asLpcError(error);
+    return lpcError.code == LpcErrorCode.platformError &&
+        (lpcError.message.toLowerCase().contains(
+              'endpoint already has a server link',
+            ) ||
+            lpcError.message.toLowerCase().contains(
+              'endpoint already has an authenticated server link',
+            ));
+  }
+
+  Future<void> _closeBusyGattEndpoint(
+    PlatformBleBackend backend,
+    String endpointId,
+  ) async {
+    try {
+      // Do not route this through _closeGattBinding: the Dart binding is
+      // already absent in this failure mode, while the native plugin may
+      // still own an unreported BluetoothGatt handle. An unscoped native
+      // close deliberately targets that current stale handle.
+      await backend.closeGattConnection(endpointId);
+      _log('closed stale busy GATT endpoint=$endpointId before retry');
+    } on Object catch (closeError) {
+      _log(
+        'stale busy GATT close failed endpoint=$endpointId error=$closeError',
+      );
+    }
   }
 
   void _deferKnownPeerProbe(String endpointId) {
@@ -1820,9 +2498,9 @@ class NearbyRuntime {
   }
 
   void _startNextKnownPeerProbe() {
-    while (
+    while (_automaticGattConnectInFlight == null &&
         _automaticProbeEndpoints.length < config.maxConcurrentKnownPeerProbes &&
-            _pendingKnownPeerProbes.isNotEmpty) {
+        _pendingKnownPeerProbes.isNotEmpty) {
       final endpointId = _pendingKnownPeerProbes.first;
       _pendingKnownPeerProbes.remove(endpointId);
       _startKnownPeerProbe(endpointId);
@@ -1841,9 +2519,11 @@ class NearbyRuntime {
   }) {
     if (owner == null) return;
     final endpointIds = _automaticProbeEndpoints
-        .where((endpointId) =>
-            endpointId != exceptEndpointId &&
-            _authenticatedAutomaticProbePeers[endpointId] == owner.peerId)
+        .where(
+          (endpointId) =>
+              endpointId != exceptEndpointId &&
+              _authenticatedAutomaticProbePeers[endpointId] == owner.peerId,
+        )
         .toList(growable: false);
     for (final endpointId in endpointIds) {
       _automaticProbeEndpoints.remove(endpointId);
@@ -1869,8 +2549,11 @@ class NearbyRuntime {
   }
 
   Future<bool> _classifyKnownPeer(
-      PeerConnection peer, String endpointId) async {
+    PeerConnection peer,
+    String endpointId,
+  ) async {
     _knownPeerProbeNotBeforeMs.remove(endpointId);
+    _releaseFreshHandshakeHandoff(endpointId);
     bool known = _knownPeerCache[peer.peerId] ?? false;
     if (!_knownPeerCache.containsKey(peer.peerId)) {
       try {
@@ -1880,7 +2563,16 @@ class NearbyRuntime {
       } on Object {
         known = false;
       }
-      if (config.maxKnownPeerCacheEntries > 0) {
+      // Relationship state can change while a Runtime remains alive.  Do not
+      // cache a negative answer: otherwise an unfriend followed by a new
+      // friend would continue to classify every replacement endpoint as
+      // unknown until Runtime restart.  That leaves the bounded unknown-peer
+      // handoff timer (30 seconds in this runtime) to close an otherwise
+      // healthy link on every reconnect.  The spec permits caching but
+      // requires negative results to be short-lived; avoiding them entirely
+      // gives the application resolver authoritative live semantics without
+      // adding another invalidation API.
+      if (known && config.maxKnownPeerCacheEntries > 0) {
         if (_knownPeerCache.length >= config.maxKnownPeerCacheEntries) {
           _knownPeerCache.remove(_knownPeerCache.keys.first);
         }
@@ -1895,7 +2587,8 @@ class NearbyRuntime {
     // treated as terminal here.
     if (peer.state == PeerConnectionState.disconnected) {
       _log(
-          'known probe discarded endpoint=$endpointId peer=${peer.peerId} state=${peer.state.name}');
+        'known probe discarded endpoint=$endpointId peer=${peer.peerId} state=${peer.state.name}',
+      );
       _knownPeerProbeTimers.remove(endpointId)?.cancel();
       _automaticProbeEndpoints.remove(endpointId);
       _startNextKnownPeerProbe();
@@ -1903,10 +2596,12 @@ class NearbyRuntime {
     }
     if (known) {
       _log(
-          'known probe classified endpoint=$endpointId peer=${peer.peerId} known=true');
+        'known probe classified endpoint=$endpointId peer=${peer.peerId} known=true',
+      );
       _knownRetainedPeers.add(peer.peerId);
-      _events.add(KnownPeerConnected(_monotonicMs, peer,
-          discoveryEndpointId: endpointId));
+      _events.add(
+        KnownPeerConnected(_monotonicMs, peer, discoveryEndpointId: endpointId),
+      );
       if (config.maxKnownPeerCacheEntries > 0) {
         _knownPeerProbeEndpointsByPeer
             .putIfAbsent(peer, () => <String>{})
@@ -1914,9 +2609,15 @@ class NearbyRuntime {
       }
     } else {
       _log(
-          'known probe classified endpoint=$endpointId peer=${peer.peerId} known=false; releasing');
-      _events.add(UnknownPeerIdentified(_monotonicMs, peer,
-          discoveryEndpointId: endpointId));
+        'known probe classified endpoint=$endpointId peer=${peer.peerId} known=false; releasing',
+      );
+      _events.add(
+        UnknownPeerIdentified(
+          _monotonicMs,
+          peer,
+          discoveryEndpointId: endpointId,
+        ),
+      );
       // A duplicate automatic probe can resolve to the already-owned logical
       // PeerConnection. Disconnecting it here would tear down a HostSession,
       // direct, or group owner just because this particular discovery probe
@@ -1952,10 +2653,12 @@ class NearbyRuntime {
           }
         });
         _log(
-            'known probe deferred release peer=${peer.peerId} endpoint=$endpointId reason=${inboundHandshakeInProgress ? 'inbound-handshake' : 'auto-accept-host'}');
+          'known probe deferred release peer=${peer.peerId} endpoint=$endpointId reason=${inboundHandshakeInProgress ? 'inbound-handshake' : 'auto-accept-host'}',
+        );
       } else {
         _log(
-            'known probe retained shared peer=${peer.peerId} endpoint=$endpointId');
+          'known probe retained shared peer=${peer.peerId} endpoint=$endpointId',
+        );
       }
     }
     if (config.maxKnownPeerCacheEntries > 0) {
@@ -2016,13 +2719,16 @@ class NearbyRuntime {
       final backend = _platformBleBackend;
       if (backend != null) {
         await backend.stopAdvertising();
-        await backend.startAdvertising(config.serviceUuid,
-            localName: presentation.discoveryDisplayName);
+        await backend.startAdvertising(
+          config.serviceUuid,
+          localName: presentation.discoveryDisplayName,
+        );
       }
     }
     _discoveryDisplayName = presentation.discoveryDisplayName;
-    _applicationMetadata =
-        List<int>.unmodifiable(presentation.applicationMetadata);
+    _applicationMetadata = List<int>.unmodifiable(
+      presentation.applicationMetadata,
+    );
   }
 
   /// Completes the responder side of a fresh inbound candidate connection.
@@ -2030,18 +2736,38 @@ class NearbyRuntime {
   /// logical peer; the RESUME proof then binds the exact prior SessionId and
   /// secret before any core state is reattached.
   Future<void> _completeInboundGattResume(
-      PlatformGattConnected event,
-      GattBackendConnection connection,
-      HandshakeConnection handshake,
-      HandshakeResult candidate) async {
+    PlatformGattConnected event,
+    GattBackendConnection connection,
+    HandshakeConnection handshake,
+    HandshakeResult candidate,
+  ) async {
     final candidates = _peers
-        .where((peer) =>
-            peer.peerId == handshake.remotePeerId &&
-            peer.state == PeerConnectionState.reconnecting)
+        .where(
+          (peer) =>
+              peer.peerId == handshake.remotePeerId &&
+              peer.state == PeerConnectionState.reconnecting,
+        )
         .toList(growable: false);
     if (candidates.length != 1) {
+      // The candidate HELLO/AUTH is still a valid authenticated identity, but
+      // a process restart can erase the prior logical session before the
+      // remote side's RESUME request arrives. Reject the existing RESUME
+      // operation under the fresh candidate keys so the requester can fall
+      // back to a new READY session immediately. Waiting for the reconnect
+      // watchdog here made an app restart look like a 30-second transport
+      // outage even though both devices were nearby and authenticated.
+      await CandidateResumeConnection.sendReject(
+        backend: connection,
+        candidateSessionRootKey: candidate.secrets.sessionRootKey,
+        candidateSessionId: candidate.secrets.sessionId,
+        localPeerId: localPeerId,
+        remotePeerId: handshake.remotePeerId,
+        error: LpcErrorCode.resumeRejected,
+      );
       throw const LpcException(
-          LpcErrorCode.resumeRejected, 'no unique reconnecting logical peer');
+        LpcErrorCode.resumeRejected,
+        'no unique reconnecting logical peer',
+      );
     }
     final peer = candidates.single;
     final inboundReconnect = _gattReconnects.values
@@ -2049,46 +2775,97 @@ class NearbyRuntime {
         .firstOrNull;
     final deadlineMs =
         (inboundReconnect?.schedule.startedAtMs ?? peer._core.monotonicNowMs) +
-            (inboundReconnect?.schedule.timeoutMs ?? config.reconnectTimeoutMs);
+        (inboundReconnect?.schedule.timeoutMs ?? config.reconnectTimeoutMs);
     Future<T> bounded<T>(Future<T> future, String phase) {
       final remaining = deadlineMs - peer._core.monotonicNowMs;
       if (remaining <= 0) {
         throw const LpcException(
-            LpcErrorCode.connectionTimeout, 'resume deadline exceeded');
+          LpcErrorCode.connectionTimeout,
+          'resume deadline exceeded',
+        );
       }
       return future.timeout(
         Duration(milliseconds: remaining),
         onTimeout: () => throw LpcException(
-            LpcErrorCode.connectionTimeout, 'inbound resume $phase timed out'),
+          LpcErrorCode.connectionTimeout,
+          'inbound resume $phase timed out',
+        ),
       );
     }
 
     _log(
-        'inbound resume candidate matched endpoint=${event.endpointId} peer=${peer.peerId} candidates=${candidates.length}');
+      'inbound resume candidate matched endpoint=${event.endpointId} peer=${peer.peerId} candidates=${candidates.length}',
+    );
     final previousEndpoint = _gattLinks[peer]?.endpointId;
     final resume = CandidateResumeConnection(
-        backend: connection,
-        candidateSessionRootKey: candidate.secrets.sessionRootKey,
-        candidateSessionId: candidate.secrets.sessionId,
-        candidateTranscript: candidate.transcript,
-        localPeerId: localPeerId,
-        remotePeerId: peer.peerId,
-        previousSessionId: peer.sessionId,
-        previousResumeSecret: peer._core.resumeSecret,
-        previousGeneration: peer._core.generation,
-        requester: false,
-        initialEncodedFrame: await handshake.candidateInitialFrame);
+      backend: connection,
+      candidateSessionRootKey: candidate.secrets.sessionRootKey,
+      candidateSessionId: candidate.secrets.sessionId,
+      candidateTranscript: candidate.transcript,
+      localPeerId: localPeerId,
+      remotePeerId: peer.peerId,
+      previousSessionId: peer.sessionId,
+      previousResumeSecret: peer._core.resumeSecret,
+      previousGeneration: peer._core.generation,
+      requester: false,
+      initialEncodedFrame: await handshake.candidateInitialFrame,
+    );
     await bounded(resume.start(), 'proof start');
     final resumed = await bounded(resume.completed, 'proof');
+    // Two symmetric runtimes can authenticate crossed RESUME candidates at
+    // nearly the same time.  The first candidate to commit calls
+    // _finishGattResume, which disposes the other reconnect record.  Do not
+    // let that slower candidate apply a second generation or overwrite the
+    // winning binding after its reconnect ownership has been cancelled.
+    if (peer.state != PeerConnectionState.reconnecting ||
+        (inboundReconnect != null && inboundReconnect.closed)) {
+      _log(
+        'inbound resume candidate lost race endpoint=${event.endpointId} peer=${peer.peerId}',
+      );
+      await _closeGattBinding(
+        event.endpointId,
+        connectionGeneration: event.connectionGeneration,
+      );
+      return;
+    }
     _log(
-        'inbound resume proof accepted endpoint=${event.endpointId} peer=${peer.peerId} generation=${resumed.generation}');
+      'inbound resume proof accepted endpoint=${event.endpointId} peer=${peer.peerId} generation=${resumed.generation}',
+    );
     peer._core.completeResume(
-        newGeneration: resumed.generation,
-        resumedSessionRootKey: resumed.sessionRootKey,
-        newResumeSecret: resumed.resumeSecret,
-        resumedBackend: connection);
+      newGeneration: resumed.generation,
+      resumedSessionRootKey: resumed.sessionRootKey,
+      newResumeSecret: resumed.resumeSecret,
+      resumedBackend: connection,
+    );
+    peer._resumeCommitted();
+    // Commit endpoint ownership before replaying reliable traffic.  The old
+    // physical generation can deliver a delayed disconnect callback while
+    // replay is awaiting native writes.  If the old endpoint remains mapped
+    // during that window, _onPlatformEvent can incorrectly move this freshly
+    // resumed logical peer back to RECONNECTING.  The generation guard on the
+    // old binding still filters stale transport data; this map update makes
+    // the callback harmless as well.
+    _gattLinks[peer] = _GattLink(
+      event.endpointId,
+      event.localRole == 'central',
+      connectionGeneration: event.connectionGeneration,
+      candidateStartedAtMs:
+          _gattCandidateStartedAtMs[event.endpointId] ?? _monotonicMs,
+      readyAtMs: _monotonicMs,
+    );
+    _gattPeersByEndpoint[event.endpointId] = peer;
+    if (event.physicalEndpointId != null) {
+      _authenticatedPeerByPhysicalEndpoint[event.physicalEndpointId!] = peer;
+    }
+    _gattCandidateStartedAtMs.remove(event.endpointId);
+    if (previousEndpoint != null && previousEndpoint != event.endpointId) {
+      if (_gattPeersByEndpoint[previousEndpoint] == peer) {
+        _gattPeersByEndpoint.remove(previousEndpoint);
+      }
+    }
     _log(
-        'inbound resume state ready endpoint=${event.endpointId} peer=${peer.peerId}');
+      'inbound resume state ready endpoint=${event.endpointId} peer=${peer.peerId}',
+    );
     _finishGattResume(peer, event.endpointId);
     _gattReconnectExpiryTimers.remove(peer)?.cancel();
     try {
@@ -2098,23 +2875,26 @@ class NearbyRuntime {
             .then<void>((_) {}),
         peer._core
             .retransmitAckRequiredFramesAfterResume(
-                nowMs: peer._core.monotonicNowMs)
+              nowMs: peer._core.monotonicNowMs,
+            )
             .then<void>((_) {}),
       ]).timeout(const Duration(seconds: 5));
     } on Object catch (error) {
       _log(
-          'inbound resume replay deferred endpoint=${event.endpointId} peer=${peer.peerId} error=$error');
+        'inbound resume replay deferred endpoint=${event.endpointId} peer=${peer.peerId} error=$error',
+      );
     }
     if (peer.state != PeerConnectionState.ready) {
       _log(
-          'inbound resume transport lost during replay endpoint=${event.endpointId} peer=${peer.peerId}');
+        'inbound resume transport lost during replay endpoint=${event.endpointId} peer=${peer.peerId}',
+      );
       if (inboundReconnect != null) {
         _reconnectAttemptFailed(inboundReconnect);
       }
       return;
     }
-    _gattLinks[peer] =
-        _GattLink(event.endpointId, event.localRole == 'central');
+    // The new endpoint was mapped when RESUME committed, before replay.  Do
+    // not defer that ownership update until after native writes complete.
     _reconnectWaitingForDiscovery.remove(peer);
     _reconnectWaitingSchedules.remove(peer);
     if (previousEndpoint != null && previousEndpoint != event.endpointId) {
@@ -2129,7 +2909,8 @@ class NearbyRuntime {
   void _beginGattReconnect(PeerConnection peer) {
     if (!config.autoReconnect || _state != RuntimeState.ready) {
       _log(
-          'reconnect not scheduled peer=${peer.peerId} autoReconnect=${config.autoReconnect} runtime=${_state.name}');
+        'reconnect not scheduled peer=${peer.peerId} autoReconnect=${config.autoReconnect} runtime=${_state.name}',
+      );
       return;
     }
     final link = _gattLinks[peer];
@@ -2140,27 +2921,34 @@ class NearbyRuntime {
     if (link == null || !link.localCanInitiateReconnect) {
       _reconnectWaitingForDiscovery.add(peer);
       _reconnectWaitingSchedules.putIfAbsent(
-          peer,
-          () => ReconnectSchedule(
-              startedAtMs: peer._core.monotonicNowMs,
-              timeoutMs: config.reconnectTimeoutMs));
+        peer,
+        () => ReconnectSchedule(
+          startedAtMs: peer._core.monotonicNowMs,
+          timeoutMs: config.reconnectTimeoutMs,
+        ),
+      );
       _log(
-          'reconnect awaiting discovery peer=${peer.peerId} reason=${link == null ? 'no-gatt-link' : 'local-peripheral'}');
+        'reconnect awaiting discovery peer=${peer.peerId} reason=${link == null ? 'no-gatt-link' : 'local-peripheral'}',
+      );
       return;
     }
     final endpointId = link.endpointId;
+    final staleGeneration = link.connectionGeneration;
     final existing = _gattReconnects[endpointId];
     if (existing != null) {
       _log(
-          'reconnect already scheduled peer=${peer.peerId} endpoint=$endpointId');
+        'reconnect already scheduled peer=${peer.peerId} endpoint=$endpointId',
+      );
       return;
     }
     final reconnect = _GattReconnect(
-        peer,
-        endpointId,
-        ReconnectSchedule(
-            startedAtMs: peer._core.monotonicNowMs,
-            timeoutMs: config.reconnectTimeoutMs));
+      peer,
+      endpointId,
+      ReconnectSchedule(
+        startedAtMs: peer._core.monotonicNowMs,
+        timeoutMs: config.reconnectTimeoutMs,
+      ),
+    );
     _gattReconnects[endpointId] = reconnect;
     final staleBinding = _gattBindings.remove(endpointId);
     // Even when the platform-disconnect callback already removed the Dart
@@ -2168,10 +2956,15 @@ class NearbyRuntime {
     // few Android Bluetooth stacks report the link as disconnected before
     // releasing the client handle, which otherwise makes the first RESUME
     // connectGatt call race the old native object.
-    reconnect.staleGenerationCleanup =
-        _closeStaleGattGeneration(endpointId, staleBinding, reconnect);
+    reconnect.staleGenerationCleanup = _closeStaleGattGeneration(
+      endpointId,
+      staleBinding,
+      reconnect,
+      staleGeneration: staleGeneration,
+    );
     _log(
-        'reconnect scheduled peer=${peer.peerId} endpoint=$endpointId timeoutMs=${config.reconnectTimeoutMs}');
+      'reconnect scheduled peer=${peer.peerId} endpoint=$endpointId timeoutMs=${config.reconnectTimeoutMs}',
+    );
     reconnect.timer = Timer.periodic(const Duration(milliseconds: 50), (_) {
       _pollGattReconnect(reconnect);
     });
@@ -2180,14 +2973,16 @@ class NearbyRuntime {
 
   void _scheduleGattReconnectExpiry(PeerConnection peer) {
     _gattReconnectExpiryTimers[peer]?.cancel();
-    _gattReconnectExpiryTimers[peer] =
-        Timer(Duration(milliseconds: config.reconnectTimeoutMs), () {
-      _gattReconnectExpiryTimers.remove(peer);
-      if (peer.state == PeerConnectionState.reconnecting) {
-        _log('reconnect expired peer=${peer.peerId}; terminal disconnect');
-        unawaited(peer.disconnect());
-      }
-    });
+    _gattReconnectExpiryTimers[peer] = Timer(
+      Duration(milliseconds: config.reconnectTimeoutMs),
+      () {
+        _gattReconnectExpiryTimers.remove(peer);
+        if (peer.state == PeerConnectionState.reconnecting) {
+          _log('reconnect expired peer=${peer.peerId}; terminal disconnect');
+          unawaited(peer.disconnect());
+        }
+      },
+    );
   }
 
   void _pollGattReconnect(_GattReconnect reconnect) {
@@ -2198,7 +2993,8 @@ class NearbyRuntime {
     final nowMs = reconnect.peer._core.monotonicNowMs;
     if (reconnect.schedule.expiredAt(nowMs)) {
       _log(
-          'reconnect schedule expired peer=${reconnect.peer.peerId} endpoint=${reconnect.endpointId}');
+        'reconnect schedule expired peer=${reconnect.peer.peerId} endpoint=${reconnect.endpointId}',
+      );
       _gattReconnects.remove(reconnect.endpointId);
       reconnect.dispose();
       unawaited(reconnect.peer.disconnect());
@@ -2213,15 +3009,21 @@ class NearbyRuntime {
         // Future.whenComplete, whose returned error Future could become an
         // unhandled exception during native teardown.
         reconnect.staleGenerationCleanupWaitAttached = true;
-        unawaited(cleanup.then<void>((_) {
-          reconnect.staleGenerationCleanupComplete = true;
-          _pollGattReconnect(reconnect);
-        }, onError: (Object error, StackTrace stack) {
-          _log(
-              'stale GATT generation cleanup failed endpoint=${reconnect.endpointId} error=$error');
-          reconnect.staleGenerationCleanupComplete = true;
-          _pollGattReconnect(reconnect);
-        }));
+        unawaited(
+          cleanup.then<void>(
+            (_) {
+              reconnect.staleGenerationCleanupComplete = true;
+              _pollGattReconnect(reconnect);
+            },
+            onError: (Object error, StackTrace stack) {
+              _log(
+                'stale GATT generation cleanup failed endpoint=${reconnect.endpointId} error=$error',
+              );
+              reconnect.staleGenerationCleanupComplete = true;
+              _pollGattReconnect(reconnect);
+            },
+          ),
+        );
         reconnect.staleGenerationCleanup = null;
       }
       return;
@@ -2231,23 +3033,36 @@ class NearbyRuntime {
       final remainingMs =
           reconnect.schedule.startedAtMs + reconnect.schedule.timeoutMs - nowMs;
       _log(
-          'reconnect attempt endpoint=${reconnect.endpointId} peer=${reconnect.peer.peerId} remainingMs=${remainingMs < 0 ? 0 : remainingMs} failureCount=${reconnect.schedule.failedAttempts}');
+        'reconnect attempt endpoint=${reconnect.endpointId} peer=${reconnect.peer.peerId} remainingMs=${remainingMs < 0 ? 0 : remainingMs} failureCount=${reconnect.schedule.failedAttempts}',
+      );
       unawaited(() async {
         try {
           await _platformBleBackend!.connectGatt(reconnect.endpointId);
         } on Object catch (error) {
+          if (_isEndpointBusyError(error)) {
+            await _closeBusyGattEndpoint(
+              _platformBleBackend!,
+              reconnect.endpointId,
+            );
+          }
           _log(
-              'reconnect platform request failed endpoint=${reconnect.endpointId} error=$error');
+            'reconnect platform request failed endpoint=${reconnect.endpointId} error=$error',
+          );
           _reconnectAttemptFailed(reconnect);
         }
       }());
     }
   }
 
-  Future<void> _closeStaleGattGeneration(String endpointId,
-      PlatformGattConnectionBinding? binding, _GattReconnect reconnect) async {
+  Future<void> _closeStaleGattGeneration(
+    String endpointId,
+    PlatformGattConnectionBinding? binding,
+    _GattReconnect reconnect, {
+    int? staleGeneration,
+  }) async {
     _log(
-        'closing stale GATT generation before reconnect endpoint=$endpointId peer=${reconnect.peer.peerId}');
+      'closing stale GATT generation before reconnect endpoint=$endpointId peer=${reconnect.peer.peerId}',
+    );
     // Remove the event subscription first so the old binding cannot consume a
     // fragment or writable callback after the logical peer has entered its
     // next generation. GattBackendConnection.close then releases the native
@@ -2256,11 +3071,25 @@ class NearbyRuntime {
       await binding.close();
       await binding.connection.close();
     } else {
-      _rememberNativeCloseRequested(endpointId);
-      await _platformBleBackend?.closeGattConnection(endpointId);
+      // The Dart binding may already have been removed by the platform
+      // disconnect callback while the native client handle is still being
+      // released. Keep the old generation on this fallback close. An
+      // unscoped close can otherwise tear down a replacement GATT generation
+      // that connected while the old callback was still draining, producing
+      // the immediate READY->RECONNECTING loop seen on iOS/macOS and the
+      // ENDPOINT_BUSY/callback churn seen on Android.
+      _rememberNativeCloseRequested(
+        endpointId,
+        connectionGeneration: staleGeneration,
+      );
+      await _platformBleBackend?.closeGattConnection(
+        endpointId,
+        connectionGeneration: staleGeneration,
+      );
     }
     _log(
-        'stale GATT generation closed before reconnect endpoint=$endpointId peer=${reconnect.peer.peerId}');
+      'stale GATT generation closed before reconnect endpoint=$endpointId peer=${reconnect.peer.peerId}',
+    );
   }
 
   void _reconnectAttemptFailed(_GattReconnect reconnect) {
@@ -2275,6 +3104,15 @@ class NearbyRuntime {
       // nearby endpoint at the reconnect timer rate after a failed identity
       // or transport attempt; wait for a later advertisement instead.
       _gattReconnects.remove(reconnect.endpointId);
+      // This endpoint was only a speculative observation.  It must not keep
+      // the logical peer marked as waiting on that one observation: with
+      // several nearby devices, the first advertisement can belong to a
+      // different PeerId and its native connect may time out while the real
+      // peer is already advertising.  Leaving this set populated starves the
+      // correct endpoint until the reconnect deadline (15 seconds by
+      // default), which appeared as a systematic long reconnect on Android
+      // and iOS even though the transport itself was available.
+      _reconnectWaitingForDiscovery.remove(reconnect.peer);
       final nowMs = reconnect.peer._core.monotonicNowMs;
       if (reconnect.schedule.attemptDue(nowMs)) {
         reconnect.schedule.attemptFailed(nowMs);
@@ -2282,11 +3120,13 @@ class NearbyRuntime {
       reconnect.dispose();
       _deferKnownPeerProbe(reconnect.endpointId);
       _log(
-          'reconnect discovery candidate released endpoint=${reconnect.endpointId} peer=${reconnect.peer.peerId}');
+        'reconnect discovery candidate released endpoint=${reconnect.endpointId} peer=${reconnect.peer.peerId}',
+      );
       return;
     }
     _log(
-        'reconnect attempt failed endpoint=${reconnect.endpointId} peer=${reconnect.peer.peerId}');
+      'reconnect attempt failed endpoint=${reconnect.endpointId} peer=${reconnect.peer.peerId}',
+    );
     final nowMs = reconnect.peer._core.monotonicNowMs;
     if (reconnect.schedule.attemptDue(nowMs)) {
       reconnect.schedule.attemptFailed(nowMs);
@@ -2306,28 +3146,39 @@ class NearbyRuntime {
         // Another candidate may have reached native connected or even begun
         // candidate RESUME before this one won. Close that physical link so
         // its task cannot later race the already READY logical session.
-        unawaited(_closeGattBinding(entry.key));
+        // Keep the losing endpoint suppressed as well: discovery can report
+        // it again after the native close, and treating it as a fresh
+        // known-peer probe would recreate the crossed-RESUME loop.
+        _suppressKnownProbeForOwner(entry.key, peer);
+        unawaited(_closeGattBinding(entry.key, preserveSharedLink: true));
       }
     }
   }
 
   Future<void> _startGattResume(
-      PlatformGattConnected event, _GattReconnect reconnect) async {
+    PlatformGattConnected event,
+    _GattReconnect reconnect,
+  ) async {
     final backend = _platformBleBackend!;
     final identity = _identity!;
     final peer = reconnect.peer;
     Future<T> bounded<T>(Future<T> future, String phase) {
-      final remaining = reconnect.schedule.startedAtMs +
+      final remaining =
+          reconnect.schedule.startedAtMs +
           reconnect.schedule.timeoutMs -
           peer._core.monotonicNowMs;
       if (remaining <= 0) {
         throw const LpcException(
-            LpcErrorCode.connectionTimeout, 'resume deadline exceeded');
+          LpcErrorCode.connectionTimeout,
+          'resume deadline exceeded',
+        );
       }
       return future.timeout(
         Duration(milliseconds: remaining),
         onTimeout: () => throw LpcException(
-            LpcErrorCode.connectionTimeout, 'resume $phase timed out'),
+          LpcErrorCode.connectionTimeout,
+          'resume $phase timed out',
+        ),
       );
     }
 
@@ -2336,63 +3187,72 @@ class NearbyRuntime {
         throw const LpcException(LpcErrorCode.invalidState);
       }
       _log(
-          'resume handshake start endpoint=${event.endpointId} peer=${peer.peerId} generation=${peer._core.generation}');
+        'resume handshake start endpoint=${event.endpointId} peer=${peer.peerId} generation=${peer._core.generation}',
+      );
       final previousEndpoint = _gattLinks[peer]?.endpointId;
       await _gattBindings.remove(event.endpointId)?.close();
       final connection = GattBackendConnection(
-          connectionId: event.endpointId,
-          logger: (message) => _log(
-              'gatt endpoint=${event.endpointId} generation=${event.connectionGeneration} $message'),
-          platform: PlatformGattFragmentPlatform(
-              backend: backend,
-              endpointId: event.endpointId,
-              platformSafeWriteSize: event.platformSafeWriteSize,
-              connectionGeneration: event.connectionGeneration,
-              onCloseRequested: () => _rememberNativeCloseRequested(
-                  event.endpointId,
-                  connectionGeneration: event.connectionGeneration)),
-          localRole: event.localRole == 'central'
-              ? GattLinkRole.central
-              : GattLinkRole.peripheral,
-          maxQueuedBytes: config.maxQueuedBytesPerPeer,
-          fragmentTimeoutMs: config.gattFragmentInactivityTimeoutMs);
-      _gattBindings[event.endpointId] = PlatformGattConnectionBinding(
+        connectionId: event.endpointId,
+        logger: (message) => _log(
+          'gatt endpoint=${event.endpointId} generation=${event.connectionGeneration} $message',
+        ),
+        platform: PlatformGattFragmentPlatform(
           backend: backend,
           endpointId: event.endpointId,
-          connection: connection,
-          connectionGeneration: event.connectionGeneration);
+          platformSafeWriteSize: event.platformSafeWriteSize,
+          connectionGeneration: event.connectionGeneration,
+          onCloseRequested: () => _rememberNativeCloseRequested(
+            event.endpointId,
+            connectionGeneration: event.connectionGeneration,
+          ),
+        ),
+        localRole: event.localRole == 'central'
+            ? GattLinkRole.central
+            : GattLinkRole.peripheral,
+        maxQueuedBytes: config.maxQueuedBytesPerPeer,
+        fragmentTimeoutMs: config.gattFragmentInactivityTimeoutMs,
+      );
+      _gattBindings[event.endpointId] = PlatformGattConnectionBinding(
+        backend: backend,
+        endpointId: event.endpointId,
+        connection: connection,
+        connectionGeneration: event.connectionGeneration,
+      );
       final ephemeral = await X25519().newKeyPair();
       final ephemeralPublic = await ephemeral.extractPublicKey();
       final trustMode = _resumeTrustMode(peer.securityLevel);
       final handshake = HandshakeConnection(
-          backend: connection,
-          localPeerId: localPeerId,
-          logger: (message) =>
-              _log('resume endpoint=${event.endpointId} $message'),
-          candidateOnly: true,
-          exchange: HandshakeExchange(
-              serviceUuid: config.serviceUuid,
-              localHello: HelloPayload(
-                  peerId: localPeerId,
-                  identityPublicKey: identity.publicKey.bytes,
-                  ephemeralPublicKey: ephemeralPublic.bytes,
-                  connectionNonce: List<int>.generate(
-                      16, (_) => Random.secure().nextInt(256)),
-                  peerCapabilities: PeerCapabilityBitmap(const [
-                    PeerCapability.gattBaseline,
-                    PeerCapability.resume
-                  ]).value,
-                  keepaliveIntervalMs: config.keepaliveIntervalMs,
-                  trustMode: trustMode),
-              localIdentityKeyPair: identity.keyPair,
-              localEphemeralKeyPair: ephemeral,
-              knownPeerPolicy: trustMode == HandshakeTrustMode.knownPeer
-                  ? ExpectExactPeer(peer.peerId)
-                  : null,
-              tofuStore:
-                  trustMode == HandshakeTrustMode.tofu ? _tofuStore : null,
-              psk32:
-                  trustMode == HandshakeTrustMode.psk32 ? config.psk32 : null));
+        backend: connection,
+        localPeerId: localPeerId,
+        logger: (message) =>
+            _log('resume endpoint=${event.endpointId} $message'),
+        candidateOnly: true,
+        exchange: HandshakeExchange(
+          serviceUuid: config.serviceUuid,
+          localHello: HelloPayload(
+            peerId: localPeerId,
+            identityPublicKey: identity.publicKey.bytes,
+            ephemeralPublicKey: ephemeralPublic.bytes,
+            connectionNonce: List<int>.generate(
+              16,
+              (_) => Random.secure().nextInt(256),
+            ),
+            peerCapabilities: PeerCapabilityBitmap(const [
+              PeerCapability.gattBaseline,
+              PeerCapability.resume,
+            ]).value,
+            keepaliveIntervalMs: config.keepaliveIntervalMs,
+            trustMode: trustMode,
+          ),
+          localIdentityKeyPair: identity.keyPair,
+          localEphemeralKeyPair: ephemeral,
+          knownPeerPolicy: trustMode == HandshakeTrustMode.knownPeer
+              ? ExpectExactPeer(peer.peerId)
+              : null,
+          tofuStore: trustMode == HandshakeTrustMode.tofu ? _tofuStore : null,
+          psk32: trustMode == HandshakeTrustMode.psk32 ? config.psk32 : null,
+        ),
+      );
       final ready = handshake.ready;
       final authenticated = handshake.authenticated;
       // A candidate resume can be terminated by the reconnect deadline
@@ -2404,29 +3264,75 @@ class NearbyRuntime {
       await bounded(handshake.start(), 'handshake');
       final candidate = await bounded(authenticated, 'authentication');
       _log(
-          'resume candidate authenticated endpoint=${event.endpointId} peer=${peer.peerId}');
+        'resume candidate authenticated endpoint=${event.endpointId} peer=${peer.peerId}',
+      );
+      await backend.associateGattPeer(event.endpointId, peer.peerId);
       final resume = CandidateResumeConnection(
-          backend: connection,
-          candidateSessionRootKey: candidate.secrets.sessionRootKey,
-          candidateSessionId: candidate.secrets.sessionId,
-          candidateTranscript: candidate.transcript,
-          localPeerId: localPeerId,
-          remotePeerId: peer.peerId,
-          previousSessionId: peer.sessionId,
-          previousResumeSecret: peer._core.resumeSecret,
-          previousGeneration: peer._core.generation,
-          requester: true);
+        backend: connection,
+        candidateSessionRootKey: candidate.secrets.sessionRootKey,
+        candidateSessionId: candidate.secrets.sessionId,
+        candidateTranscript: candidate.transcript,
+        localPeerId: localPeerId,
+        remotePeerId: peer.peerId,
+        previousSessionId: peer.sessionId,
+        previousResumeSecret: peer._core.resumeSecret,
+        previousGeneration: peer._core.generation,
+        requester: true,
+      );
       await bounded(resume.start(), 'proof start');
       final resumed = await bounded(resume.completed, 'proof');
+      // A crossed inbound candidate may have won while this candidate was
+      // proving RESUME.  _finishGattResume disposes this reconnect record in
+      // that case; committing here would rebind a stale generation and can
+      // close the already healthy replacement on the next native callback.
+      if (reconnect.closed ||
+          _gattReconnects[event.endpointId] != reconnect ||
+          peer.state != PeerConnectionState.reconnecting) {
+        _log(
+          'resume candidate lost race endpoint=${event.endpointId} peer=${peer.peerId}',
+        );
+        await _closeGattBinding(
+          event.endpointId,
+          connectionGeneration: event.connectionGeneration,
+        );
+        return;
+      }
       _log(
-          'resume proof accepted endpoint=${event.endpointId} peer=${peer.peerId} generation=${resumed.generation}');
+        'resume proof accepted endpoint=${event.endpointId} peer=${peer.peerId} generation=${resumed.generation}',
+      );
       peer._core.completeResume(
-          newGeneration: resumed.generation,
-          resumedSessionRootKey: resumed.sessionRootKey,
-          newResumeSecret: resumed.resumeSecret,
-          resumedBackend: connection);
+        newGeneration: resumed.generation,
+        resumedSessionRootKey: resumed.sessionRootKey,
+        newResumeSecret: resumed.resumeSecret,
+        resumedBackend: connection,
+      );
+      peer._resumeCommitted();
+      // Publish the new physical generation before replay.  Android and
+      // CoreBluetooth can report the old GATT disconnect after the new RESUME
+      // proof has succeeded.  Keeping the old endpoint in the runtime map
+      // until replay completes lets that late callback incorrectly mark the
+      // resumed logical peer as reconnecting again.
+      _gattLinks[peer] = _GattLink(
+        event.endpointId,
+        event.localRole == 'central',
+        connectionGeneration: event.connectionGeneration,
+        candidateStartedAtMs:
+            _gattCandidateStartedAtMs[event.endpointId] ?? _monotonicMs,
+        readyAtMs: _monotonicMs,
+      );
+      _gattPeersByEndpoint[event.endpointId] = peer;
+      if (event.physicalEndpointId != null) {
+        _authenticatedPeerByPhysicalEndpoint[event.physicalEndpointId!] = peer;
+      }
+      _gattCandidateStartedAtMs.remove(event.endpointId);
+      if (previousEndpoint != null && previousEndpoint != event.endpointId) {
+        if (_gattPeersByEndpoint[previousEndpoint] == peer) {
+          _gattPeersByEndpoint.remove(previousEndpoint);
+        }
+      }
       _log(
-          'resume state ready endpoint=${event.endpointId} peer=${peer.peerId}');
+        'resume state ready endpoint=${event.endpointId} peer=${peer.peerId}',
+      );
       _finishGattResume(peer, event.endpointId);
       // RESUME commits the logical state before replay. Replay is best-effort
       // transport work and must not hold the reconnect watchdog hostage when
@@ -2436,46 +3342,119 @@ class NearbyRuntime {
         await Future.wait<void>([
           peer._core
               .retransmitReliableDataAfterResume(
-                  nowMs: peer._core.monotonicNowMs)
+                nowMs: peer._core.monotonicNowMs,
+              )
               .then<void>((_) {}),
           peer._core
               .retransmitAckRequiredFramesAfterResume(
-                  nowMs: peer._core.monotonicNowMs)
+                nowMs: peer._core.monotonicNowMs,
+              )
               .then<void>((_) {}),
         ]).timeout(const Duration(seconds: 5));
       } on Object catch (error) {
         _log(
-            'resume replay deferred endpoint=${event.endpointId} peer=${peer.peerId} error=$error');
+          'resume replay deferred endpoint=${event.endpointId} peer=${peer.peerId} error=$error',
+        );
       }
       if (peer.state != PeerConnectionState.ready) {
         _log(
-            'resume transport lost during replay endpoint=${event.endpointId} peer=${peer.peerId}');
+          'resume transport lost during replay endpoint=${event.endpointId} peer=${peer.peerId}',
+        );
         _reconnectAttemptFailed(reconnect);
         return;
       }
-      _gattLinks[peer] =
-          _GattLink(event.endpointId, event.localRole == 'central');
+      // Endpoint ownership was committed with the RESUME proof above so
+      // delayed callbacks from the old generation cannot affect this peer.
       _reconnectWaitingForDiscovery.remove(peer);
       _reconnectWaitingSchedules.remove(peer);
-      _gattPeersByEndpoint[event.endpointId] = peer;
       if (previousEndpoint != null && previousEndpoint != event.endpointId) {
-        if (_gattPeersByEndpoint[previousEndpoint] == peer) {
-          _gattPeersByEndpoint.remove(previousEndpoint);
-        }
         await _gattBindings.remove(previousEndpoint)?.close();
       }
       reconnect.dispose();
     } on Object catch (error) {
+      final lpcError = _asLpcError(error);
       _log(
-          'resume failed endpoint=${event.endpointId} peer=${peer.peerId} error=$error');
+        'resume failed endpoint=${event.endpointId} peer=${peer.peerId} error=$error',
+      );
       try {
-        await _closeGattBinding(event.endpointId,
-            connectionGeneration: event.connectionGeneration);
+        await _closeGattBinding(
+          event.endpointId,
+          connectionGeneration: event.connectionGeneration,
+        );
       } on Object catch (cleanupError) {
         _log(
-            'resume binding cleanup failed endpoint=${event.endpointId} error=$cleanupError');
+          'resume binding cleanup failed endpoint=${event.endpointId} error=$cleanupError',
+        );
+      }
+      // A crossed RESUME can commit on the opposite physical candidate while
+      // this task is unwinding its loser.  The winning path has already
+      // rebound the logical core to READY and disposed this reconnect record;
+      // do not feed the loser back into reconnect scheduling or let its late
+      // native close be interpreted as loss of the winning generation.
+      if (reconnect.closed ||
+          _gattReconnects[event.endpointId] != reconnect ||
+          peer.state != PeerConnectionState.reconnecting) {
+        _log(
+          'resume candidate lost race during failure cleanup endpoint=${event.endpointId} peer=${peer.peerId}',
+        );
+        return;
+      }
+      if (lpcError.code == LpcErrorCode.resumeRejected &&
+          !reconnect.closed &&
+          _gattReconnects[event.endpointId] == reconnect &&
+          peer.state == PeerConnectionState.reconnecting) {
+        // A restarted peer can authenticate this candidate but cannot prove
+        // the old session. Start a normal known-peer candidate promptly after
+        // the rejected physical binding has closed. _ownPeer() will replace
+        // the reconnecting logical owner only after the fresh HELLO/AUTH/READY
+        // exchange succeeds; if it does not, the existing reconnect expiry
+        // remains the bounded terminal fallback.
+        _gattReconnects.remove(event.endpointId);
+        reconnect.dispose();
+        _markFreshHandshakeHandoff(event.endpointId, peer.peerId);
+        _knownPeerProbeNotBeforeMs.remove(event.endpointId);
+        Future<void>.delayed(const Duration(milliseconds: 250), () {
+          if (_state != RuntimeState.ready ||
+              peer.state != PeerConnectionState.reconnecting ||
+              _attempts.containsKey(event.endpointId) ||
+              _gattBindings.containsKey(event.endpointId) ||
+              _gattReconnects.containsKey(event.endpointId) ||
+              _automaticProbeEndpoints.contains(event.endpointId) ||
+              _closingGattEndpoints.contains(event.endpointId)) {
+            _releaseFreshHandshakeHandoff(event.endpointId);
+            return;
+          }
+          _startKnownPeerProbe(event.endpointId);
+        });
+        return;
       }
       _reconnectAttemptFailed(reconnect);
+    }
+  }
+
+  void _markFreshHandshakeHandoff(String endpointId, PeerId peerId) {
+    _freshHandshakeHandoffEndpoints.add(endpointId);
+    _freshHandshakeHandoffPeers[endpointId] = peerId;
+    _freshHandshakeHandoffTimers.remove(endpointId)?.cancel();
+    _freshHandshakeHandoffTimers[endpointId] = Timer(
+      _freshHandshakeHandoffTimeout,
+      () => _releaseFreshHandshakeHandoff(endpointId),
+    );
+  }
+
+  void _releaseFreshHandshakeHandoff(String endpointId) {
+    _freshHandshakeHandoffEndpoints.remove(endpointId);
+    _freshHandshakeHandoffPeers.remove(endpointId);
+    _freshHandshakeHandoffTimers.remove(endpointId)?.cancel();
+  }
+
+  void _releaseFreshHandshakeHandoffForPeer(PeerId peerId) {
+    final endpoints = _freshHandshakeHandoffPeers.entries
+        .where((entry) => entry.value == peerId)
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    for (final endpointId in endpoints) {
+      _releaseFreshHandshakeHandoff(endpointId);
     }
   }
 
@@ -2495,17 +3474,23 @@ class NearbyRuntime {
     }
     if (!config.enableGatt) {
       throw const LpcException(
-          LpcErrorCode.unsupportedCapability, 'GATT is disabled');
+        LpcErrorCode.unsupportedCapability,
+        'GATT is disabled',
+      );
     }
     final backend = _platformBleBackend;
     if (backend == null) {
       throw const LpcException(
-          LpcErrorCode.unsupportedCapability, 'no platform BLE backend');
+        LpcErrorCode.unsupportedCapability,
+        'no platform BLE backend',
+      );
     }
     final key = _serviceKey(config.serviceUuid);
     if (_discoveries.containsKey(key) || !_startingDiscovery.add(key)) {
-      throw const LpcException(LpcErrorCode.invalidState,
-          'discovery is already active for this service UUID');
+      throw const LpcException(
+        LpcErrorCode.invalidState,
+        'discovery is already active for this service UUID',
+      );
     }
     try {
       StreamSubscription<PlatformBleEvent>? subscription;
@@ -2518,16 +3503,24 @@ class NearbyRuntime {
           await _removeExplicitDiscoveryDemand();
         },
       );
-      subscription = backend.events.listen((event) {
-        if (event case PlatformEndpointFound()) {
-          session.recordEndpoint(DiscoveredEndpoint(event.endpointId,
-              rssi: event.rssi, localName: event.localName));
-        }
-      }, onError: (Object error, StackTrace stack) {
-        // A platform scan error should not terminate the runtime's discovery
-        // stream (the app may choose to retry or show its own diagnostics).
-        debugPrint('[LocalPeerConnections] discovery backend error: $error');
-      });
+      subscription = backend.events.listen(
+        (event) {
+          if (event case PlatformEndpointFound()) {
+            session.recordEndpoint(
+              DiscoveredEndpoint(
+                event.endpointId,
+                rssi: event.rssi,
+                localName: event.localName,
+              ),
+            );
+          }
+        },
+        onError: (Object error, StackTrace stack) {
+          // A platform scan error should not terminate the runtime's discovery
+          // stream (the app may choose to retry or show its own diagnostics).
+          debugPrint('[LocalPeerConnections] discovery backend error: $error');
+        },
+      );
       // Attach the event listener before starting the native scan. Some BLE
       // stacks report a cached advertisement synchronously from startScan;
       // subscribing first prevents losing that first endpoint.
@@ -2546,43 +3539,54 @@ class NearbyRuntime {
     }
   }
 
-  GroupSession joinOrCreateGroup(GroupConfig config,
-      {GroupId? groupId, PeerId? initialCoordinator}) {
+  GroupSession joinOrCreateGroup(
+    GroupConfig config, {
+    GroupId? groupId,
+    PeerId? initialCoordinator,
+  }) {
     if (_state != RuntimeState.ready)
       throw const LpcException(LpcErrorCode.invalidState);
     final profile = _AutoGroupHandshakeProfile(config);
     final activeProfile = _autoGroupProfile;
     if (activeProfile != null && !activeProfile.matches(profile)) {
-      throw const LpcException(LpcErrorCode.invalidState,
-          'active GroupSessions require one AUTO_GROUP handshake profile');
+      throw const LpcException(
+        LpcErrorCode.invalidState,
+        'active GroupSessions require one AUTO_GROUP handshake profile',
+      );
     }
     for (final host in _advertisingHosts) {
       if (host.config.autoAccept && !_hostMatchesGroupProfile(host, profile)) {
-        throw const LpcException(LpcErrorCode.invalidState,
-            'HostSession and AUTO_GROUP inbound profiles are incompatible');
+        throw const LpcException(
+          LpcErrorCode.invalidState,
+          'HostSession and AUTO_GROUP inbound profiles are incompatible',
+        );
       }
     }
     final random = Random.secure();
     late final GroupSession group;
-    group = GroupSession.internal(config, localPeerId,
-        groupId ?? GroupId(List<int>.generate(16, (_) => random.nextInt(256))),
-        initialCoordinator: initialCoordinator,
-        onClosed: _groupClosed,
-        onMembershipCommitted: _groupMembershipCommitted);
+    group = GroupSession.internal(
+      config,
+      localPeerId,
+      groupId ?? GroupId(List<int>.generate(16, (_) => random.nextInt(256))),
+      initialCoordinator: initialCoordinator,
+      onClosed: _groupClosed,
+      onMembershipCommitted: _groupMembershipCommitted,
+    );
     final routing = _RuntimeGroupRouteTransport(
-        group: group,
-        peers: () => Set.unmodifiable(_groupPeers[group] ?? const {}),
-        // A process restart can recreate the GroupSession after the
-        // authenticated PeerConnection has already been restored.  In that
-        // ordering the session membership is authoritative, but the
-        // Runtime-owned route-peer cache may still be empty.  Let the route
-        // transport reconcile that cache immediately before it resolves a
-        // hop, rather than making upper layers retry or choose a reconnect
-        // direction.
-        syncPeers: () => _syncGroupPeers(group),
-        maxReservedBytesPerDestination: this.config.maxQueuedBytesPerPeer,
-        maxReservedMessagesPerDestination: this.config.maxQueuedMessagesPerPeer,
-        logger: _log);
+      group: group,
+      peers: () => Set.unmodifiable(_groupPeers[group] ?? const {}),
+      // A process restart can recreate the GroupSession after the
+      // authenticated PeerConnection has already been restored.  In that
+      // ordering the session membership is authoritative, but the
+      // Runtime-owned route-peer cache may still be empty.  Let the route
+      // transport reconcile that cache immediately before it resolves a
+      // hop, rather than making upper layers retry or choose a reconnect
+      // direction.
+      syncPeers: () => _syncGroupPeers(group),
+      maxReservedBytesPerDestination: this.config.maxQueuedBytesPerPeer,
+      maxReservedMessagesPerDestination: this.config.maxQueuedMessagesPerPeer,
+      logger: _log,
+    );
     _groupRouting[group] = routing;
     _groupPeers[group] = <PeerConnection>{};
     _groups.add(group);
@@ -2613,15 +3617,18 @@ class NearbyRuntime {
     final committedMemberIds =
         memberIds ?? group.members.map((member) => member.peerId).toSet();
     final next = _peers
-        .where((peer) =>
-            committedMemberIds.contains(peer.peerId) &&
-            (profile == null || _peerMatchesGroupProfile(peer, profile)))
+        .where(
+          (peer) =>
+              committedMemberIds.contains(peer.peerId) &&
+              (profile == null || _peerMatchesGroupProfile(peer, profile)),
+        )
         .toSet();
     _groupPeers[group] = next;
     if (previous.length != next.length ||
         previous.any((peer) => !next.contains(peer))) {
       _log(
-          'group route peers synchronized group=${_debugId(group.groupId.bytes)} members=${committedMemberIds.join(',')} peers=${next.map((peer) => '${peer.peerId}:${peer.state}').join(',')}');
+        'group route peers synchronized group=${_debugId(group.groupId.bytes)} members=${committedMemberIds.join(',')} peers=${next.map((peer) => '${peer.peerId}:${peer.state}').join(',')}',
+      );
     }
     for (final peer in previous.difference(next)) {
       if (!_hasOtherOwner(peer)) unawaited(peer.disconnect());
@@ -2629,7 +3636,9 @@ class NearbyRuntime {
   }
 
   bool _peerMatchesGroupProfile(
-      PeerConnection peer, _AutoGroupHandshakeProfile profile) {
+    PeerConnection peer,
+    _AutoGroupHandshakeProfile profile,
+  ) {
     return switch (profile.trustMode) {
       HandshakeTrustMode.tofu =>
         peer.securityLevel == SecurityLevel.encryptedTofu,
@@ -2643,12 +3652,16 @@ class NearbyRuntime {
   }
 
   bool _hostMatchesGroupProfile(
-      HostSession host, _AutoGroupHandshakeProfile groupProfile) {
+    HostSession host,
+    _AutoGroupHandshakeProfile groupProfile,
+  ) {
     return _hostMatchesGroupProfileForConfig(host.config, groupProfile);
   }
 
   bool _hostMatchesGroupProfileForConfig(
-      HostConfig host, _AutoGroupHandshakeProfile groupProfile) {
+    HostConfig host,
+    _AutoGroupHandshakeProfile groupProfile,
+  ) {
     final trustMode = host.trustMode ?? config.trustMode;
     if (trustMode != groupProfile.trustMode) return false;
     if (trustMode == HandshakeTrustMode.psk32) {
@@ -2674,8 +3687,10 @@ class NearbyRuntime {
       if (!_advertisingActive) {
         await backend.listenGatt(config.serviceUuid);
         listenerStarted = true;
-        await backend.startAdvertising(config.serviceUuid,
-            localName: _discoveryDisplayName);
+        await backend.startAdvertising(
+          config.serviceUuid,
+          localName: _discoveryDisplayName,
+        );
         _advertisingActive = true;
       }
       if (!_discoveryActive) {
@@ -2740,21 +3755,29 @@ class NearbyRuntime {
     }
     if (!this.config.enableGatt) {
       throw const LpcException(
-          LpcErrorCode.unsupportedCapability, 'GATT is disabled');
+        LpcErrorCode.unsupportedCapability,
+        'GATT is disabled',
+      );
     }
     final backend = _platformBleBackend;
     if (backend == null) {
       throw const LpcException(
-          LpcErrorCode.unsupportedCapability, 'no platform BLE backend');
+        LpcErrorCode.unsupportedCapability,
+        'no platform BLE backend',
+      );
     }
     _validateTrustCredentialsFor(
-        this.config, config.trustMode ?? this.config.trustMode);
+      this.config,
+      config.trustMode ?? this.config.trustMode,
+    );
     final groupProfile = _autoGroupProfile;
     if (config.autoAccept &&
         groupProfile != null &&
         !_hostMatchesGroupProfileForConfig(config, groupProfile)) {
-      throw const LpcException(LpcErrorCode.invalidState,
-          'HostSession and AUTO_GROUP inbound profiles are incompatible');
+      throw const LpcException(
+        LpcErrorCode.invalidState,
+        'HostSession and AUTO_GROUP inbound profiles are incompatible',
+      );
     }
     final runtimeConfig = this.config;
     late final HostSession host;
@@ -2766,8 +3789,10 @@ class NearbyRuntime {
           try {
             await backend.listenGatt(runtimeConfig.serviceUuid);
             listenerStarted = true;
-            await backend.startAdvertising(runtimeConfig.serviceUuid,
-                localName: _discoveryDisplayName);
+            await backend.startAdvertising(
+              runtimeConfig.serviceUuid,
+              localName: _discoveryDisplayName,
+            );
             _advertisingActive = true;
           } on Object {
             _advertisingHosts.remove(host);
@@ -2808,6 +3833,12 @@ class NearbyRuntime {
     }
     _knownPeerProbeTimers.clear();
     _knownPeerProbeNotBeforeMs.clear();
+    for (final timer in _freshHandshakeHandoffTimers.values) {
+      timer.cancel();
+    }
+    _freshHandshakeHandoffTimers.clear();
+    _freshHandshakeHandoffEndpoints.clear();
+    _freshHandshakeHandoffPeers.clear();
     for (final reconnect in _gattReconnects.values) {
       reconnect.dispose();
     }
@@ -2828,6 +3859,7 @@ class NearbyRuntime {
       await peer.disconnect();
     }
     _peers.clear();
+    _authenticatedPeerByPhysicalEndpoint.clear();
     for (final group in List<GroupSession>.from(_groups)) {
       group.close();
     }
@@ -2854,6 +3886,9 @@ class NearbyRuntime {
       await _closeGattBinding(endpointId);
     }
     _startingGattEndpoints.clear();
+    _gattConnectedEvents.clear();
+    _gattCandidateStartedAtMs.clear();
+    _recoveringOrphanedGattEndpoints.clear();
     _authenticatedAutomaticProbePeers.clear();
     for (final timer in _unknownPeerReleaseTimers.values) {
       timer.cancel();
@@ -2868,40 +3903,60 @@ class NearbyRuntime {
     final remote = handshake.exchange.remoteHello;
     if (remote == null) {
       throw const LpcException(
-          LpcErrorCode.protocolMismatch, 'missing authenticated HELLO');
+        LpcErrorCode.protocolMismatch,
+        'missing authenticated HELLO',
+      );
     }
     return connectionRank(
-        peerA: localPeerId,
-        peerB: remote.peerId,
-        connectionNonceA: handshake.exchange.localHello.connectionNonce,
-        connectionNonceB: remote.connectionNonce);
+      peerA: localPeerId,
+      peerB: remote.peerId,
+      connectionNonceA: handshake.exchange.localHello.connectionNonce,
+      connectionNonceB: remote.connectionNonce,
+    );
   }
 
-  Future<PeerConnection> _ownPeer(PeerConnectionCore core,
-      {required SecurityLevel securityLevel,
-      String? gattEndpointId,
-      List<int>? connectionRank,
-      List<int> remoteApplicationMetadata = const []}) async {
+  Future<PeerConnection> _ownPeer(
+    PeerConnectionCore core, {
+    required SecurityLevel securityLevel,
+    String? gattEndpointId,
+    int? gattConnectionGeneration,
+    String? physicalEndpointId,
+    List<int>? connectionRank,
+    List<int> remoteApplicationMetadata = const [],
+  }) async {
+    if (gattEndpointId != null) {
+      _lastAuthenticatedPeerByEndpoint.remove(gattEndpointId);
+      _lastAuthenticatedPeerByEndpoint[gattEndpointId] = core.remotePeerId;
+      while (_lastAuthenticatedPeerByEndpoint.length >
+          _maxLastAuthenticatedEndpointHints) {
+        _lastAuthenticatedPeerByEndpoint.remove(
+          _lastAuthenticatedPeerByEndpoint.keys.first,
+        );
+      }
+    }
     // Some mobile BLE stacks do not report a disconnect when the remote app
     // is killed. In that case the old object can remain READY while its
     // authenticated receive-side keepalive deadline has expired. Compare the
     // physical endpoint before retiring it so a different peer's probe stays
     // independent, and so a duplicate callback for the same endpoint is still
     // handled by the normal per-endpoint coalescing path.
-    final staleReady = _peers.where((peer) {
-      if (peer.peerId != core.remotePeerId ||
-          peer.state != PeerConnectionState.ready ||
-          peer.securityLevel != securityLevel ||
-          !peer._core.livenessExpired) {
-        return false;
-      }
-      if (gattEndpointId == null) return false;
-      final oldEndpoint = _gattLinks[peer]?.endpointId;
-      return oldEndpoint == null || oldEndpoint != gattEndpointId;
-    }).toList(growable: false);
+    final staleReady = _peers
+        .where((peer) {
+          if (peer.peerId != core.remotePeerId ||
+              peer.state != PeerConnectionState.ready ||
+              peer.securityLevel != securityLevel ||
+              !peer._core.livenessExpired) {
+            return false;
+          }
+          if (gattEndpointId == null) return false;
+          final oldEndpoint = _gattLinks[peer]?.endpointId;
+          return oldEndpoint == null || oldEndpoint != gattEndpointId;
+        })
+        .toList(growable: false);
     for (final old in staleReady) {
       _log(
-          'retiring stale READY peer=${old.peerId} oldEndpoint=${_gattLinks[old]?.endpointId ?? 'none'} candidateEndpoint=${gattEndpointId ?? 'none'} reason=keepalive-dead-timeout');
+        'retiring stale READY peer=${old.peerId} oldEndpoint=${_gattLinks[old]?.endpointId ?? 'none'} candidateEndpoint=${gattEndpointId ?? 'none'} reason=keepalive-dead-timeout',
+      );
       // This transitions the old logical owner into the existing reconnecting
       // replacement path below. It deliberately does not close the new,
       // authenticated candidate or affect any other PeerId.
@@ -2916,14 +3971,17 @@ class NearbyRuntime {
     // later disconnect the replacement path and a GroupSession never sees a
     // usable transport-generation change for current-state catch-up.
     final reconnecting = _peers
-        .where((peer) =>
-            peer.peerId == core.remotePeerId &&
-            peer.state == PeerConnectionState.reconnecting &&
-            peer.securityLevel == securityLevel)
+        .where(
+          (peer) =>
+              peer.peerId == core.remotePeerId &&
+              peer.state == PeerConnectionState.reconnecting &&
+              peer.securityLevel == securityLevel,
+        )
         .toList(growable: false);
     for (final old in reconnecting) {
       _log(
-          'replacing reconnecting peer=${old.peerId} with fresh authenticated connection');
+        'replacing reconnecting peer=${old.peerId} with fresh authenticated connection',
+      );
       _gattReconnectExpiryTimers.remove(old)?.cancel();
       _reconnectWaitingForDiscovery.remove(old);
       _reconnectWaitingSchedules.remove(old)?.cancel();
@@ -2934,47 +3992,131 @@ class NearbyRuntime {
         _gattReconnects.remove(entry.key);
         entry.value.dispose();
       }
+      // A fresh candidate can reuse the same opaque endpoint ID as the
+      // reconnecting owner (notably on CoreBluetooth server endpoints). The
+      // old PeerConnection's disconnect callback must not close the new
+      // candidate binding after ownership is transferred. Remove the old
+      // endpoint mapping before disconnecting it; the new authenticated
+      // candidate will install its mapping immediately after this method
+      // returns. Different endpoints retain the normal stale-link cleanup.
+      if (gattEndpointId != null &&
+          _gattLinks[old]?.endpointId == gattEndpointId) {
+        _gattPeersByEndpoint.remove(gattEndpointId);
+        _gattLinks.remove(old);
+      }
       await old.disconnect();
     }
     final duplicate = _peers
-        .where((peer) =>
-            peer.peerId == core.remotePeerId &&
-            peer.state == PeerConnectionState.ready)
+        .where(
+          (peer) =>
+              peer.peerId == core.remotePeerId &&
+              peer.state == PeerConnectionState.ready,
+        )
         .toList(growable: false);
-    if (duplicate.isNotEmpty && connectionRank != null) {
+    final candidateStartedAtMs = gattEndpointId == null
+        ? _monotonicMs
+        : (_gattCandidateStartedAtMs[gattEndpointId] ?? _monotonicMs);
+    Future<void> closeDuplicateCandidate() async {
+      // The duplicate decision below is made only after both transports have
+      // authenticated the same PeerId. On Android, however, the losing
+      // central and the winning peripheral can share one controller ACL. A
+      // normal close of the losing central can therefore tear down the
+      // winning link and start the reconnect loop seen on MiPad/iPhone.
+      // Mark the native close as parkable before closing the handshake, then
+      // remove the Dart binding while the native plugin retains the handle
+      // until the selected server link ends.
+      final candidateBackend = core.backend;
+      final canPreserveSharedLink =
+          gattEndpointId != null &&
+          candidateBackend is GattBackendConnection &&
+          candidateBackend.localRole == GattLinkRole.central;
+      if (canPreserveSharedLink) {
+        (candidateBackend as GattBackendConnection).preserveNativeLinkOnClose();
+      }
+      await core.close();
+      if (canPreserveSharedLink) {
+        await _closeGattBinding(gattEndpointId!, preserveSharedLink: true);
+      }
+    }
+
+    String? displacedDuplicateEndpoint;
+    if (duplicate.isNotEmpty) {
       final existing = duplicate.first;
       _log(
-          'duplicate READY peer=${core.remotePeerId} existingState=${existing.state.name} existingSecurity=${existing.securityLevel.name} candidateSecurity=${securityLevel.name}');
+        'duplicate READY peer=${core.remotePeerId} existingState=${existing.state.name} existingSecurity=${existing.securityLevel.name} candidateSecurity=${securityLevel.name}',
+      );
       // A matching PeerId alone is not a compatible logical owner. This
       // portable binding does not multiplex distinct security sessions, so it
       // rejects that request rather than relabeling or downgrading either one.
       if (existing.securityLevel != securityLevel) {
         _log(
-            'duplicate rejected peer=${core.remotePeerId} reason=incompatible-security');
-        await core.close();
-        throw const LpcException(LpcErrorCode.invalidState,
-            'existing peer has an incompatible security profile');
+          'duplicate rejected peer=${core.remotePeerId} reason=incompatible-security',
+        );
+        await closeDuplicateCandidate();
+        throw const LpcException(
+          LpcErrorCode.invalidState,
+          'existing peer has an incompatible security profile',
+        );
+      }
+      final existingLink = _gattLinks[existing];
+      final overlapsExisting =
+          existingLink != null &&
+          existingLink.readyAtMs != null &&
+          candidateStartedAtMs <= existingLink.readyAtMs!;
+      if (!overlapsExisting || connectionRank == null) {
+        // A later advertisement/probe is not a simultaneous duplicate race.
+        // Keep the healthy authenticated owner stable even if the candidate's
+        // newly generated nonce would produce a smaller rank. This prevents
+        // repeated scan observations from replacing a usable link and
+        // triggering a disconnect/reconnect loop on mobile BLE.
+        await closeDuplicateCandidate();
+        if (gattEndpointId != null) {
+          _gattCandidateStartedAtMs.remove(gattEndpointId);
+        }
+        if (physicalEndpointId != null) {
+          _authenticatedPeerByPhysicalEndpoint[physicalEndpointId] = existing;
+        }
+        _log(
+          'duplicate candidate closed peer=${core.remotePeerId} reason=late-candidate-existing-owner',
+        );
+        return existing;
       }
       final existingRank = _connectionRanks[existing];
       if (existingRank == null) {
         // A legacy/manual peer without a recorded rank remains the stable
         // owner.  The new candidate is still closed before it can acquire
         // any Runtime ownership.
-        await core.close();
+        await closeDuplicateCandidate();
+        if (gattEndpointId != null) {
+          _gattCandidateStartedAtMs.remove(gattEndpointId);
+        }
+        if (physicalEndpointId != null) {
+          _authenticatedPeerByPhysicalEndpoint[physicalEndpointId] = existing;
+        }
         _log(
-            'duplicate candidate closed peer=${core.remotePeerId} reason=existing-unranked');
+          'duplicate candidate closed peer=${core.remotePeerId} reason=existing-unranked',
+        );
         return existing;
       }
-      final retained =
-          retainedConnectionRankIndex(existingRank, connectionRank);
+      final retained = retainedConnectionRankIndex(
+        existingRank,
+        connectionRank,
+      );
       if (retained == 0) {
         // The existing authenticated logical session wins the deterministic
         // Section 10.2 tie-break.  Closing the candidate collapses its
         // redundant physical link without disturbing direct, HostSession,
         // group, or known-peer ownership of the winner.
         await core.close();
+        if (gattEndpointId != null) {
+          _gattCandidateStartedAtMs.remove(gattEndpointId);
+        }
+        if (physicalEndpointId != null) {
+          _authenticatedPeerByPhysicalEndpoint[physicalEndpointId] = existing;
+        }
         _log(
-            'duplicate candidate closed peer=${core.remotePeerId} reason=existing-rank-wins');
+          'duplicate candidate closed peer=${core.remotePeerId} reason=existing-rank-wins',
+        );
         return existing;
       }
       // The newly authenticated link has the smaller rank.  Replace the
@@ -2982,59 +4124,97 @@ class NearbyRuntime {
       // full READY exchange, so there is never an unauthenticated promotion.
       // PeerConnection.disconnect() is an explicit terminal duplicate close;
       // it does not enter the normal reconnect scheduler.
+      displacedDuplicateEndpoint = _gattLinks[existing]?.endpointId;
+      if (displacedDuplicateEndpoint != null) {
+        _duplicateClosingEndpoints.add(displacedDuplicateEndpoint);
+      }
       await existing.disconnect();
       _log(
-          'duplicate existing closed peer=${core.remotePeerId} reason=candidate-rank-wins');
+        'duplicate existing closed peer=${core.remotePeerId} reason=candidate-rank-wins',
+      );
     }
     late final PeerConnection peer;
-    peer = PeerConnection._(core,
-        securityLevel: securityLevel,
-        remoteApplicationMetadata: remoteApplicationMetadata,
-        onDisconnected: (_) {
-      _log(
-          'peer disconnected peer=${core.remotePeerId} endpoint=${gattEndpointId ?? 'none'}');
-      _peers.remove(peer);
-      _connectionRanks.remove(peer);
-      _reconnectWaitingForDiscovery.remove(peer);
-      _reconnectWaitingSchedules.remove(peer);
-      _knownProbeSuppressedByOwner.removeWhere((_, owner) => owner == peer);
-      _unknownPeerReleaseTimers.remove(peer)?.cancel();
-      final link = _gattLinks.remove(peer);
-      final endpointId = link?.endpointId ?? gattEndpointId;
-      if (endpointId != null) {
-        _authenticatedAutomaticProbePeers.remove(endpointId);
-      }
-      _gattPeersByEndpoint.removeWhere((_, value) => value == peer);
-      _gattReconnectExpiryTimers.remove(peer)?.cancel();
-      // A completed automatic probe is only a duplicate-scan suppression
-      // entry while its authenticated connection remains alive.  Once that
-      // logical peer disconnects, the same platform endpoint must be eligible
-      // for a fresh known-peer probe so auto-reconnect can recover it.
-      if (endpointId != null) {
-        _completedKnownPeerProbeEndpoints.remove(endpointId);
-      }
-      final associatedEndpoints =
-          _knownPeerProbeEndpointsByPeer.remove(peer) ?? const <String>{};
-      for (final associatedEndpoint in associatedEndpoints) {
-        _completedKnownPeerProbeEndpoints.remove(associatedEndpoint);
-      }
-      _gattReconnects.remove(endpointId)?.dispose();
-      if (link != null) {
-        // The core backend can already be closed when this callback runs. A
-        // reconnect candidate, however, owns a separate binding and must be
-        // closed explicitly or Android retains its native client handle.
-        unawaited(_closeGattBinding(link.endpointId));
-      }
-    },
-        onReconnecting: gattEndpointId == null
-            ? null
-            : (_) {
-                _log(
-                    'peer entering reconnecting peer=${core.remotePeerId} endpoint=${_gattLinks[peer]?.endpointId ?? gattEndpointId}');
-                _beginGattReconnect(peer);
-                _scheduleGattReconnectExpiry(peer);
-              });
+    peer = PeerConnection._(
+      core,
+      securityLevel: securityLevel,
+      remoteApplicationMetadata: remoteApplicationMetadata,
+      onDisconnected: (_) {
+        _log(
+          'peer disconnected peer=${core.remotePeerId} endpoint=${gattEndpointId ?? 'none'}',
+        );
+        _peers.remove(peer);
+        _connectionRanks.remove(peer);
+        _reconnectWaitingForDiscovery.remove(peer);
+        _reconnectWaitingSchedules.remove(peer);
+        _knownProbeSuppressedByOwner.removeWhere((_, owner) => owner == peer);
+        _authenticatedPeerByPhysicalEndpoint.removeWhere(
+          (_, owner) => owner == peer,
+        );
+        _unknownPeerReleaseTimers.remove(peer)?.cancel();
+        final link = _gattLinks.remove(peer);
+        final endpointId = link?.endpointId ?? gattEndpointId;
+        if (endpointId != null) {
+          _authenticatedAutomaticProbePeers.remove(endpointId);
+        }
+        _gattPeersByEndpoint.removeWhere((_, value) => value == peer);
+        _gattReconnectExpiryTimers.remove(peer)?.cancel();
+        // A completed automatic probe is only a duplicate-scan suppression
+        // entry while its authenticated connection remains alive.  Once that
+        // logical peer disconnects, the same platform endpoint must be eligible
+        // for a fresh known-peer probe so auto-reconnect can recover it.
+        if (endpointId != null) {
+          _completedKnownPeerProbeEndpoints.remove(endpointId);
+        }
+        final associatedEndpoints =
+            _knownPeerProbeEndpointsByPeer.remove(peer) ?? const <String>{};
+        for (final associatedEndpoint in associatedEndpoints) {
+          _completedKnownPeerProbeEndpoints.remove(associatedEndpoint);
+        }
+        _gattReconnects.remove(endpointId)?.dispose();
+        if (link != null) {
+          // The core backend can already be closed when this callback runs. A
+          // reconnect candidate, however, owns a separate binding and must be
+          // closed explicitly or Android retains its native client handle.
+          unawaited(_closeGattBinding(link.endpointId));
+        }
+      },
+      onReconnecting: gattEndpointId == null
+          ? null
+          : (_) {
+              // A transport failure ends the physical candidate lifecycle.
+              // Keepalive/write failures can move a PeerConnection into
+              // RECONNECTING without producing PlatformGattDisconnected, so
+              // the endpoint-start timestamp must be cleared here as well.
+              // Otherwise a later probe of the same platform endpoint can
+              // inherit the old timestamp and be misclassified as an
+              // overlapping duplicate. On Android this can make a fresh
+              // central candidate replace a healthy inbound GATT link; the
+              // vendor stack then tears down the shared ACL and both sides
+              // enter a reconnect loop.
+              final failedEndpoint =
+                  _gattLinks[peer]?.endpointId ?? gattEndpointId;
+              if (failedEndpoint != null) {
+                _gattCandidateStartedAtMs.remove(failedEndpoint);
+              }
+              _log(
+                'peer entering reconnecting peer=${core.remotePeerId} endpoint=${_gattLinks[peer]?.endpointId ?? gattEndpointId}',
+              );
+              _beginGattReconnect(peer);
+              _scheduleGattReconnectExpiry(peer);
+            },
+    );
     _peers.add(peer);
+    if (physicalEndpointId != null) {
+      _authenticatedPeerByPhysicalEndpoint[physicalEndpointId] = peer;
+    }
+    if (displacedDuplicateEndpoint != null) {
+      // At this point the candidate is about to become the stable owner. The
+      // temporary close guard above covered the synchronous old-owner
+      // callback; retain the bounded endpoint suppression for future scan
+      // observations while this owner remains READY/RECONNECTING.
+      _duplicateClosingEndpoints.remove(displacedDuplicateEndpoint);
+      _knownProbeSuppressedByOwner[displacedDuplicateEndpoint] = peer;
+    }
     // A READY authenticated peer is the logical owner of the session. An
     // automatic known-peer probe started from another transient platform
     // endpoint must not create a duplicate GATT session that can replace or
@@ -3049,7 +4229,8 @@ class NearbyRuntime {
         ? (core.backend as GattBackendConnection).localRole?.name
         : null;
     _log(
-        'peer owned peer=${peer.peerId} security=${securityLevel.name} endpoint=${gattEndpointId ?? 'none'} role=${gattRole ?? 'none'}');
+      'peer owned peer=${peer.peerId} security=${securityLevel.name} endpoint=${gattEndpointId ?? 'none'} role=${gattRole ?? 'none'}',
+    );
     for (final entry in _groupRouting.entries) {
       if (!entry.key.hasRouteTransport) {
         entry.key.attachRouteTransport(entry.value);
@@ -3064,10 +4245,15 @@ class NearbyRuntime {
     }
     if (gattEndpointId != null && core.backend is GattBackendConnection) {
       _gattLinks[peer] = _GattLink(
-          gattEndpointId,
-          (core.backend as GattBackendConnection).localRole ==
-              GattLinkRole.central);
+        gattEndpointId,
+        (core.backend as GattBackendConnection).localRole ==
+            GattLinkRole.central,
+        connectionGeneration: gattConnectionGeneration,
+        candidateStartedAtMs: candidateStartedAtMs,
+        readyAtMs: _monotonicMs,
+      );
       _gattPeersByEndpoint[gattEndpointId] = peer;
+      _gattCandidateStartedAtMs.remove(gattEndpointId);
     }
     return peer;
   }
@@ -3106,16 +4292,17 @@ class _RuntimeGroupRouteTransport
   final Map<PeerConnection, StreamSubscription<Uint8List>> _ackSubscriptions =
       {};
   final Map<PeerConnection, StreamSubscription<PeerConnectionEvent>>
-      _peerEventSubscriptions = {};
+  _peerEventSubscriptions = {};
   final Map<PeerConnection, GroupReliableReassembler> _reassemblers = {};
   final Map<PeerConnection, CheckpointReceiver> _checkpointReceivers = {};
   final MembershipSnapshotOrderTable _membershipOrdering =
       MembershipSnapshotOrderTable();
   final Map<PeerConnection, GroupInfoPayload> _remoteGroupInfo = {};
   late GroupMergeReceiver _mergeReceiver = GroupMergeReceiver(
-      committedGroupId: group.groupId,
-      committedTerm: group.coordinatorTerm,
-      committedMembers: group.members);
+    committedGroupId: group.groupId,
+    committedTerm: group.coordinatorTerm,
+    committedMembers: group.members,
+  );
   final Map<String, _LiveGroupHop> _ackHops = {};
   final Map<String, _LiveCheckpointHop> _checkpointHops = {};
   final Map<PeerId, CheckpointReplicationQueue> _checkpointQueues = {};
@@ -3132,15 +4319,20 @@ class _RuntimeGroupRouteTransport
   void observePeer(PeerConnection peer) {
     if (_disposed || _frameSubscriptions.containsKey(peer)) return;
     logger(
-        'group observe peer=${peer.peerId} state=${peer.state} coordinator=${group.coordinatorPeerId} localCoordinator=${group.isCoordinator} members=${group.members.map((member) => member.peerId).join(',')}');
+      'group observe peer=${peer.peerId} state=${peer.state} coordinator=${group.coordinatorPeerId} localCoordinator=${group.isCoordinator} members=${group.members.map((member) => member.peerId).join(',')}',
+    );
     _reassemblers[peer] = GroupReliableReassembler(
-        maxIncompleteMessages: 64, maxIncompleteBytes: 1048576);
+      maxIncompleteMessages: 64,
+      maxIncompleteBytes: 1048576,
+    );
     _checkpointReceivers[peer] = CheckpointReceiver();
     _frameSubscriptions[peer] = peer.groupFrames.listen(
-        (frame) => unawaited(_receiveFrame(peer, frame)),
-        onError: (_) => _onPeerLost(peer));
-    _ackSubscriptions[peer] = peer._core.acknowledgedMessageIds
-        .listen((messageId) => unawaited(_receiveGenericAck(peer, messageId)));
+      (frame) => unawaited(_receiveFrame(peer, frame)),
+      onError: (_) => _onPeerLost(peer),
+    );
+    _ackSubscriptions[peer] = peer._core.acknowledgedMessageIds.listen(
+      (messageId) => unawaited(_receiveGenericAck(peer, messageId)),
+    );
     _peerEventSubscriptions[peer] = peer.events.listen((event) {
       if (event is PeerReconnecting) {
         _reassemblers[peer]?.onTransportGenerationLost();
@@ -3162,10 +4354,13 @@ class _RuntimeGroupRouteTransport
 
   @override
   void submitReliable(
-      RoutedGroupOperation operation, SendHandleController controller) {
+    RoutedGroupOperation operation,
+    SendHandleController controller,
+  ) {
     _sourceHandles[operation.groupMessageId] = controller;
     logger(
-        'group source submit group=${_debugId(operation.groupId.bytes)} source=${operation.sourcePeerId} destination=${operation.destinationPeerId} message=${_debugId(operation.groupMessageId.bytes)} coordinator=${group.coordinatorPeerId} localCoordinator=${group.isCoordinator}');
+      'group source submit group=${_debugId(operation.groupId.bytes)} source=${operation.sourcePeerId} destination=${operation.destinationPeerId} message=${_debugId(operation.groupMessageId.bytes)} coordinator=${group.coordinatorPeerId} localCoordinator=${group.isCoordinator}',
+    );
     unawaited(() async {
       try {
         if (group.isCoordinator) {
@@ -3176,17 +4371,23 @@ class _RuntimeGroupRouteTransport
         final peer = coordinator == null ? null : _readyPeer(coordinator);
         if (peer == null) {
           logger(
-              'group source submit deferred failed: coordinator=$coordinator groupState=${group.state} groupMembers=${group.members.map((member) => member.peerId).join(',')} routePeers=${peers().map((candidate) => '${candidate.peerId}:${candidate.state}').join(',')}');
+            'group source submit deferred failed: coordinator=$coordinator groupState=${group.state} groupMembers=${group.members.map((member) => member.peerId).join(',')} routePeers=${peers().map((candidate) => '${candidate.peerId}:${candidate.state}').join(',')}',
+          );
           controller.complete(SendState.failed);
           _sourceHandles.remove(operation.groupMessageId);
           return;
         }
         _member().begin(operation);
-        await _submitHop(peer, operation,
-            finalHop: false, sourceOperation: operation);
+        await _submitHop(
+          peer,
+          operation,
+          finalHop: false,
+          sourceOperation: operation,
+        );
       } on Object catch (error) {
         logger(
-            'group source submit failed source=${operation.sourcePeerId} destination=${operation.destinationPeerId} message=${_debugId(operation.groupMessageId.bytes)} error=$error');
+          'group source submit failed source=${operation.sourcePeerId} destination=${operation.destinationPeerId} message=${_debugId(operation.groupMessageId.bytes)} error=$error',
+        );
         controller.complete(SendState.failed);
         _sourceHandles.remove(operation.groupMessageId);
       }
@@ -3206,23 +4407,30 @@ class _RuntimeGroupRouteTransport
 
   @override
   void checkpointPublicationAccepted(
-      CoordinatorCheckpointHandle handle,
-      List<int> bytes,
-      int coordinatorTerm,
-      CheckpointApplicationValidationRequirement validationRequirement) {
+    CoordinatorCheckpointHandle handle,
+    List<int> bytes,
+    int coordinatorTerm,
+    CheckpointApplicationValidationRequirement validationRequirement,
+  ) {
     if (_disposed ||
         !group.isCoordinator ||
         !group.config.coordinatorCheckpointing) {
       return;
     }
-    final value = _CheckpointPublicationData(handle, Uint8List.fromList(bytes),
-        coordinatorTerm, validationRequirement);
+    final value = _CheckpointPublicationData(
+      handle,
+      Uint8List.fromList(bytes),
+      coordinatorTerm,
+      validationRequirement,
+    );
     logger(
-        'checkpoint publish publication=${handle.publicationId} term=$coordinatorTerm bytes=${bytes.length} validation=$validationRequirement members=${group.members.length}');
+      'checkpoint publish publication=${handle.publicationId} term=$coordinatorTerm bytes=${bytes.length} validation=$validationRequirement members=${group.members.length}',
+    );
     _checkpointPublications[handle.publicationId] = value;
-    for (final peerId in group.members
-        .map((member) => member.peerId)
-        .where((peerId) => peerId != group.localPeerId)) {
+    for (final peerId
+        in group.members
+            .map((member) => member.peerId)
+            .where((peerId) => peerId != group.localPeerId)) {
       final peer = _readyPeer(peerId);
       if (peer != null) _offerCheckpoint(peer, value);
     }
@@ -3240,10 +4448,11 @@ class _RuntimeGroupRouteTransport
     final latest = group.latestCheckpointForReplication();
     if (latest == null) return;
     final value = _CheckpointPublicationData(
-        latest.publication,
-        latest.bytes,
-        latest.publication.coordinatorTerm,
-        latest.publication.applicationValidationRequirement);
+      latest.publication,
+      latest.bytes,
+      latest.publication.coordinatorTerm,
+      latest.publication.applicationValidationRequirement,
+    );
     _checkpointPublications[latest.publication.publicationId] = value;
     final peer = _readyPeer(peerId);
     if (peer != null && peer.peerId != group.localPeerId) {
@@ -3259,8 +4468,11 @@ class _RuntimeGroupRouteTransport
       final value = _checkpointPublications[operation.publicationId];
       if (value != null) {
         group.checkpointOperationFinished(
-            value.handle, peerId, CheckpointPeerResult.peerLeft,
-            checkpointSequence: operation.sequence);
+          value.handle,
+          peerId,
+          CheckpointPeerResult.peerLeft,
+          checkpointSequence: operation.sequence,
+        );
       }
     }
     for (final entry in _checkpointHops.entries.toList()) {
@@ -3292,50 +4504,68 @@ class _RuntimeGroupRouteTransport
   }
 
   void _offerCheckpoint(
-      PeerConnection peer, _CheckpointPublicationData publication) {
+    PeerConnection peer,
+    _CheckpointPublicationData publication,
+  ) {
     if (_disposed || peer.state != PeerConnectionState.ready) return;
     final queue = _checkpointQueues.putIfAbsent(
-        peer.peerId, CheckpointReplicationQueue.new);
-    final operation = queue.publish(publication.bytes,
-        publicationId: publication.handle.publicationId);
+      peer.peerId,
+      CheckpointReplicationQueue.new,
+    );
+    final operation = queue.publish(
+      publication.bytes,
+      publicationId: publication.handle.publicationId,
+    );
     if (operation != null) {
       _sendCheckpoint(peer, operation, publication);
     }
   }
 
   void _sendCheckpoint(
-      PeerConnection peer,
-      CheckpointReplicationOperation operation,
-      _CheckpointPublicationData value) {
+    PeerConnection peer,
+    CheckpointReplicationOperation operation,
+    _CheckpointPublicationData value,
+  ) {
     if (_disposed || peer.state != PeerConnectionState.ready) return;
-    final chunks = chunkCheckpoint(value.bytes,
-        term: value.coordinatorTerm,
-        sequence: operation.sequence,
-        requiresApplicationValidation: value.validationRequirement ==
-            CheckpointApplicationValidationRequirement.required);
+    final chunks = chunkCheckpoint(
+      value.bytes,
+      term: value.coordinatorTerm,
+      sequence: operation.sequence,
+      requiresApplicationValidation:
+          value.validationRequirement ==
+          CheckpointApplicationValidationRequirement.required,
+    );
     final messageId = peer._core.messageIdAllocator!.allocate();
     final hop = _LiveCheckpointHop(
-        peer: peer,
-        messageId: messageId,
-        chunks: chunks,
-        operation: operation,
-        publication: value.handle);
+      peer: peer,
+      messageId: messageId,
+      chunks: chunks,
+      operation: operation,
+      publication: value.handle,
+    );
     logger(
-        'checkpoint send peer=${peer.peerId} publication=${value.handle.publicationId} sequence=${operation.sequence} message=${_debugId(messageId)} chunks=${chunks.length} bytes=${value.bytes.length}');
+      'checkpoint send peer=${peer.peerId} publication=${value.handle.publicationId} sequence=${operation.sequence} message=${_debugId(messageId)} chunks=${chunks.length} bytes=${value.bytes.length}',
+    );
     _checkpointHops[_hopKey(peer, messageId)] = hop;
     group.checkpointOperationStarted(value.handle, peer.peerId);
     unawaited(() async {
       try {
         final results = await peer._core.submitAckRequiredCheckpoint(
-            chunks: chunks,
-            messageId: messageId,
-            nowMs: peer._core.monotonicNowMs);
+          chunks: chunks,
+          messageId: messageId,
+          nowMs: peer._core.monotonicNowMs,
+        );
         logger(
-            'checkpoint submitted peer=${peer.peerId} publication=${value.handle.publicationId} message=${_debugId(messageId)} results=$results state=${peer.state}');
+          'checkpoint submitted peer=${peer.peerId} publication=${value.handle.publicationId} message=${_debugId(messageId)} results=$results state=${peer.state}',
+        );
         if (results.any(
-            (result) => result != TransportWriteState.submittedToPlatform)) {
+          (result) => result != TransportWriteState.submittedToPlatform,
+        )) {
           _logCheckpointFailure(
-              peer, hop, CheckpointPeerResult.sessionTerminated);
+            peer,
+            hop,
+            CheckpointPeerResult.sessionTerminated,
+          );
         }
       } on Object {
         if (peer.state == PeerConnectionState.disconnected) {
@@ -3345,19 +4575,29 @@ class _RuntimeGroupRouteTransport
     }());
   }
 
-  void _logCheckpointFailure(PeerConnection peer, _LiveCheckpointHop hop,
-      CheckpointPeerResult result) {
+  void _logCheckpointFailure(
+    PeerConnection peer,
+    _LiveCheckpointHop hop,
+    CheckpointPeerResult result,
+  ) {
     if (peer.state == PeerConnectionState.disconnected) {
       _finishCheckpoint(peer, hop, result);
     }
   }
 
-  void _finishCheckpoint(PeerConnection peer, _LiveCheckpointHop hop,
-      CheckpointPeerResult result) {
+  void _finishCheckpoint(
+    PeerConnection peer,
+    _LiveCheckpointHop hop,
+    CheckpointPeerResult result,
+  ) {
     final key = _hopKey(peer, hop.messageId);
     if (_checkpointHops.remove(key) == null) return;
-    group.checkpointOperationFinished(hop.publication, peer.peerId, result,
-        checkpointSequence: hop.operation.sequence);
+    group.checkpointOperationFinished(
+      hop.publication,
+      peer.peerId,
+      result,
+      checkpointSequence: hop.operation.sequence,
+    );
     final queue = _checkpointQueues[peer.peerId];
     final next = queue?.completeInFlight();
     if (next != null) {
@@ -3382,7 +4622,9 @@ class _RuntimeGroupRouteTransport
 
   @override
   void submitRealtime(
-      GroupRealtimeDatagram datagram, RealtimeSendHandleController controller) {
+    GroupRealtimeDatagram datagram,
+    RealtimeSendHandleController controller,
+  ) {
     unawaited(() async {
       try {
         final target = group.isCoordinator
@@ -3393,10 +4635,14 @@ class _RuntimeGroupRouteTransport
           return;
         }
         final result = await target._core.submitEncrypted(
-            FrameType.groupRealtimeDatagram, datagram.encode());
-        controller.complete(result == TransportWriteState.submittedToPlatform
-            ? SendState.sentToTransport
-            : SendState.failed);
+          FrameType.groupRealtimeDatagram,
+          datagram.encode(),
+        );
+        controller.complete(
+          result == TransportWriteState.submittedToPlatform
+              ? SendState.sentToTransport
+              : SendState.failed,
+        );
       } on Object {
         controller.complete(SendState.failed);
       }
@@ -3413,8 +4659,9 @@ class _RuntimeGroupRouteTransport
       return existing;
     }
     return _memberRouter = GroupMemberRouter(
-        validator: _validator(coordinator),
-        sends: RoutedSendTable(localPeerId: group.localPeerId));
+      validator: _validator(coordinator),
+      sends: RoutedSendTable(localPeerId: group.localPeerId),
+    );
   }
 
   GroupCoordinatorRouter _coordinator() {
@@ -3430,22 +4677,26 @@ class _RuntimeGroupRouteTransport
       // active. Preserve that bounded relay table while replacing only the
       // validator used for subsequently received traffic.
       return _coordinatorRouter = GroupCoordinatorRouter(
-          validator: _validator(group.localPeerId),
-          reliableController: existing.reliableController,
-          realtimePending: existing.realtimePending);
+        validator: _validator(group.localPeerId),
+        reliableController: existing.reliableController,
+        realtimePending: existing.realtimePending,
+      );
     }
     _coordinatorView = view;
     final relays = CoordinatorRelayTable(
-        coordinatorPeerId: group.localPeerId,
-        maxReservedBytesPerDestination: maxReservedBytesPerDestination,
-        maxReservedMessagesPerDestination: maxReservedMessagesPerDestination);
+      coordinatorPeerId: group.localPeerId,
+      maxReservedBytesPerDestination: maxReservedBytesPerDestination,
+      maxReservedMessagesPerDestination: maxReservedMessagesPerDestination,
+    );
     return _coordinatorRouter = GroupCoordinatorRouter(
-        validator: _validator(group.localPeerId),
-        reliableController: CoordinatorRelayController(
-            canonicalGroupId: group.groupId,
-            coordinatorPeerId: group.localPeerId,
-            relays: relays),
-        realtimePending: CoordinatorRealtimePending(maxPendingDatagrams: 128));
+      validator: _validator(group.localPeerId),
+      reliableController: CoordinatorRelayController(
+        canonicalGroupId: group.groupId,
+        coordinatorPeerId: group.localPeerId,
+        relays: relays,
+      ),
+      realtimePending: CoordinatorRealtimePending(maxPendingDatagrams: 128),
+    );
   }
 
   /// A destination router retains both the group-wide completed-message cache
@@ -3461,23 +4712,26 @@ class _RuntimeGroupRouteTransport
     final existing = _destinationRouter;
     if (existing != null && _destinationView == view) return existing;
     _destinationView = view;
-    return _destinationRouter =
-        GroupDestinationRouter(validator: _validator(coordinator));
+    return _destinationRouter = GroupDestinationRouter(
+      validator: _validator(coordinator),
+    );
   }
 
   String _routingView(PeerId coordinator) {
-    final members = group.members
-        .map((member) => '${member.peerId}:${member.maxPeers}')
-        .toList()
-      ..sort();
+    final members =
+        group.members
+            .map((member) => '${member.peerId}:${member.maxPeers}')
+            .toList()
+          ..sort();
     return '${group.groupId}:$coordinator:${members.join('|')}';
   }
 
   GroupRoutingValidator _validator(PeerId coordinator) => GroupRoutingValidator(
-      canonicalGroupId: group.groupId,
-      localPeerId: group.localPeerId,
-      currentCoordinatorPeerId: coordinator,
-      committedMembers: group.members.map((member) => member.peerId).toSet());
+    canonicalGroupId: group.groupId,
+    localPeerId: group.localPeerId,
+    currentCoordinatorPeerId: coordinator,
+    committedMembers: group.members.map((member) => member.peerId).toSet(),
+  );
 
   PeerConnection? _readyPeer(PeerId peerId) {
     syncPeers();
@@ -3491,25 +4745,33 @@ class _RuntimeGroupRouteTransport
   }
 
   Future<void> _admitLocalCoordinatorOperation(
-      RoutedGroupOperation operation) async {
+    RoutedGroupOperation operation,
+  ) async {
     final destination = _readyPeer(operation.destinationPeerId);
     final incoming = ReassembledGroupReliable(
-        pairwiseMessageId: List<int>.filled(8, 0),
-        groupId: operation.groupId,
-        sourcePeerId: operation.sourcePeerId,
-        destinationPeerId: operation.destinationPeerId,
-        groupMessageId: operation.groupMessageId,
-        deliveryMode: operation.deliveryMode,
-        priority: operation.priority,
-        bytes: operation.bytes);
-    final actions = _coordinator().receiveReliableFromMember(incoming,
-        authenticatedSendingPeerId: group.localPeerId,
-        destinationReady: destination != null,
-        reservationBytes: operation.bytes.length,
-        destinationPairwiseMessageId:
-            destination == null ? null : _nextMessageId(destination));
-    await _applyCoordinatorActions(null, actions,
-        localSourceMessageId: operation.groupMessageId);
+      pairwiseMessageId: List<int>.filled(8, 0),
+      groupId: operation.groupId,
+      sourcePeerId: operation.sourcePeerId,
+      destinationPeerId: operation.destinationPeerId,
+      groupMessageId: operation.groupMessageId,
+      deliveryMode: operation.deliveryMode,
+      priority: operation.priority,
+      bytes: operation.bytes,
+    );
+    final actions = _coordinator().receiveReliableFromMember(
+      incoming,
+      authenticatedSendingPeerId: group.localPeerId,
+      destinationReady: destination != null,
+      reservationBytes: operation.bytes.length,
+      destinationPairwiseMessageId: destination == null
+          ? null
+          : _nextMessageId(destination),
+    );
+    await _applyCoordinatorActions(
+      null,
+      actions,
+      localSourceMessageId: operation.groupMessageId,
+    );
   }
 
   Future<void> _receiveFrame(PeerConnection peer, LpcFrame frame) async {
@@ -3542,17 +4804,20 @@ class _RuntimeGroupRouteTransport
       if (error.code == LpcErrorCode.transportClosed ||
           error.code == LpcErrorCode.invalidState) {
         logger(
-            'group frame ignored peer=${peer.peerId} type=${frame.type} message=${frame.messageId} error=${error.code}');
+          'group frame ignored peer=${peer.peerId} type=${frame.type} message=${frame.messageId} error=${error.code}',
+        );
         return;
       }
       logger(
-          'group frame protocol failure peer=${peer.peerId} type=${frame.type} message=${frame.messageId} error=${error.code}');
+        'group frame protocol failure peer=${peer.peerId} type=${frame.type} message=${frame.messageId} error=${error.code}',
+      );
       await peer.disconnect();
     } on Object catch (error) {
       // Group routing violations are authenticated peer protocol violations;
       // do not leave the same connection accepting later group traffic.
       logger(
-          'group frame exception peer=${peer.peerId} type=${frame.type} message=${frame.messageId} error=$error');
+        'group frame exception peer=${peer.peerId} type=${frame.type} message=${frame.messageId} error=$error',
+      );
       await peer.disconnect();
     }
   }
@@ -3562,7 +4827,9 @@ class _RuntimeGroupRouteTransport
     try {
       final config = group.config;
       final namespaceHash = await _scopedHash(
-          'LPC1-application-namespace', config.applicationNamespace);
+        'LPC1-application-namespace',
+        config.applicationNamespace,
+      );
       final tokenHash = config.discoveryMode == DiscoveryMode.openProximity
           ? List<int>.filled(32, 0)
           : await _scopedHash('LPC1-group-join-token', config.groupJoinToken!);
@@ -3572,19 +4839,23 @@ class _RuntimeGroupRouteTransport
       // sends it again instead of treating that race as a protocol failure.
       if (_disposed || peer.state != PeerConnectionState.ready) return false;
       final payload = GroupInfoPayload(
-          info: GroupMergeInfo(
-              namespaceHash: namespaceHash,
-              discoveryMode: config.discoveryMode,
-              autoMerge: config.autoMerge,
-              trustMode: config.groupTrustMode,
-              knownPeersAutoMerge: config.knownPeersAutoMerge,
-              tokenHash: tokenHash,
-              groupId: group.groupId,
-              members: group.members),
-          coordinatorTerm: group.coordinatorTerm,
-          coordinatorPeerId: group.coordinatorPeerId);
-      final result = await peer._core
-          .submitEncrypted(FrameType.groupInfo, await payload.encode());
+        info: GroupMergeInfo(
+          namespaceHash: namespaceHash,
+          discoveryMode: config.discoveryMode,
+          autoMerge: config.autoMerge,
+          trustMode: config.groupTrustMode,
+          knownPeersAutoMerge: config.knownPeersAutoMerge,
+          tokenHash: tokenHash,
+          groupId: group.groupId,
+          members: group.members,
+        ),
+        coordinatorTerm: group.coordinatorTerm,
+        coordinatorPeerId: group.coordinatorPeerId,
+      );
+      final result = await peer._core.submitEncrypted(
+        FrameType.groupInfo,
+        await payload.encode(),
+      );
       return result == TransportWriteState.submittedToPlatform;
     } on LpcException catch (error) {
       if (error.code != LpcErrorCode.transportClosed &&
@@ -3607,7 +4878,8 @@ class _RuntimeGroupRouteTransport
     final local = await _localGroupInfo();
     final evaluation = evaluateGroupMerge(local, info.info);
     logger(
-        'group info peer=${peer.peerId} localGroup=${_debugId(local.groupId.bytes)} localMembers=${local.members.length} remoteGroup=${_debugId(info.info.groupId.bytes)} remoteMembers=${info.info.members.length} decision=${evaluation.decision} winner=${evaluation.winner == null ? 'none' : _debugId(evaluation.winner!.groupId.bytes)} localCoordinator=${group.isCoordinator}');
+      'group info peer=${peer.peerId} localGroup=${_debugId(local.groupId.bytes)} localMembers=${local.members.length} remoteGroup=${_debugId(info.info.groupId.bytes)} remoteMembers=${info.info.members.length} decision=${evaluation.decision} winner=${evaluation.winner == null ? 'none' : _debugId(evaluation.winner!.groupId.bytes)} localCoordinator=${group.isCoordinator}',
+    );
     if (evaluation.decision == GroupMergeDecision.sameGroup) {
       if (_sameMembers(local.members, info.info.members)) {
         final remoteCoordinator = info.coordinatorPeerId;
@@ -3618,7 +4890,8 @@ class _RuntimeGroupRouteTransport
             coordinatorTerm: info.coordinatorTerm,
           );
           logger(
-              'group same-group authority refreshed peer=${peer.peerId} coordinator=$remoteCoordinator term=${info.coordinatorTerm}');
+            'group same-group authority refreshed peer=${peer.peerId} coordinator=$remoteCoordinator term=${info.coordinatorTerm}',
+          );
         }
         // A restarted member can send its lower-term GROUP_INFO after the
         // coordinator has already queued a state catch-up for the newly
@@ -3671,21 +4944,28 @@ class _RuntimeGroupRouteTransport
         // ACK/retry state. Re-send the current committed membership to this
         // authenticated peer specifically; GROUP_INFO alone cannot expand a
         // recreated two-member view back to the full group.
-        await _publishMembershipSnapshot(local.members, group.coordinatorTerm,
-            onlyPeer: peer);
+        await _publishMembershipSnapshot(
+          local.members,
+          group.coordinatorTerm,
+          onlyPeer: peer,
+        );
         return;
       }
       final members = _mergeMembers(local.members, info.info.members);
       if (members.length > group.config.maxPeers) {
-        group.reportError(LpcErrorCode.groupFull,
-            peerId: peer.peerId,
-            diagnostic:
-                'same-GroupId membership reconciliation exceeds capacity');
+        group.reportError(
+          LpcErrorCode.groupFull,
+          peerId: peer.peerId,
+          diagnostic: 'same-GroupId membership reconciliation exceeds capacity',
+        );
         return;
       }
       final term = max(group.coordinatorTerm, info.coordinatorTerm) + 1;
-      group.commitMembership(members,
-          coordinator: group.localPeerId, coordinatorTerm: term);
+      group.commitMembership(
+        members,
+        coordinator: group.localPeerId,
+        coordinatorTerm: term,
+      );
       await _publishMembershipSnapshot(members, term, sameGroupOnly: true);
       await _publishGroupInfo();
       return;
@@ -3719,12 +4999,12 @@ class _RuntimeGroupRouteTransport
     if (!await _sendGroupInfo(peer)) return;
     if (_disposed || peer.state != PeerConnectionState.ready) return;
     final payload = GroupMergePayload(
-        winningGroupId: local.groupId,
-        losingGroupId: info.info.groupId,
-        newCoordinatorTerm:
-            max(group.coordinatorTerm, info.coordinatorTerm) + 1,
-        effectiveMaxPeers: evaluation.effectiveMaxPeers,
-        members: members);
+      winningGroupId: local.groupId,
+      losingGroupId: info.info.groupId,
+      newCoordinatorTerm: max(group.coordinatorTerm, info.coordinatorTerm) + 1,
+      effectiveMaxPeers: evaluation.effectiveMaxPeers,
+      members: members,
+    );
     _applyGroupMerge(payload, coordinator: group.localPeerId);
     await _reconcileRetainedSameGroupViews();
     // A merge changes the authoritative GroupId, membership, and coordinator
@@ -3733,9 +5013,10 @@ class _RuntimeGroupRouteTransport
     // rejected against stale retained GROUP_INFO (Section 31.6.1).
     await _publishGroupInfo(except: peer);
     final result = await peer._core.submitAckRequiredFrame(
-        type: FrameType.groupMerge,
-        payload: await payload.encode(),
-        nowMs: peer._core.monotonicNowMs);
+      type: FrameType.groupMerge,
+      payload: await payload.encode(),
+      nowMs: peer._core.monotonicNowMs,
+    );
     if (result != TransportWriteState.submittedToPlatform) {
       throw const LpcException(LpcErrorCode.transportClosed);
     }
@@ -3744,22 +5025,26 @@ class _RuntimeGroupRouteTransport
   Future<GroupMergeInfo> _localGroupInfo() async {
     final config = group.config;
     return GroupMergeInfo(
-        namespaceHash: await _scopedHash(
-            'LPC1-application-namespace', config.applicationNamespace),
-        discoveryMode: config.discoveryMode,
-        autoMerge: config.autoMerge,
-        trustMode: config.groupTrustMode,
-        knownPeersAutoMerge: config.knownPeersAutoMerge,
-        tokenHash: config.discoveryMode == DiscoveryMode.openProximity
-            ? List<int>.filled(32, 0)
-            : await _scopedHash(
-                'LPC1-group-join-token', config.groupJoinToken!),
-        groupId: group.groupId,
-        members: group.members);
+      namespaceHash: await _scopedHash(
+        'LPC1-application-namespace',
+        config.applicationNamespace,
+      ),
+      discoveryMode: config.discoveryMode,
+      autoMerge: config.autoMerge,
+      trustMode: config.groupTrustMode,
+      knownPeersAutoMerge: config.knownPeersAutoMerge,
+      tokenHash: config.discoveryMode == DiscoveryMode.openProximity
+          ? List<int>.filled(32, 0)
+          : await _scopedHash('LPC1-group-join-token', config.groupJoinToken!),
+      groupId: group.groupId,
+      members: group.members,
+    );
   }
 
   List<GroupMember> _mergeMembers(
-      Iterable<GroupMember> first, Iterable<GroupMember> second) {
+    Iterable<GroupMember> first,
+    Iterable<GroupMember> second,
+  ) {
     final merged = <PeerId, GroupMember>{};
     for (final member in [...first, ...second]) {
       final prior = merged[member.peerId];
@@ -3777,13 +5062,17 @@ class _RuntimeGroupRouteTransport
     final right = second.toList()
       ..sort((a, b) => _comparePeerIdBytes(a.peerId, b.peerId));
     return left.length == right.length &&
-        Iterable.generate(left.length).every((index) =>
-            left[index].peerId == right[index].peerId &&
-            left[index].maxPeers == right[index].maxPeers);
+        Iterable.generate(left.length).every(
+          (index) =>
+              left[index].peerId == right[index].peerId &&
+              left[index].maxPeers == right[index].maxPeers,
+        );
   }
 
-  bool _isMemberSubset(Iterable<GroupMember> possibleSubset,
-      Iterable<GroupMember> possibleSuperset) {
+  bool _isMemberSubset(
+    Iterable<GroupMember> possibleSubset,
+    Iterable<GroupMember> possibleSuperset,
+  ) {
     final superset = {
       for (final member in possibleSuperset) member.peerId: member,
     };
@@ -3793,19 +5082,23 @@ class _RuntimeGroupRouteTransport
     });
   }
 
-  void _applyGroupMerge(GroupMergePayload payload,
-      {required PeerId coordinator}) {
+  void _applyGroupMerge(
+    GroupMergePayload payload, {
+    required PeerId coordinator,
+  }) {
     final disposition = _mergeReceiver.receive(payload);
     logger(
-        'group merge apply disposition=$disposition localGroup=${_debugId(group.groupId.bytes)} winningGroup=${_debugId(payload.winningGroupId.bytes)} losingGroup=${_debugId(payload.losingGroupId.bytes)} members=${payload.members.length} coordinator=$coordinator term=${payload.newCoordinatorTerm}');
+      'group merge apply disposition=$disposition localGroup=${_debugId(group.groupId.bytes)} winningGroup=${_debugId(payload.winningGroupId.bytes)} losingGroup=${_debugId(payload.losingGroupId.bytes)} members=${payload.members.length} coordinator=$coordinator term=${payload.newCoordinatorTerm}',
+    );
     if (disposition != GroupMergeReceiveDisposition.applied) {
       return;
     }
     group.commitMergedMembership(
-        groupId: payload.winningGroupId,
-        members: payload.members,
-        coordinator: coordinator,
-        coordinatorTerm: payload.newCoordinatorTerm);
+      groupId: payload.winningGroupId,
+      members: payload.members,
+      coordinator: coordinator,
+      coordinatorTerm: payload.newCoordinatorTerm,
+    );
   }
 
   Future<void> _receiveGroupMerge(PeerConnection peer, LpcFrame frame) async {
@@ -3817,12 +5110,14 @@ class _RuntimeGroupRouteTransport
     // The source must be the coordinator that advertised the winning group,
     // and the local group must be the payload's declared loser. Both checks
     // bind this otherwise coordinator-less payload to authenticated GROUP_INFO.
-    final senderAuthorized = remote != null &&
+    final senderAuthorized =
+        remote != null &&
         remote.info.groupId == payload.winningGroupId &&
         remote.coordinatorPeerId == peer.peerId;
     if (!senderAuthorized) {
       logger(
-          'group merge authorization failed peer=${peer.peerId} localGroup=${_debugId(group.groupId.bytes)} winningGroup=${_debugId(payload.winningGroupId.bytes)} losingGroup=${_debugId(payload.losingGroupId.bytes)} retainedGroup=${remote == null ? 'none' : _debugId(remote.info.groupId.bytes)} retainedCoordinator=${remote?.coordinatorPeerId}');
+        'group merge authorization failed peer=${peer.peerId} localGroup=${_debugId(group.groupId.bytes)} winningGroup=${_debugId(payload.winningGroupId.bytes)} losingGroup=${_debugId(payload.losingGroupId.bytes)} retainedGroup=${remote == null ? 'none' : _debugId(remote.info.groupId.bytes)} retainedCoordinator=${remote?.coordinatorPeerId}',
+      );
       throw const LpcException(LpcErrorCode.protocolMismatch);
     }
     if (group.groupId != payload.losingGroupId &&
@@ -3834,7 +5129,8 @@ class _RuntimeGroupRouteTransport
       // healthy link; the fresh GROUP_INFO will drive the deterministic merge
       // winner to convergence.
       logger(
-          'group merge stale concurrent view peer=${peer.peerId} localGroup=${_debugId(group.groupId.bytes)} winningGroup=${_debugId(payload.winningGroupId.bytes)} losingGroup=${_debugId(payload.losingGroupId.bytes)} localTerm=${group.coordinatorTerm} term=${payload.newCoordinatorTerm}');
+        'group merge stale concurrent view peer=${peer.peerId} localGroup=${_debugId(group.groupId.bytes)} winningGroup=${_debugId(payload.winningGroupId.bytes)} losingGroup=${_debugId(payload.losingGroupId.bytes)} localTerm=${group.coordinatorTerm} term=${payload.newCoordinatorTerm}',
+      );
       await peer._core.submitAck(frame.messageId);
       await _publishGroupInfo();
       return;
@@ -3847,14 +5143,16 @@ class _RuntimeGroupRouteTransport
     if (payload.newCoordinatorTerm <= group.coordinatorTerm ||
         group.groupId == payload.winningGroupId) {
       logger(
-          'group merge stale peer=${peer.peerId} localGroup=${_debugId(group.groupId.bytes)} localTerm=${group.coordinatorTerm} winningGroup=${_debugId(payload.winningGroupId.bytes)} losingGroup=${_debugId(payload.losingGroupId.bytes)} term=${payload.newCoordinatorTerm}');
+        'group merge stale peer=${peer.peerId} localGroup=${_debugId(group.groupId.bytes)} localTerm=${group.coordinatorTerm} winningGroup=${_debugId(payload.winningGroupId.bytes)} losingGroup=${_debugId(payload.losingGroupId.bytes)} term=${payload.newCoordinatorTerm}',
+      );
       await peer._core.submitAck(frame.messageId);
       await _publishGroupInfo();
       return;
     }
     if (group.groupId != payload.losingGroupId) {
       logger(
-          'group merge rejected current group differs peer=${peer.peerId} localGroup=${_debugId(group.groupId.bytes)} winningGroup=${_debugId(payload.winningGroupId.bytes)} losingGroup=${_debugId(payload.losingGroupId.bytes)} localTerm=${group.coordinatorTerm} term=${payload.newCoordinatorTerm}');
+        'group merge rejected current group differs peer=${peer.peerId} localGroup=${_debugId(group.groupId.bytes)} winningGroup=${_debugId(payload.winningGroupId.bytes)} losingGroup=${_debugId(payload.losingGroupId.bytes)} localTerm=${group.coordinatorTerm} term=${payload.newCoordinatorTerm}',
+      );
       throw const LpcException(LpcErrorCode.protocolMismatch);
     }
     _applyGroupMerge(payload, coordinator: peer.peerId);
@@ -3880,30 +5178,50 @@ class _RuntimeGroupRouteTransport
       if (remote.coordinatorPeerId == group.coordinatorPeerId &&
           remote.coordinatorTerm < group.coordinatorTerm &&
           _isMemberSubset(remote.info.members, group.members)) {
+        // This is the coordinator's own stale bootstrap view.  It is safe to
+        // avoid a new reconciliation term, but it is not safe to skip the
+        // catch-up: a recreated GroupSession has no prior snapshot retry
+        // state, so GROUP_INFO alone cannot expand the retained subset.  This
+        // is especially important after a third peer joins through another
+        // member while this link is already authenticated.
+        await _sendGroupInfo(entry.key);
+        await _publishMembershipSnapshot(
+          group.members,
+          group.coordinatorTerm,
+          onlyPeer: entry.key,
+        );
         continue;
       }
       final members = _mergeMembers(group.members, remote.info.members);
       if (members.length > group.config.maxPeers) {
-        group.reportError(LpcErrorCode.groupFull,
-            peerId: entry.key.peerId,
-            diagnostic:
-                'same-GroupId membership reconciliation exceeds capacity');
+        group.reportError(
+          LpcErrorCode.groupFull,
+          peerId: entry.key.peerId,
+          diagnostic: 'same-GroupId membership reconciliation exceeds capacity',
+        );
         continue;
       }
       final term = max(group.coordinatorTerm, remote.coordinatorTerm) + 1;
-      group.commitMembership(members,
-          coordinator: group.localPeerId, coordinatorTerm: term);
+      group.commitMembership(
+        members,
+        coordinator: group.localPeerId,
+        coordinatorTerm: term,
+      );
       await _publishMembershipSnapshot(members, term, sameGroupOnly: true);
     }
   }
 
   Future<void> _publishMembershipSnapshot(
-      Iterable<GroupMember> members, int coordinatorTerm,
-      {bool sameGroupOnly = false, PeerConnection? onlyPeer}) async {
+    Iterable<GroupMember> members,
+    int coordinatorTerm, {
+    bool sameGroupOnly = false,
+    PeerConnection? onlyPeer,
+  }) async {
     final payload = MembershipSnapshot(
-        groupId: group.groupId,
-        coordinatorTerm: coordinatorTerm,
-        members: members.toList(growable: false));
+      groupId: group.groupId,
+      coordinatorTerm: coordinatorTerm,
+      members: members.toList(growable: false),
+    );
     final encoded = await payload.encode();
     for (final peer in _frameSubscriptions.keys.toList()) {
       if (onlyPeer != null && !identical(peer, onlyPeer)) continue;
@@ -3915,14 +5233,17 @@ class _RuntimeGroupRouteTransport
         continue;
       }
       logger(
-          'group membership snapshot send peer=${peer.peerId} group=${_debugId(group.groupId.bytes)} term=$coordinatorTerm members=${members.map((member) => member.peerId).join(',')}');
+        'group membership snapshot send peer=${peer.peerId} group=${_debugId(group.groupId.bytes)} term=$coordinatorTerm members=${members.map((member) => member.peerId).join(',')}',
+      );
       try {
         final result = await peer._core.submitAckRequiredFrame(
-            type: FrameType.membershipSnapshot,
-            payload: encoded,
-            nowMs: peer._core.monotonicNowMs);
+          type: FrameType.membershipSnapshot,
+          payload: encoded,
+          nowMs: peer._core.monotonicNowMs,
+        );
         logger(
-            'group membership snapshot submitted peer=${peer.peerId} result=$result');
+          'group membership snapshot submitted peer=${peer.peerId} result=$result',
+        );
       } on LpcException catch (error) {
         if (error.code != LpcErrorCode.transportClosed &&
             error.code != LpcErrorCode.invalidState) {
@@ -3933,40 +5254,52 @@ class _RuntimeGroupRouteTransport
   }
 
   Future<void> _receiveMembershipSnapshot(
-      PeerConnection peer, LpcFrame frame) async {
+    PeerConnection peer,
+    LpcFrame frame,
+  ) async {
     if (frame.flags != 1) {
       throw const LpcException(LpcErrorCode.protocolMismatch);
     }
     final snapshot = await MembershipSnapshot.decode(frame.payload);
     logger(
-        'group membership snapshot receive peer=${peer.peerId} local=${group.localPeerId} localGroup=${_debugId(group.groupId.bytes)} localTerm=${group.coordinatorTerm} localCoordinator=${group.coordinatorPeerId} snapshotGroup=${_debugId(snapshot.groupId.bytes)} snapshotTerm=${snapshot.coordinatorTerm} members=${snapshot.members.map((member) => member.peerId).join(',')}');
+      'group membership snapshot receive peer=${peer.peerId} local=${group.localPeerId} localGroup=${_debugId(group.groupId.bytes)} localTerm=${group.coordinatorTerm} localCoordinator=${group.coordinatorPeerId} snapshotGroup=${_debugId(snapshot.groupId.bytes)} snapshotTerm=${snapshot.coordinatorTerm} members=${snapshot.members.map((member) => member.peerId).join(',')}',
+    );
     if (snapshot.groupId != group.groupId ||
         peer.peerId != group.coordinatorPeerId) {
       throw const LpcException(LpcErrorCode.protocolMismatch);
     }
     final disposition = _membershipOrdering.observe(
-        coordinatorPeerId: peer.peerId,
-        coordinatorTerm: snapshot.coordinatorTerm,
-        sessionId: peer.sessionId,
-        senderMessageId: frame.messageId);
+      coordinatorPeerId: peer.peerId,
+      coordinatorTerm: snapshot.coordinatorTerm,
+      sessionId: peer.sessionId,
+      senderMessageId: frame.messageId,
+    );
     logger(
-        'group membership snapshot order peer=${peer.peerId} term=${snapshot.coordinatorTerm} disposition=$disposition message=${_debugId(frame.messageId)}');
+      'group membership snapshot order peer=${peer.peerId} term=${snapshot.coordinatorTerm} disposition=$disposition message=${_debugId(frame.messageId)}',
+    );
     if (disposition == MembershipSnapshotOrderDisposition.accepted) {
-      group.commitMembership(snapshot.members,
-          coordinator: peer.peerId, coordinatorTerm: snapshot.coordinatorTerm);
+      group.commitMembership(
+        snapshot.members,
+        coordinator: peer.peerId,
+        coordinatorTerm: snapshot.coordinatorTerm,
+      );
       logger(
-          'group membership snapshot applied local=${group.localPeerId} term=${group.coordinatorTerm} members=${group.members.map((member) => member.peerId).join(',')}');
+        'group membership snapshot applied local=${group.localPeerId} term=${group.coordinatorTerm} members=${group.members.map((member) => member.peerId).join(',')}',
+      );
       _mergeReceiver = GroupMergeReceiver(
-          committedGroupId: group.groupId,
-          committedTerm: group.coordinatorTerm,
-          committedMembers: group.members);
+        committedGroupId: group.groupId,
+        committedTerm: group.coordinatorTerm,
+        committedMembers: group.members,
+      );
     }
     await peer._core.submitAck(frame.messageId);
     await _publishGroupInfo();
   }
 
   Future<void> _receiveCoordinatorCheckpoint(
-      PeerConnection peer, LpcFrame frame) async {
+    PeerConnection peer,
+    LpcFrame frame,
+  ) async {
     if (frame.flags != 1 ||
         group.config.coordinatorCheckpointing == false ||
         group.isCoordinator ||
@@ -3975,26 +5308,38 @@ class _RuntimeGroupRouteTransport
     }
     final chunk = CoordinatorCheckpointChunk.decode(frame.payload);
     final receiver = _checkpointReceivers[peer] ??= CheckpointReceiver();
-    final result = await receiver.add(frame.messageId, chunk,
-        validate: (checkpoint) async {
-      final valid = await group.validateCoordinatorCheckpoint(checkpoint.bytes);
-      logger(
-          'checkpoint validate peer=${peer.peerId} message=${_debugId(frame.messageId)} sequence=${checkpoint.sequence} bytes=${checkpoint.bytes.length} valid=$valid');
-      return valid;
-    }, commit: (checkpoint) {
-      if (checkpoint.term < group.coordinatorTerm) {
-        throw const LpcException(LpcErrorCode.protocolMismatch);
-      }
-      group.commitCoordinatorCheckpoint(checkpoint.bytes,
-          coordinator: peer.peerId, checkpointSequence: checkpoint.sequence);
-    });
+    final result = await receiver.add(
+      frame.messageId,
+      chunk,
+      validate: (checkpoint) async {
+        final valid = await group.validateCoordinatorCheckpoint(
+          checkpoint.bytes,
+        );
+        logger(
+          'checkpoint validate peer=${peer.peerId} message=${_debugId(frame.messageId)} sequence=${checkpoint.sequence} bytes=${checkpoint.bytes.length} valid=$valid',
+        );
+        return valid;
+      },
+      commit: (checkpoint) {
+        if (checkpoint.term < group.coordinatorTerm) {
+          throw const LpcException(LpcErrorCode.protocolMismatch);
+        }
+        group.commitCoordinatorCheckpoint(
+          checkpoint.bytes,
+          coordinator: peer.peerId,
+          checkpointSequence: checkpoint.sequence,
+        );
+      },
+    );
     if (result.acknowledgmentMessageId != null) {
       logger(
-          'checkpoint receive ACK peer=${peer.peerId} message=${_debugId(frame.messageId)} result=${result.committed != null ? 'committed' : 'duplicate'}');
+        'checkpoint receive ACK peer=${peer.peerId} message=${_debugId(frame.messageId)} result=${result.committed != null ? 'committed' : 'duplicate'}',
+      );
       await peer._core.submitAck(frame.messageId);
     } else {
       logger(
-          'checkpoint receive incomplete peer=${peer.peerId} message=${_debugId(frame.messageId)} sequence=${chunk.sequence}');
+        'checkpoint receive incomplete peer=${peer.peerId} message=${_debugId(frame.messageId)} sequence=${chunk.sequence}',
+      );
     }
   }
 
@@ -4014,44 +5359,54 @@ class _RuntimeGroupRouteTransport
     if (group.state != GroupState.ready ||
         !group.members.any((member) => member.peerId == peer.peerId)) {
       logger(
-          'group reliable deferred peer=${peer.peerId} reason=group-not-ready-or-peer-not-committed state=${group.state}');
+        'group reliable deferred peer=${peer.peerId} reason=group-not-ready-or-peer-not-committed state=${group.state}',
+      );
       return;
     }
     final complete = _reassemblers[peer]!.add(frame.messageId, chunk);
     if (complete == null) return;
     logger(
-        'group receive complete peer=${peer.peerId} source=${complete.sourcePeerId} destination=${complete.destinationPeerId} message=${_debugId(complete.groupMessageId.bytes)} mode=${complete.deliveryMode} bytes=${complete.bytes.length} coordinator=${group.isCoordinator}');
+      'group receive complete peer=${peer.peerId} source=${complete.sourcePeerId} destination=${complete.destinationPeerId} message=${_debugId(complete.groupMessageId.bytes)} mode=${complete.deliveryMode} bytes=${complete.bytes.length} coordinator=${group.isCoordinator}',
+    );
     if (group.isCoordinator) {
       final destination = _readyPeer(complete.destinationPeerId);
       logger(
-          'group coordinator admission source=${complete.sourcePeerId} destination=${complete.destinationPeerId} message=${_debugId(complete.groupMessageId.bytes)} destinationReady=${complete.destinationPeerId == group.localPeerId || destination != null} destinationPeer=${destination?.peerId}');
-      final actions = _coordinator().receiveReliableFromMember(complete,
-          authenticatedSendingPeerId: peer.peerId,
-          destinationReady: complete.destinationPeerId == group.localPeerId ||
-              destination != null,
-          reservationBytes: complete.bytes.length,
-          destinationPairwiseMessageId:
-              complete.destinationPeerId == group.localPeerId ||
-                      destination == null
-                  ? null
-                  : _nextMessageId(destination));
+        'group coordinator admission source=${complete.sourcePeerId} destination=${complete.destinationPeerId} message=${_debugId(complete.groupMessageId.bytes)} destinationReady=${complete.destinationPeerId == group.localPeerId || destination != null} destinationPeer=${destination?.peerId}',
+      );
+      final actions = _coordinator().receiveReliableFromMember(
+        complete,
+        authenticatedSendingPeerId: peer.peerId,
+        destinationReady:
+            complete.destinationPeerId == group.localPeerId ||
+            destination != null,
+        reservationBytes: complete.bytes.length,
+        destinationPairwiseMessageId:
+            complete.destinationPeerId == group.localPeerId ||
+                destination == null
+            ? null
+            : _nextMessageId(destination),
+      );
       await _applyCoordinatorActions(peer, actions);
       return;
     }
-    final result = _destination()
-        .receiveReliable(complete, authenticatedSendingPeerId: peer.peerId);
+    final result = _destination().receiveReliable(
+      complete,
+      authenticatedSendingPeerId: peer.peerId,
+    );
     if (complete.deliveryMode == DeliveryMode.reliableAcked) {
       await peer._core.submitAck(complete.pairwiseMessageId);
     }
     if (result.disposition == ReliableDestinationDisposition.deliver) {
       logger(
-          'group destination deliver peer=${peer.peerId} source=${complete.sourcePeerId} destination=${complete.destinationPeerId} message=${_debugId(complete.groupMessageId.bytes)}');
+        'group destination deliver peer=${peer.peerId} source=${complete.sourcePeerId} destination=${complete.destinationPeerId} message=${_debugId(complete.groupMessageId.bytes)}',
+      );
       group.receiveReliable(
-          source: complete.sourcePeerId,
-          id: complete.groupMessageId,
-          mode: complete.deliveryMode,
-          priority: complete.priority,
-          bytes: complete.bytes);
+        source: complete.sourcePeerId,
+        id: complete.groupMessageId,
+        mode: complete.deliveryMode,
+        priority: complete.priority,
+        bytes: complete.bytes,
+      );
     }
   }
 
@@ -4059,12 +5414,15 @@ class _RuntimeGroupRouteTransport
     if (frame.flags != 1)
       throw const LpcException(LpcErrorCode.protocolMismatch);
     final ack = GroupDeliveryAck.decode(frame.payload);
-    final result = _member()
-        .receiveDeliveryAckResult(ack, authenticatedSendingPeerId: peer.peerId);
+    final result = _member().receiveDeliveryAckResult(
+      ack,
+      authenticatedSendingPeerId: peer.peerId,
+    );
     if (result.requiresGenericAck) await peer._core.submitAck(frame.messageId);
     final state = result.state;
     logger(
-        'group delivery ack peer=${peer.peerId} source=${ack.sourcePeerId} destination=${ack.destinationPeerId} message=${_debugId(ack.groupMessageId.bytes)} state=$state genericAck=${result.requiresGenericAck}');
+      'group delivery ack peer=${peer.peerId} source=${ack.sourcePeerId} destination=${ack.destinationPeerId} message=${_debugId(ack.groupMessageId.bytes)} state=$state genericAck=${result.requiresGenericAck}',
+    );
     if (state != null) _completeSource(ack.groupMessageId, state);
   }
 
@@ -4072,8 +5430,10 @@ class _RuntimeGroupRouteTransport
     if (frame.flags != 1)
       throw const LpcException(LpcErrorCode.protocolMismatch);
     final status = GroupRelayStatusPayload.decode(frame.payload);
-    final result = _member().receiveRelayStatusResult(status,
-        authenticatedSendingPeerId: peer.peerId);
+    final result = _member().receiveRelayStatusResult(
+      status,
+      authenticatedSendingPeerId: peer.peerId,
+    );
     if (result.requiresGenericAck) await peer._core.submitAck(frame.messageId);
     final state = result.state;
     if (state != null) _completeSource(status.groupMessageId, state);
@@ -4085,13 +5445,17 @@ class _RuntimeGroupRouteTransport
     final datagram = GroupRealtimeDatagram.decode(frame.payload);
     if (group.isCoordinator) {
       final target = _readyPeer(datagram.destinationPeerId);
-      final result = _coordinator().receiveRealtimeFromMember(datagram,
-          authenticatedSendingPeerId: peer.peerId,
-          destinationReady: datagram.destinationPeerId == group.localPeerId ||
-              target != null);
+      final result = _coordinator().receiveRealtimeFromMember(
+        datagram,
+        authenticatedSendingPeerId: peer.peerId,
+        destinationReady:
+            datagram.destinationPeerId == group.localPeerId || target != null,
+      );
       if (result == CoordinatorRealtimeEnqueueResult.droppedCapacity) {
-        group.reportError(LpcErrorCode.resourceExhausted,
-            peerId: datagram.destinationPeerId);
+        group.reportError(
+          LpcErrorCode.resourceExhausted,
+          peerId: datagram.destinationPeerId,
+        );
         return;
       }
       if (result ==
@@ -4099,43 +5463,53 @@ class _RuntimeGroupRouteTransport
         return;
       }
       final accepted = _coordinator().realtimePending.take(
-          datagram.sourcePeerId,
-          datagram.destinationPeerId,
-          datagram.channelId);
+        datagram.sourcePeerId,
+        datagram.destinationPeerId,
+        datagram.channelId,
+      );
       if (accepted == null) return;
       if (accepted.destinationPeerId == group.localPeerId) {
         group.receiveRealtime(
-            source: accepted.sourcePeerId,
-            channelId: accepted.channelId,
-            senderTick: accepted.senderTick,
-            datagramSequence: accepted.sequence,
-            bytes: accepted.bytes);
+          source: accepted.sourcePeerId,
+          channelId: accepted.channelId,
+          senderTick: accepted.senderTick,
+          datagramSequence: accepted.sequence,
+          bytes: accepted.bytes,
+        );
       } else {
         final destination = _readyPeer(accepted.destinationPeerId);
         if (destination != null) {
           await destination._core.submitEncrypted(
-              FrameType.groupRealtimeDatagram, accepted.encode());
+            FrameType.groupRealtimeDatagram,
+            accepted.encode(),
+          );
         }
       }
       return;
     }
-    final accepted = _destination()
-        .receiveRealtime(datagram, authenticatedSendingPeerId: peer.peerId);
+    final accepted = _destination().receiveRealtime(
+      datagram,
+      authenticatedSendingPeerId: peer.peerId,
+    );
     if (accepted) {
       group.receiveRealtime(
-          source: datagram.sourcePeerId,
-          channelId: datagram.channelId,
-          senderTick: datagram.senderTick,
-          datagramSequence: datagram.sequence,
-          bytes: datagram.bytes);
+        source: datagram.sourcePeerId,
+        channelId: datagram.channelId,
+        senderTick: datagram.senderTick,
+        datagramSequence: datagram.sequence,
+        bytes: datagram.bytes,
+      );
     }
   }
 
   Future<void> _applyCoordinatorActions(
-      PeerConnection? sourcePeer, CoordinatorRelayActions actions,
-      {GroupMessageId? localSourceMessageId}) async {
+    PeerConnection? sourcePeer,
+    CoordinatorRelayActions actions, {
+    GroupMessageId? localSourceMessageId,
+  }) async {
     logger(
-        'group coordinator actions sourcePeer=${sourcePeer?.peerId} sourceHopAck=${actions.sourceHopGenericAckMessageId} local=${actions.deliverLocally == null ? null : _debugId(actions.deliverLocally!.groupMessageId.bytes)} localState=${actions.localSourceState} deliveryAck=${actions.deliveryAck == null ? null : _debugId(actions.deliveryAck!.groupMessageId.bytes)} relayStatus=${actions.relayStatus == null ? null : _debugId(actions.relayStatus!.groupMessageId.bytes)} forward=${actions.forward == null ? null : _debugId(actions.forward!.groupMessageId.bytes)}');
+      'group coordinator actions sourcePeer=${sourcePeer?.peerId} sourceHopAck=${actions.sourceHopGenericAckMessageId} local=${actions.deliverLocally == null ? null : _debugId(actions.deliverLocally!.groupMessageId.bytes)} localState=${actions.localSourceState} deliveryAck=${actions.deliveryAck == null ? null : _debugId(actions.deliveryAck!.groupMessageId.bytes)} relayStatus=${actions.relayStatus == null ? null : _debugId(actions.relayStatus!.groupMessageId.bytes)} forward=${actions.forward == null ? null : _debugId(actions.forward!.groupMessageId.bytes)}',
+    );
     final sourceAck = actions.sourceHopGenericAckMessageId;
     if (sourceAck != null && sourcePeer != null) {
       await sourcePeer._core.submitAck(sourceAck);
@@ -4143,11 +5517,12 @@ class _RuntimeGroupRouteTransport
     final local = actions.deliverLocally;
     if (local != null) {
       group.receiveReliable(
-          source: local.sourcePeerId,
-          id: local.groupMessageId,
-          mode: local.deliveryMode,
-          priority: local.priority,
-          bytes: local.bytes);
+        source: local.sourcePeerId,
+        id: local.groupMessageId,
+        mode: local.deliveryMode,
+        priority: local.priority,
+        bytes: local.bytes,
+      );
     }
     final state = actions.localSourceState;
     if (state != null) {
@@ -4157,11 +5532,17 @@ class _RuntimeGroupRouteTransport
     final ack = actions.deliveryAck;
     if (ack != null)
       await _sendSignal(
-          ack.sourcePeerId, FrameType.groupDeliveryAck, ack.encode());
+        ack.sourcePeerId,
+        FrameType.groupDeliveryAck,
+        ack.encode(),
+      );
     final status = actions.relayStatus;
     if (status != null)
       await _sendSignal(
-          status.sourcePeerId, FrameType.groupRelayStatus, status.encode());
+        status.sourcePeerId,
+        FrameType.groupRelayStatus,
+        status.encode(),
+      );
     final forward = actions.forward;
     if (forward != null) await _submitForward(forward);
   }
@@ -4169,23 +5550,31 @@ class _RuntimeGroupRouteTransport
   Future<void> _submitForward(ReassembledGroupReliable operation) async {
     final destination = _readyPeer(operation.destinationPeerId);
     logger(
-        'group forward source=${operation.sourcePeerId} destination=${operation.destinationPeerId} message=${_debugId(operation.groupMessageId.bytes)} ready=${destination != null} peer=${destination?.peerId}');
+      'group forward source=${operation.sourcePeerId} destination=${operation.destinationPeerId} message=${_debugId(operation.groupMessageId.bytes)} ready=${destination != null} peer=${destination?.peerId}',
+    );
     if (destination == null) {
       final actions = _coordinator().reliableController.finalHopFailed(
-          operation.sourcePeerId,
-          operation.groupMessageId,
-          GroupRelayStatus.destinationUnavailable);
-      await _applyCoordinatorActions(null, actions,
-          localSourceMessageId: operation.groupMessageId);
+        operation.sourcePeerId,
+        operation.groupMessageId,
+        GroupRelayStatus.destinationUnavailable,
+      );
+      await _applyCoordinatorActions(
+        null,
+        actions,
+        localSourceMessageId: operation.groupMessageId,
+      );
       return;
     }
     await _submitHop(destination, null, finalHop: true, reassembled: operation);
   }
 
-  Future<void> _submitHop(PeerConnection peer, RoutedGroupOperation? operation,
-      {required bool finalHop,
-      ReassembledGroupReliable? reassembled,
-      RoutedGroupOperation? sourceOperation}) async {
+  Future<void> _submitHop(
+    PeerConnection peer,
+    RoutedGroupOperation? operation, {
+    required bool finalHop,
+    ReassembledGroupReliable? reassembled,
+    RoutedGroupOperation? sourceOperation,
+  }) async {
     final source = reassembled?.sourcePeerId ?? operation!.sourcePeerId;
     final destination =
         reassembled?.destinationPeerId ?? operation!.destinationPeerId;
@@ -4196,66 +5585,83 @@ class _RuntimeGroupRouteTransport
     final groupMessageId =
         reassembled?.groupMessageId ?? operation!.groupMessageId;
     final chunks = chunkGroupReliable(
-        groupId: group.groupId,
-        source: source,
-        destination: destination,
-        messageId: groupMessageId,
-        mode: mode,
-        priority: priority,
-        bytes: bytes);
+      groupId: group.groupId,
+      source: source,
+      destination: destination,
+      messageId: groupMessageId,
+      mode: mode,
+      priority: priority,
+      bytes: bytes,
+    );
     logger(
-        'group submit hop peer=${peer.peerId} source=$source destination=$destination message=${_debugId(groupMessageId.bytes)} pairwise=${_debugId(messageId)} finalHop=$finalHop mode=$mode chunks=${chunks.length} bytes=${bytes.length} state=${peer.state}');
+      'group submit hop peer=${peer.peerId} source=$source destination=$destination message=${_debugId(groupMessageId.bytes)} pairwise=${_debugId(messageId)} finalHop=$finalHop mode=$mode chunks=${chunks.length} bytes=${bytes.length} state=${peer.state}',
+    );
     if (mode == DeliveryMode.reliableAcked) {
       peer._core.ackRetention.retain(
-          messageId: messageId,
-          logicalContent: [for (final chunk in chunks) ...chunk.encode()]);
+        messageId: messageId,
+        logicalContent: [for (final chunk in chunks) ...chunk.encode()],
+      );
     }
     for (final chunk in chunks) {
       final result = await peer._core.submitEncrypted(
-          FrameType.groupReliable, chunk.encode(),
-          flags: mode == DeliveryMode.reliableAcked ? 1 : 0,
-          messageId: messageId,
-          priority: priority);
+        FrameType.groupReliable,
+        chunk.encode(),
+        flags: mode == DeliveryMode.reliableAcked ? 1 : 0,
+        messageId: messageId,
+        priority: priority,
+      );
       if (result != TransportWriteState.submittedToPlatform) {
         logger(
-            'group submit hop failed peer=${peer.peerId} message=${_debugId(groupMessageId.bytes)} pairwise=${_debugId(messageId)} result=$result state=${peer.state}');
+          'group submit hop failed peer=${peer.peerId} message=${_debugId(groupMessageId.bytes)} pairwise=${_debugId(messageId)} result=$result state=${peer.state}',
+        );
         throw const LpcException(LpcErrorCode.transportClosed);
       }
     }
     if (mode == DeliveryMode.reliableAcked) {
-      peer._core.ackRetention
-          .finalFrameSubmitted(messageId, nowMs: peer._core.monotonicNowMs);
+      peer._core.ackRetention.finalFrameSubmitted(
+        messageId,
+        nowMs: peer._core.monotonicNowMs,
+      );
       _ackHops[_hopKey(peer, messageId)] = _LiveGroupHop(
-          peer: peer,
-          messageId: messageId,
-          chunks: chunks,
-          operation: ReassembledGroupReliable(
-              pairwiseMessageId: messageId,
-              groupId: group.groupId,
-              sourcePeerId: source,
-              destinationPeerId: destination,
-              groupMessageId: groupMessageId,
-              deliveryMode: mode,
-              priority: priority,
-              bytes: bytes),
-          finalHop: finalHop);
+        peer: peer,
+        messageId: messageId,
+        chunks: chunks,
+        operation: ReassembledGroupReliable(
+          pairwiseMessageId: messageId,
+          groupId: group.groupId,
+          sourcePeerId: source,
+          destinationPeerId: destination,
+          groupMessageId: groupMessageId,
+          deliveryMode: mode,
+          priority: priority,
+          bytes: bytes,
+        ),
+        finalHop: finalHop,
+      );
     } else if (finalHop) {
-      final actions = _coordinator()
-          .reliableController
-          .finalHopSubmitted(source, groupMessageId);
+      final actions = _coordinator().reliableController.finalHopSubmitted(
+        source,
+        groupMessageId,
+      );
       await _applyCoordinatorActions(null, actions);
     }
   }
 
   Future<void> _receiveGenericAck(
-      PeerConnection peer, List<int> messageId) async {
+    PeerConnection peer,
+    List<int> messageId,
+  ) async {
     final checkpoint = _checkpointHops.remove(_hopKey(peer, messageId));
     if (checkpoint != null) {
       logger(
-          'checkpoint ACK peer=${peer.peerId} message=${_debugId(messageId)} publication=${checkpoint.publication.publicationId}');
-      group.checkpointOperationFinished(checkpoint.publication, peer.peerId,
-          CheckpointPeerResult.acknowledged,
-          checkpointSequence: checkpoint.operation.sequence);
+        'checkpoint ACK peer=${peer.peerId} message=${_debugId(messageId)} publication=${checkpoint.publication.publicationId}',
+      );
+      group.checkpointOperationFinished(
+        checkpoint.publication,
+        peer.peerId,
+        CheckpointPeerResult.acknowledged,
+        checkpointSequence: checkpoint.operation.sequence,
+      );
       final queue = _checkpointQueues[peer.peerId];
       final next = queue?.completeInFlight();
       if (next != null) {
@@ -4270,37 +5676,53 @@ class _RuntimeGroupRouteTransport
     final hop = _ackHops.remove(_hopKey(peer, messageId));
     if (hop == null || !hop.finalHop) return;
     final actions = _coordinator().reliableController.finalHopAcknowledged(
-        hop.operation.sourcePeerId, hop.operation.groupMessageId);
-    await _applyCoordinatorActions(null, actions,
-        localSourceMessageId: hop.operation.groupMessageId);
+      hop.operation.sourcePeerId,
+      hop.operation.groupMessageId,
+    );
+    await _applyCoordinatorActions(
+      null,
+      actions,
+      localSourceMessageId: hop.operation.groupMessageId,
+    );
   }
 
   Future<void> _sendSignal(
-      PeerId source, FrameType type, List<int> payload) async {
+    PeerId source,
+    FrameType type,
+    List<int> payload,
+  ) async {
     final peer = _readyPeer(source);
     if (peer == null) {
       group.reportError(LpcErrorCode.destinationUnavailable, peerId: source);
       return;
     }
     await peer._core.submitAckRequiredFrame(
-        type: type, payload: payload, nowMs: peer._core.monotonicNowMs);
+      type: type,
+      payload: payload,
+      nowMs: peer._core.monotonicNowMs,
+    );
   }
 
   Future<void> _retransmitHopsFor(PeerConnection peer) async {
     for (final hop
         in _ackHops.values.where((hop) => identical(hop.peer, peer)).toList()) {
-      final retry =
-          peer._core.ackRetention.retransmitOneAfterResume(hop.messageId);
+      final retry = peer._core.ackRetention.retransmitOneAfterResume(
+        hop.messageId,
+      );
       if (retry == AckTimeoutResult.retransmitWholeOperation) {
         for (final chunk in hop.chunks) {
           await peer._core.submitEncrypted(
-              FrameType.groupReliable, chunk.encode(),
-              flags: 1,
-              messageId: hop.messageId,
-              priority: hop.chunks.first.priority);
+            FrameType.groupReliable,
+            chunk.encode(),
+            flags: 1,
+            messageId: hop.messageId,
+            priority: hop.chunks.first.priority,
+          );
         }
-        peer._core.ackRetention.finalFrameSubmitted(hop.messageId,
-            nowMs: peer._core.monotonicNowMs);
+        peer._core.ackRetention.finalFrameSubmitted(
+          hop.messageId,
+          nowMs: peer._core.monotonicNowMs,
+        );
       } else if (retry == AckTimeoutResult.terminalAckTimeout) {
         _ackHops.remove(_hopKey(peer, hop.messageId));
       }
@@ -4308,25 +5730,31 @@ class _RuntimeGroupRouteTransport
   }
 
   Future<void> _retransmitCheckpointsFor(PeerConnection peer) async {
-    for (final hop in _checkpointHops.values
-        .where((hop) => identical(hop.peer, peer))
-        .toList()) {
-      final retry =
-          peer._core.ackRetention.retransmitOneAfterResume(hop.messageId);
+    for (final hop
+        in _checkpointHops.values
+            .where((hop) => identical(hop.peer, peer))
+            .toList()) {
+      final retry = peer._core.ackRetention.retransmitOneAfterResume(
+        hop.messageId,
+      );
       if (retry == AckTimeoutResult.retransmitWholeOperation) {
         try {
           for (final chunk in hop.chunks) {
             final submitted = await peer._core.submitEncrypted(
-                FrameType.coordinatorCheckpoint, chunk.encode(),
-                flags: 1,
-                messageId: hop.messageId,
-                priority: SendPriority.interactive);
+              FrameType.coordinatorCheckpoint,
+              chunk.encode(),
+              flags: 1,
+              messageId: hop.messageId,
+              priority: SendPriority.interactive,
+            );
             if (submitted != TransportWriteState.submittedToPlatform) {
               throw const LpcException(LpcErrorCode.transportClosed);
             }
           }
-          peer._core.ackRetention.finalFrameSubmitted(hop.messageId,
-              nowMs: peer._core.monotonicNowMs);
+          peer._core.ackRetention.finalFrameSubmitted(
+            hop.messageId,
+            nowMs: peer._core.monotonicNowMs,
+          );
         } on Object {
           // Transport loss leaves the retained operation for the next READY
           // generation; the timeout policy remains authoritative.
@@ -4349,8 +5777,9 @@ class _RuntimeGroupRouteTransport
       // ACK-required final hops were replayed above through their retained
       // encoders. Ordered relays have no generic ACK retention, so only they
       // are resubmitted from chunk 0 after a successful destination RESUME.
-      for (final actions
-          in _coordinator().destinationResumeSucceeded(peer.peerId)) {
+      for (final actions in _coordinator().destinationResumeSucceeded(
+        peer.peerId,
+      )) {
         final forward = actions.forward;
         if (forward != null &&
             forward.deliveryMode == DeliveryMode.reliableOrdered) {
@@ -4387,9 +5816,10 @@ class _RuntimeGroupRouteTransport
 
   Future<void> _onPeerDisconnected(PeerConnection peer) async {
     _onPeerLost(peer);
-    for (final hop in _checkpointHops.values
-        .where((hop) => identical(hop.peer, peer))
-        .toList()) {
+    for (final hop
+        in _checkpointHops.values
+            .where((hop) => identical(hop.peer, peer))
+            .toList()) {
       _finishCheckpoint(peer, hop, CheckpointPeerResult.sessionTerminated);
     }
     if (!group.isCoordinator) return;
@@ -4432,9 +5862,10 @@ class _RuntimeGroupRouteTransport
       // migration; only the authenticated-current-coordinator validator is
       // replaced. The new READY route triggers whole-operation rerouting.
       _memberRouter = GroupMemberRouter(
-          validator: _validator(event.current),
-          sends: member.sends,
-          tombstones: member.tombstones);
+        validator: _validator(event.current),
+        sends: member.sends,
+        tombstones: member.tombstones,
+      );
       unawaited(_rerouteMemberOperations());
     }
   }
@@ -4448,11 +5879,13 @@ class _RuntimeGroupRouteTransport
       // current event turn as well as from the normal GroupReady path.
       scheduleMicrotask(_drainSameGroupCatchUpPending);
       logger(
-          'group same-group reattachment catch-up deferred peer=${peer.peerId}');
+        'group same-group reattachment catch-up deferred peer=${peer.peerId}',
+      );
       return;
     }
     logger(
-        'group same-group reattachment catch-up peer=${peer.peerId} generation=${peer._core.generation}');
+      'group same-group reattachment catch-up peer=${peer.peerId} generation=${peer._core.generation}',
+    );
     group.notifyTransportChanged(
       peer.peerId,
       currentTransport: peer.activeTransport,
@@ -4496,23 +5929,29 @@ class _RuntimeGroupRouteTransport
     for (final hop in _checkpointHops.values.toList()) {
       final peer = hop.peer;
       if (peer.state != PeerConnectionState.ready) continue;
-      final result = peer._core.ackRetention
-          .onTimer(hop.messageId, nowMs: peer._core.monotonicNowMs);
+      final result = peer._core.ackRetention.onTimer(
+        hop.messageId,
+        nowMs: peer._core.monotonicNowMs,
+      );
       if (result == AckTimeoutResult.ignored) continue;
       if (result == AckTimeoutResult.retransmitWholeOperation) {
         try {
           for (final chunk in hop.chunks) {
             final submitted = await peer._core.submitEncrypted(
-                FrameType.coordinatorCheckpoint, chunk.encode(),
-                flags: 1,
-                messageId: hop.messageId,
-                priority: SendPriority.interactive);
+              FrameType.coordinatorCheckpoint,
+              chunk.encode(),
+              flags: 1,
+              messageId: hop.messageId,
+              priority: SendPriority.interactive,
+            );
             if (submitted != TransportWriteState.submittedToPlatform) {
               throw const LpcException(LpcErrorCode.transportClosed);
             }
           }
-          peer._core.ackRetention.finalFrameSubmitted(hop.messageId,
-              nowMs: peer._core.monotonicNowMs);
+          peer._core.ackRetention.finalFrameSubmitted(
+            hop.messageId,
+            nowMs: peer._core.monotonicNowMs,
+          );
         } on Object {
           // Transport loss pauses ACK retention; RESUME retries from chunk 0.
         }
@@ -4524,23 +5963,29 @@ class _RuntimeGroupRouteTransport
       final peer = hop.peer;
       if (peer.state != PeerConnectionState.ready) continue;
       final nowMs = peer._core.monotonicNowMs;
-      final result =
-          peer._core.ackRetention.onTimer(hop.messageId, nowMs: nowMs);
+      final result = peer._core.ackRetention.onTimer(
+        hop.messageId,
+        nowMs: nowMs,
+      );
       if (result == AckTimeoutResult.ignored) continue;
       if (result == AckTimeoutResult.retransmitWholeOperation) {
         try {
           for (final chunk in hop.chunks) {
             final submitted = await peer._core.submitEncrypted(
-                FrameType.groupReliable, chunk.encode(),
-                flags: 1,
-                messageId: hop.messageId,
-                priority: hop.chunks.first.priority);
+              FrameType.groupReliable,
+              chunk.encode(),
+              flags: 1,
+              messageId: hop.messageId,
+              priority: hop.chunks.first.priority,
+            );
             if (submitted != TransportWriteState.submittedToPlatform) {
               throw const LpcException(LpcErrorCode.transportClosed);
             }
           }
-          peer._core.ackRetention.finalFrameSubmitted(hop.messageId,
-              nowMs: peer._core.monotonicNowMs);
+          peer._core.ackRetention.finalFrameSubmitted(
+            hop.messageId,
+            nowMs: peer._core.monotonicNowMs,
+          );
         } on Object {
           // Transport-loss handling pauses the retained deadline. The normal
           // reconnect path will replay the whole hop once READY again.
@@ -4550,14 +5995,19 @@ class _RuntimeGroupRouteTransport
       _ackHops.remove(_hopKey(peer, hop.messageId));
       if (hop.finalHop) {
         final actions = _coordinator().reliableController.finalHopFailed(
-            hop.operation.sourcePeerId,
-            hop.operation.groupMessageId,
-            GroupRelayStatus.destinationAckTimeout);
-        await _applyCoordinatorActions(null, actions,
-            localSourceMessageId: hop.operation.groupMessageId);
+          hop.operation.sourcePeerId,
+          hop.operation.groupMessageId,
+          GroupRelayStatus.destinationAckTimeout,
+        );
+        await _applyCoordinatorActions(
+          null,
+          actions,
+          localSourceMessageId: hop.operation.groupMessageId,
+        );
       } else {
-        final timeout =
-            _memberRouter?.sourceHopAckTimedOut(hop.operation.groupMessageId);
+        final timeout = _memberRouter?.sourceHopAckTimedOut(
+          hop.operation.groupMessageId,
+        );
         if (timeout != null) {
           _completeSource(hop.operation.groupMessageId, timeout.state);
         }
@@ -4619,8 +6069,12 @@ class _LiveGroupHop {
 }
 
 class _CheckpointPublicationData {
-  _CheckpointPublicationData(this.handle, this.bytes, this.coordinatorTerm,
-      this.validationRequirement);
+  _CheckpointPublicationData(
+    this.handle,
+    this.bytes,
+    this.coordinatorTerm,
+    this.validationRequirement,
+  );
   final CoordinatorCheckpointHandle handle;
   final Uint8List bytes;
   final int coordinatorTerm;
@@ -4643,16 +6097,17 @@ class _LiveCheckpointHop {
 }
 
 /// Convenience factory matching the specification's conceptual entry point.
-Future<NearbyRuntime> createRuntime(
-        {RuntimeConfig config = const RuntimeConfig(),
-        PeerId? localPeerId,
-        IdentityStore? identityStore,
-        PlatformBleBackend? platformBleBackend}) =>
-    NearbyRuntime.create(
-        config: config,
-        localPeerId: localPeerId,
-        identityStore: identityStore,
-        platformBleBackend: platformBleBackend);
+Future<NearbyRuntime> createRuntime({
+  RuntimeConfig config = const RuntimeConfig(),
+  PeerId? localPeerId,
+  IdentityStore? identityStore,
+  PlatformBleBackend? platformBleBackend,
+}) => NearbyRuntime.create(
+  config: config,
+  localPeerId: localPeerId,
+  identityStore: identityStore,
+  platformBleBackend: platformBleBackend,
+);
 
 String _serviceKey(List<int> bytes) =>
     bytes.map((value) => value.toRadixString(16).padLeft(2, '0')).join();

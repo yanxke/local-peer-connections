@@ -6,9 +6,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:local_peer_connections/local_peer_connections.dart';
 
 class _GattPlatform implements GattFragmentPlatform {
-  _GattPlatform(Iterable<GattFragmentSubmission> responses,
-      {this.safeWriteSize = 10})
-      : _responses = Queue<GattFragmentSubmission>.of(responses);
+  _GattPlatform(
+    Iterable<GattFragmentSubmission> responses, {
+    this.safeWriteSize = 10,
+  }) : _responses = Queue<GattFragmentSubmission>.of(responses);
 
   final Queue<GattFragmentSubmission> _responses;
   final List<Uint8List> submitted = <Uint8List>[];
@@ -20,9 +21,10 @@ class _GattPlatform implements GattFragmentPlatform {
   @override
   Future<void> close() async {}
   @override
-  Future<GattFragmentSubmission> submitGattFragment(Uint8List fragment,
-      {GattFragmentTransmission transmission =
-          GattFragmentTransmission.normal}) async {
+  Future<GattFragmentSubmission> submitGattFragment(
+    Uint8List fragment, {
+    GattFragmentTransmission transmission = GattFragmentTransmission.normal,
+  }) async {
     submitted.add(fragment);
     transmissions.add(transmission);
     return _responses.removeFirst();
@@ -41,9 +43,10 @@ class _BlockingGattPlatform implements GattFragmentPlatform {
   Future<void> close() async {}
 
   @override
-  Future<GattFragmentSubmission> submitGattFragment(Uint8List fragment,
-      {GattFragmentTransmission transmission =
-          GattFragmentTransmission.normal}) async {
+  Future<GattFragmentSubmission> submitGattFragment(
+    Uint8List fragment, {
+    GattFragmentTransmission transmission = GattFragmentTransmission.normal,
+  }) async {
     submitStarted = true;
     return submission.future;
   }
@@ -67,148 +70,187 @@ void main() {
     expect(backend.maxWriteSize, 514);
   });
 
-  test('UT-063 GATT fragmentation-queue insertion is not transport submission',
-      () async {
-    final platform =
-        _GattPlatform([GattFragmentSubmission.temporarilyUnavailable]);
-    final backend =
-        GattBackendConnection(connectionId: 'gatt', platform: platform);
+  test(
+    'UT-063 GATT fragmentation-queue insertion is not transport submission',
+    () async {
+      final platform = _GattPlatform([
+        GattFragmentSubmission.temporarilyUnavailable,
+      ]);
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+      );
 
-    final write = backend.write(Uint8List.fromList([1, 2, 3, 4, 5, 6, 7]));
-    // `write` has accepted and queued the fragmented LPC frame, but no final
-    // platform fragment submission has occurred.
-    expect(write.state, TransportWriteState.pending);
-    await _turn();
-    expect(write.state, TransportWriteState.pending);
-  });
-
-  test('UT-250 GATT selects interactive control before queued bulk data',
-      () async {
-    final platform = _GattPlatform([
-      GattFragmentSubmission.temporarilyUnavailable,
-      GattFragmentSubmission.submitted,
-      GattFragmentSubmission.submitted,
-    ], safeWriteSize: 20000);
-    final backend =
-        GattBackendConnection(connectionId: 'gatt', platform: platform);
-
-    final bulk = backend.writeWithPriority(
-      Uint8List.fromList(List<int>.filled(64, 1)),
-      priority: SendPriority.bulk,
-    );
-    await _turn();
-    final control = backend.writeWithPriority(
-      Uint8List.fromList([2]),
-      priority: SendPriority.interactive,
-    );
-    backend.writable();
-
-    expect(await control.completion, TransportWriteState.submittedToPlatform);
-    expect(await bulk.completion, TransportWriteState.submittedToPlatform);
-    // The first attempt was the already-selected bulk frame and the next
-    // attempt must be the shorter interactive frame, before bulk resumes.
-    expect(
-        platform.submitted[1].length, lessThan(platform.submitted[0].length));
-  });
-
-  test('UT-064/068 GATT write remains pending until final fragment submission',
-      () async {
-    final platform = _GattPlatform([
-      GattFragmentSubmission.temporarilyUnavailable,
-      GattFragmentSubmission.submitted,
-      GattFragmentSubmission.submitted,
-      GattFragmentSubmission.submitted,
-    ]);
-    final backend =
-        GattBackendConnection(connectionId: 'gatt', platform: platform);
-    final write = backend.write(Uint8List.fromList([1, 2, 3, 4, 5, 6, 7]));
-    await _turn();
-    expect(write.state, TransportWriteState.pending);
-    expect(platform.submitted, hasLength(1));
-
-    backend.writable();
-    expect(await write.completion, TransportWriteState.submittedToPlatform);
-    expect(platform.submitted, hasLength(4));
-  });
-
-  test('UT-071 transient GATT backpressure remains pending and stays READY',
-      () async {
-    final platform = _GattPlatform([
-      GattFragmentSubmission.temporarilyUnavailable,
-      ...List.filled(32, GattFragmentSubmission.submitted),
-    ]);
-    final backend =
-        GattBackendConnection(connectionId: 'gatt', platform: platform);
-    final peer = PeerConnectionCore(
-        backend: backend,
-        sessionRootKey: List.filled(32, 1),
-        sessionId: List.filled(16, 2),
-        localPeerId: PeerId(List.filled(16, 3)),
-        remotePeerId: PeerId(List.filled(16, 4)));
-    final write = peer.submitEncrypted(FrameType.data, [1]);
-    await _turn();
-    expect(peer.state, PeerConnectionState.ready);
-
-    backend.writable();
-    expect(await write, TransportWriteState.submittedToPlatform);
-    expect(peer.state, PeerConnectionState.ready);
-  });
-
-  test('UT-072/074 terminal fragment failure fails every pending write',
-      () async {
-    final platform = _GattPlatform([GattFragmentSubmission.terminalFailure]);
-    final backend =
-        GattBackendConnection(connectionId: 'gatt', platform: platform);
-    final first = backend.write(Uint8List.fromList([1]));
-    final second = backend.write(Uint8List.fromList([2]));
-    expect(await first.completion, TransportWriteState.failed);
-    expect(await second.completion, TransportWriteState.failed);
-    expect(backend.state, TransportConnectionState.failed);
-    expect(() => backend.write(Uint8List.fromList([3])),
-        throwsA(isA<LpcException>()));
-  });
-
-  test('in-flight GATT completion after disconnect is ignored safely',
-      () async {
-    final platform = _BlockingGattPlatform();
-    final backend =
-        GattBackendConnection(connectionId: 'gatt', platform: platform);
-    final write = backend.write(Uint8List.fromList([1]));
-    while (!platform.submitStarted) {
+      final write = backend.write(Uint8List.fromList([1, 2, 3, 4, 5, 6, 7]));
+      // `write` has accepted and queued the fragmented LPC frame, but no final
+      // platform fragment submission has occurred.
+      expect(write.state, TransportWriteState.pending);
       await _turn();
-    }
+      expect(write.state, TransportWriteState.pending);
+    },
+  );
 
-    // Simulate the native disconnect callback while submitGattFragment is
-    // still awaiting its platform future.  The late completion must not try
-    // to remove an item that terminalFailure already cleared.
-    backend.terminalFailure();
-    platform.submission.complete(GattFragmentSubmission.submitted);
+  test(
+    'UT-250 GATT selects interactive control before queued bulk data',
+    () async {
+      final platform = _GattPlatform([
+        GattFragmentSubmission.temporarilyUnavailable,
+        GattFragmentSubmission.submitted,
+        GattFragmentSubmission.submitted,
+      ], safeWriteSize: 20000);
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+      );
 
-    expect(await write.completion, TransportWriteState.failed);
-    expect(backend.state, TransportConnectionState.failed);
-  });
+      final bulk = backend.writeWithPriority(
+        Uint8List.fromList(List<int>.filled(64, 1)),
+        priority: SendPriority.bulk,
+      );
+      await _turn();
+      final control = backend.writeWithPriority(
+        Uint8List.fromList([2]),
+        priority: SendPriority.interactive,
+      );
+      backend.writable();
 
-  test('UT-072 terminal GATT failure moves its PeerConnection to reconnecting',
-      () async {
-    final platform = _GattPlatform([GattFragmentSubmission.terminalFailure]);
-    final backend =
-        GattBackendConnection(connectionId: 'gatt', platform: platform);
-    final peer = PeerConnectionCore(
+      expect(await control.completion, TransportWriteState.submittedToPlatform);
+      expect(await bulk.completion, TransportWriteState.submittedToPlatform);
+      // The first attempt was the already-selected bulk frame and the next
+      // attempt must be the shorter interactive frame, before bulk resumes.
+      expect(
+        platform.submitted[1].length,
+        lessThan(platform.submitted[0].length),
+      );
+    },
+  );
+
+  test(
+    'UT-064/068 GATT write remains pending until final fragment submission',
+    () async {
+      final platform = _GattPlatform([
+        GattFragmentSubmission.temporarilyUnavailable,
+        GattFragmentSubmission.submitted,
+        GattFragmentSubmission.submitted,
+        GattFragmentSubmission.submitted,
+      ]);
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+      );
+      final write = backend.write(Uint8List.fromList([1, 2, 3, 4, 5, 6, 7]));
+      await _turn();
+      expect(write.state, TransportWriteState.pending);
+      expect(platform.submitted, hasLength(1));
+
+      backend.writable();
+      expect(await write.completion, TransportWriteState.submittedToPlatform);
+      expect(platform.submitted, hasLength(4));
+    },
+  );
+
+  test(
+    'UT-071 transient GATT backpressure remains pending and stays READY',
+    () async {
+      final platform = _GattPlatform([
+        GattFragmentSubmission.temporarilyUnavailable,
+        ...List.filled(32, GattFragmentSubmission.submitted),
+      ]);
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+      );
+      final peer = PeerConnectionCore(
         backend: backend,
         sessionRootKey: List.filled(32, 1),
         sessionId: List.filled(16, 2),
         localPeerId: PeerId(List.filled(16, 3)),
-        remotePeerId: PeerId(List.filled(16, 4)));
-    expect(await peer.submitEncrypted(FrameType.data, [1]),
-        TransportWriteState.failed);
-    await _turn();
-    expect(peer.state, PeerConnectionState.reconnecting);
-  });
+        remotePeerId: PeerId(List.filled(16, 4)),
+      );
+      final write = peer.submitEncrypted(FrameType.data, [1]);
+      await _turn();
+      expect(peer.state, PeerConnectionState.ready);
+
+      backend.writable();
+      expect(await write, TransportWriteState.submittedToPlatform);
+      expect(peer.state, PeerConnectionState.ready);
+    },
+  );
+
+  test(
+    'UT-072/074 terminal fragment failure fails every pending write',
+    () async {
+      final platform = _GattPlatform([GattFragmentSubmission.terminalFailure]);
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+      );
+      final first = backend.write(Uint8List.fromList([1]));
+      final second = backend.write(Uint8List.fromList([2]));
+      expect(await first.completion, TransportWriteState.failed);
+      expect(await second.completion, TransportWriteState.failed);
+      expect(backend.state, TransportConnectionState.failed);
+      expect(
+        () => backend.write(Uint8List.fromList([3])),
+        throwsA(isA<LpcException>()),
+      );
+    },
+  );
+
+  test(
+    'in-flight GATT completion after disconnect is ignored safely',
+    () async {
+      final platform = _BlockingGattPlatform();
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+      );
+      final write = backend.write(Uint8List.fromList([1]));
+      while (!platform.submitStarted) {
+        await _turn();
+      }
+
+      // Simulate the native disconnect callback while submitGattFragment is
+      // still awaiting its platform future.  The late completion must not try
+      // to remove an item that terminalFailure already cleared.
+      backend.terminalFailure();
+      platform.submission.complete(GattFragmentSubmission.submitted);
+
+      expect(await write.completion, TransportWriteState.failed);
+      expect(backend.state, TransportConnectionState.failed);
+    },
+  );
+
+  test(
+    'UT-072 terminal GATT failure moves its PeerConnection to reconnecting',
+    () async {
+      final platform = _GattPlatform([GattFragmentSubmission.terminalFailure]);
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+      );
+      final peer = PeerConnectionCore(
+        backend: backend,
+        sessionRootKey: List.filled(32, 1),
+        sessionId: List.filled(16, 2),
+        localPeerId: PeerId(List.filled(16, 3)),
+        remotePeerId: PeerId(List.filled(16, 4)),
+      );
+      expect(
+        await peer.submitEncrypted(FrameType.data, [1]),
+        TransportWriteState.failed,
+      );
+      await _turn();
+      expect(peer.state, PeerConnectionState.reconnecting);
+    },
+  );
 
   test('UT-069 failed GATT submission never starts an ACK timer', () async {
     final platform = _GattPlatform([GattFragmentSubmission.terminalFailure]);
-    final backend =
-        GattBackendConnection(connectionId: 'gatt', platform: platform);
+    final backend = GattBackendConnection(
+      connectionId: 'gatt',
+      platform: platform,
+    );
     final peer = PeerConnectionCore(
       backend: backend,
       sessionRootKey: List.filled(32, 1),
@@ -234,89 +276,129 @@ void main() {
   });
 
   test(
-      'UT-065 ACK timer waits for final physical GATT fragment of final DATA frame',
-      () async {
-    // GATT fragments are capped at 512 payload bytes. Submit every fragment
-    // of the first DATA frame, then hold the only/final fragment of the final
-    // DATA frame at the platform boundary.
-    final platform = _GattPlatform(
-      [
+    'UT-065 ACK timer waits for final physical GATT fragment of final DATA frame',
+    () async {
+      // GATT fragments are capped at 512 payload bytes. Submit every fragment
+      // of the first DATA frame, then hold the only/final fragment of the final
+      // DATA frame at the platform boundary.
+      final platform = _GattPlatform([
         ...List.filled(33, GattFragmentSubmission.submitted),
         GattFragmentSubmission.temporarilyUnavailable,
         GattFragmentSubmission.submitted,
-      ],
-      safeWriteSize: 20000,
-    );
-    final backend =
-        GattBackendConnection(connectionId: 'gatt', platform: platform);
-    final peer = PeerConnectionCore(
-      backend: backend,
-      sessionRootKey: List.filled(32, 1),
-      sessionId: List.filled(16, 2),
-      localPeerId: PeerId(List.filled(16, 3)),
-      remotePeerId: PeerId(List.filled(16, 4)),
-    );
-    final id = List.filled(8, 9);
-    final submission = peer.submitReliableData(
-      bytes: List.filled(maxDataChunkBytes + 1, 7),
-      deliveryMode: DeliveryMode.reliableAcked,
-      priority: SendPriority.interactive,
-      messageId: id,
-      nowMs: 0,
-    );
+      ], safeWriteSize: 20000);
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+      );
+      final peer = PeerConnectionCore(
+        backend: backend,
+        sessionRootKey: List.filled(32, 1),
+        sessionId: List.filled(16, 2),
+        localPeerId: PeerId(List.filled(16, 3)),
+        remotePeerId: PeerId(List.filled(16, 4)),
+      );
+      final id = List.filled(8, 9);
+      final submission = peer.submitReliableData(
+        bytes: List.filled(maxDataChunkBytes + 1, 7),
+        deliveryMode: DeliveryMode.reliableAcked,
+        priority: SendPriority.interactive,
+        messageId: id,
+        nowMs: 0,
+      );
 
-    await _turn();
-    expect(platform.submitted, hasLength(34));
-    expect(
-      peer.ackRetention.onTimer(id, nowMs: 3000),
-      AckTimeoutResult.ignored,
-    );
+      await _turn();
+      expect(platform.submitted, hasLength(34));
+      expect(
+        peer.ackRetention.onTimer(id, nowMs: 3000),
+        AckTimeoutResult.ignored,
+      );
 
-    backend.writable();
-    expect(
-      await submission,
-      everyElement(TransportWriteState.submittedToPlatform),
-    );
-    expect(
-      peer.ackRetention.onTimer(id, nowMs: 3000),
-      AckTimeoutResult.retransmitWholeOperation,
-    );
-  });
+      backend.writable();
+      expect(
+        await submission,
+        everyElement(TransportWriteState.submittedToPlatform),
+      );
+      expect(
+        peer.ackRetention.onTimer(id, nowMs: 3000),
+        AckTimeoutResult.retransmitWholeOperation,
+      );
+    },
+  );
 
-  test('bounded GATT queue rejects new work without failing accepted work',
-      () async {
-    final platform =
-        _GattPlatform([GattFragmentSubmission.temporarilyUnavailable]);
-    final backend = GattBackendConnection(
-        connectionId: 'gatt', platform: platform, maxQueuedBytes: 7);
-    expect(() => backend.write(Uint8List.fromList([1])),
-        throwsA(isA<LpcException>()));
-    expect(backend.state, TransportConnectionState.open);
-  });
+  test(
+    'bounded GATT queue rejects new work without failing accepted work',
+    () async {
+      final platform = _GattPlatform([
+        GattFragmentSubmission.temporarilyUnavailable,
+      ]);
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+        maxQueuedBytes: 7,
+      );
+      expect(
+        () => backend.write(Uint8List.fromList([1])),
+        throwsA(isA<LpcException>()),
+      );
+      expect(backend.state, TransportConnectionState.open);
+    },
+  );
 
-  test('configured GATT fragment timeout tolerates delayed ordered progress',
-      () async {
-    var nowMs = 0;
-    final platform = _GattPlatform(const []);
-    final backend = GattBackendConnection(
-      connectionId: 'gatt',
-      platform: platform,
-      fragmentTimeoutMs: 3000,
-      monotonicNowMs: () => nowMs,
-    );
-    final events = <BackendConnectionEvent>[];
-    final subscription = backend.events.listen(events.add);
+  test(
+    'configured GATT fragment timeout tolerates delayed ordered progress',
+    () async {
+      var nowMs = 0;
+      final platform = _GattPlatform(const []);
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+        fragmentTimeoutMs: 3000,
+        monotonicNowMs: () => nowMs,
+      );
+      final events = <BackendConnectionEvent>[];
+      final subscription = backend.events.listen(events.add);
 
-    backend
-        .receiveGattFragment(GattFragment(0, [1, 2, 3], start: true).encode());
-    nowMs = 2500;
-    backend.receiveGattFragment(GattFragment(1, [4], end: true).encode());
-    await _turn();
+      backend.receiveGattFragment(
+        GattFragment(0, [1, 2, 3], start: true).encode(),
+      );
+      nowMs = 2500;
+      backend.receiveGattFragment(GattFragment(1, [4], end: true).encode());
+      await _turn();
 
-    expect(events.whereType<BackendBytesReceived>().single.bytes, [1, 2, 3, 4]);
-    expect(events.whereType<BackendError>(), isEmpty);
-    await subscription.cancel();
-  });
+      expect(events.whereType<BackendBytesReceived>().single.bytes, [
+        1,
+        2,
+        3,
+        4,
+      ]);
+      expect(events.whereType<BackendError>(), isEmpty);
+      await subscription.cancel();
+    },
+  );
+
+  test(
+    'buffers a native frame received before the handshake subscribes',
+    () async {
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: _GattPlatform(const []),
+      );
+
+      // The native binding is installed before HandshakeConnection attaches its
+      // event listener. A responder HELLO can therefore complete reassembly in
+      // this interval; dropping it would make the following AUTH look like it
+      // arrived before HELLO.
+      backend.receiveGattFragment(
+        GattFragment(0, [9, 8, 7], start: true, end: true).encode(),
+      );
+      final events = <BackendConnectionEvent>[];
+      final subscription = backend.events.listen(events.add);
+      await _turn();
+
+      expect(events.whereType<BackendBytesReceived>().single.bytes, [9, 8, 7]);
+      await subscription.cancel();
+    },
+  );
 
   test('RT-011 GATT central realtime uses Write Without Response', () async {
     final platform = _GattPlatform([GattFragmentSubmission.submitted]);
@@ -330,8 +412,9 @@ void main() {
       await backend.writeRealtime(Uint8List.fromList([1])).completion,
       TransportWriteState.submittedToPlatform,
     );
-    expect(platform.transmissions,
-        [GattFragmentTransmission.writeWithoutResponse]);
+    expect(platform.transmissions, [
+      GattFragmentTransmission.writeWithoutResponse,
+    ]);
   });
 
   test('RT-012 GATT peripheral realtime uses Notify', () async {
@@ -349,33 +432,39 @@ void main() {
     expect(platform.transmissions, [GattFragmentTransmission.notify]);
   });
 
-  test('diagnostic logger reports GATT queue and terminal failure state',
-      () async {
-    final platform = _GattPlatform([GattFragmentSubmission.terminalFailure]);
-    final logs = <String>[];
-    final backend = GattBackendConnection(
-      connectionId: 'gatt',
-      platform: platform,
-      logger: logs.add,
-    );
+  test(
+    'diagnostic logger reports GATT queue and terminal failure state',
+    () async {
+      final platform = _GattPlatform([GattFragmentSubmission.terminalFailure]);
+      final logs = <String>[];
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+        logger: logs.add,
+      );
 
-    await backend.write(Uint8List.fromList([1, 2, 3])).completion;
+      await backend.write(Uint8List.fromList([1, 2, 3])).completion;
 
-    expect(logs, contains(contains('queued frame')));
-    expect(logs, contains(contains('terminal failure')));
-    expect(logs.join('\n'), isNot(contains('[1, 2, 3]')));
-  });
+      expect(logs, contains(contains('queued frame')));
+      expect(logs, contains(contains('terminal failure')));
+      expect(logs.join('\n'), isNot(contains('[1, 2, 3]')));
+    },
+  );
 
-  test('a throwing GATT diagnostic logger cannot break queue progress',
-      () async {
-    final platform = _GattPlatform([GattFragmentSubmission.submitted]);
-    final backend = GattBackendConnection(
-      connectionId: 'gatt',
-      platform: platform,
-      logger: (_) => throw StateError('diagnostics unavailable'),
-    );
+  test(
+    'a throwing GATT diagnostic logger cannot break queue progress',
+    () async {
+      final platform = _GattPlatform([GattFragmentSubmission.submitted]);
+      final backend = GattBackendConnection(
+        connectionId: 'gatt',
+        platform: platform,
+        logger: (_) => throw StateError('diagnostics unavailable'),
+      );
 
-    expect(await backend.write(Uint8List.fromList([1])).completion,
-        TransportWriteState.submittedToPlatform);
-  });
+      expect(
+        await backend.write(Uint8List.fromList([1])).completion,
+        TransportWriteState.submittedToPlatform,
+      );
+    },
+  );
 }

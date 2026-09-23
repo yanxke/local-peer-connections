@@ -19,6 +19,14 @@ abstract interface class GattFragmentPlatform {
   Future<void> close();
 }
 
+/// Optional native lifecycle capability used when duplicate authenticated
+/// links share a platform BLE ACL. The portable protocol does not depend on
+/// this capability; platforms that support it park the losing client handle
+/// until the selected link ends.
+abstract interface class DeferredGattClosePlatform {
+  void preserveNativeLinkOnClose();
+}
+
 /// The native binding maps these values to the corresponding GATT API call.
 /// `normal` retains the existing reliable/control submission path.
 enum GattFragmentTransmission { normal, writeWithoutResponse, notify }
@@ -45,9 +53,9 @@ class GattBackendConnection
     this.maxQueuedBytes = 262144,
     this.fragmentTimeoutMs = 5000,
     int Function()? monotonicNowMs,
-  })  : _platform = platform,
-        _fragmenter = GattFragmenter(platform.platformSafeWriteSize),
-        _nowMs = monotonicNowMs ?? _wallClockMs {
+  }) : _platform = platform,
+       _fragmenter = GattFragmenter(platform.platformSafeWriteSize),
+       _nowMs = monotonicNowMs ?? _wallClockMs {
     if (maxQueuedBytes < 1) throw ArgumentError.value(maxQueuedBytes);
     if (fragmentTimeoutMs < 1) throw ArgumentError.value(fragmentTimeoutMs);
   }
@@ -64,13 +72,63 @@ class GattBackendConnection
   final int fragmentTimeoutMs;
   final int Function() _nowMs;
   final Queue<_PendingGattWrite> _writes = Queue<_PendingGattWrite>();
-  final StreamController<BackendConnectionEvent> _events =
-      StreamController<BackendConnectionEvent>.broadcast();
-  late final GattReassembler _reassembler =
-      GattReassembler(timeoutMs: fragmentTimeoutMs);
+  late final StreamController<BackendConnectionEvent> _events =
+      StreamController<BackendConnectionEvent>.broadcast(
+        onListen: _onEventListenerAttached,
+        onCancel: _onEventListenerDetached,
+      );
+  // Native callbacks can arrive immediately after the Runtime installs the
+  // platform binding, but before HandshakeConnection has subscribed to this
+  // backend. A broadcast stream drops those events, which used to drop the
+  // responder's first HELLO and leave the next AUTH looking like "AUTH before
+  // HELLO exchange". Keep only the short handoff window buffered; once the
+  // handshake/core listener is attached, delivery remains a normal broadcast
+  // stream. The bound size prevents a stalled handoff from becoming an
+  // unbounded protocol queue.
+  final Queue<BackendConnectionEvent> _pendingEvents =
+      Queue<BackendConnectionEvent>();
+  static const int _maxPendingEvents = 32;
+  bool _eventListenerAttached = false;
+  late final GattReassembler _reassembler = GattReassembler(
+    timeoutMs: fragmentTimeoutMs,
+  );
   TransportConnectionState _state = TransportConnectionState.open;
   int _queuedBytes = 0;
   bool _draining = false;
+
+  void _onEventListenerAttached() {
+    _eventListenerAttached = true;
+    while (_pendingEvents.isNotEmpty) {
+      _events.add(_pendingEvents.removeFirst());
+    }
+  }
+
+  void _onEventListenerDetached() {
+    _eventListenerAttached = false;
+  }
+
+  void _emitEvent(BackendConnectionEvent event) {
+    if (_eventListenerAttached || _events.hasListener) {
+      _events.add(event);
+      return;
+    }
+    if (_pendingEvents.length >= _maxPendingEvents) {
+      // The only expected buffered events are the first handshake frames
+      // during the binding-to-handshake handoff. If that handoff stalls,
+      // fail it rather than silently growing a transport queue.
+      _pendingEvents.clear();
+      _pendingEvents.add(
+        const BackendError(
+          LpcException(
+            LpcErrorCode.protocolMismatch,
+            'GATT event handoff queue exhausted',
+          ),
+        ),
+      );
+      return;
+    }
+    _pendingEvents.add(event);
+  }
 
   void _log(String message) {
     try {
@@ -96,15 +154,22 @@ class GattBackendConnection
 
   @override
   TransportWrite write(Uint8List completeSerializedLpcFrame) {
-    return writeWithPriority(completeSerializedLpcFrame,
-        priority: SendPriority.interactive);
+    return writeWithPriority(
+      completeSerializedLpcFrame,
+      priority: SendPriority.interactive,
+    );
   }
 
   @override
-  TransportWrite writeWithPriority(Uint8List completeSerializedLpcFrame,
-      {required SendPriority priority}) {
-    return _write(completeSerializedLpcFrame,
-        transmission: GattFragmentTransmission.normal, priority: priority);
+  TransportWrite writeWithPriority(
+    Uint8List completeSerializedLpcFrame, {
+    required SendPriority priority,
+  }) {
+    return _write(
+      completeSerializedLpcFrame,
+      transmission: GattFragmentTransmission.normal,
+      priority: priority,
+    );
   }
 
   /// Maps realtime GATT traffic exactly by BLE direction: central writes RX
@@ -114,8 +179,10 @@ class GattBackendConnection
   TransportWrite writeRealtime(Uint8List completeSerializedLpcFrame) {
     final role = localRole;
     if (role == null) {
-      throw const LpcException(LpcErrorCode.invalidState,
-          'GATT local role is required for realtime');
+      throw const LpcException(
+        LpcErrorCode.invalidState,
+        'GATT local role is required for realtime',
+      );
     }
     return _write(
       completeSerializedLpcFrame,
@@ -136,17 +203,24 @@ class GattBackendConnection
     }
     final fragments = _fragmenter.split(completeSerializedLpcFrame);
     final encoded = fragments.map((fragment) => fragment.encode()).toList();
-    final byteCount =
-        encoded.fold<int>(0, (sum, fragment) => sum + fragment.length);
+    final byteCount = encoded.fold<int>(
+      0,
+      (sum, fragment) => sum + fragment.length,
+    );
     if (_queuedBytes + byteCount > maxQueuedBytes) {
       throw const LpcException(LpcErrorCode.sendQueueFull);
     }
-    final pending =
-        _PendingGattWrite(encoded, byteCount, transmission, priority);
+    final pending = _PendingGattWrite(
+      encoded,
+      byteCount,
+      transmission,
+      priority,
+    );
     _writes.add(pending);
     _queuedBytes += byteCount;
     _log(
-        'queued frame bytes=${completeSerializedLpcFrame.length} fragments=${encoded.length} transmission=${transmission.name} priority=${priority.name} queueBytes=$_queuedBytes queueFrames=${_writes.length}');
+      'queued frame bytes=${completeSerializedLpcFrame.length} fragments=${encoded.length} transmission=${transmission.name} priority=${priority.name} queueBytes=$_queuedBytes queueFrames=${_writes.length}',
+    );
     unawaited(_drain());
     return pending.write;
   }
@@ -164,16 +238,18 @@ class GattBackendConnection
     try {
       final fragment = GattFragment.decode(encoded);
       _log(
-          'received fragment sequence=${fragment.sequence} start=${fragment.start} end=${fragment.end} bytes=${fragment.bytes.length}');
+        'received fragment sequence=${fragment.sequence} start=${fragment.start} end=${fragment.end} bytes=${fragment.bytes.length}',
+      );
       final frame = _reassembler.add(fragment, nowMs: _nowMs());
       if (frame != null) {
         _log('received complete frame bytes=${frame.length}');
-        _events.add(BackendBytesReceived(frame));
+        _emitEvent(BackendBytesReceived(frame));
       }
     } on LpcException catch (error) {
       _log(
-          'receive fragment failed code=${error.code.name} detail=${error.message}');
-      _events.add(BackendError(error));
+        'receive fragment failed code=${error.code.name} detail=${error.message}',
+      );
+      _emitEvent(BackendError(error));
     }
   }
 
@@ -183,19 +259,21 @@ class GattBackendConnection
 
   /// Called only for a terminal physical GATT failure. Every accepted pending
   /// write fails together; no same-link frame is retried.
-  void terminalFailure(
-      [LpcException error = const LpcException(LpcErrorCode.transportClosed)]) {
+  void terminalFailure([
+    LpcException error = const LpcException(LpcErrorCode.transportClosed),
+  ]) {
     if (_state != TransportConnectionState.open) return;
     _log(
-        'terminal failure code=${error.code.name} pendingFrames=${_writes.length} queuedBytes=$_queuedBytes');
+      'terminal failure code=${error.code.name} pendingFrames=${_writes.length} queuedBytes=$_queuedBytes',
+    );
     _state = TransportConnectionState.failed;
     while (_writes.isNotEmpty) {
       final pending = _writes.removeFirst();
       pending.write.fail();
     }
     _queuedBytes = 0;
-    _events.add(BackendError(error));
-    _events.add(const BackendClosed());
+    _emitEvent(BackendError(error));
+    _emitEvent(const BackendClosed());
   }
 
   @override
@@ -206,6 +284,16 @@ class GattBackendConnection
     _state = TransportConnectionState.closed;
   }
 
+  /// Opts this transport into platform-specific duplicate-link parking before
+  /// [close] is called. Runtime ownership has already compared authenticated
+  /// PeerIds when it uses this; endpoint IDs alone are never sufficient.
+  void preserveNativeLinkOnClose() {
+    final platform = _platform;
+    if (platform is DeferredGattClosePlatform) {
+      (platform as DeferredGattClosePlatform).preserveNativeLinkOnClose();
+    }
+  }
+
   Future<void> _drain() async {
     if (_draining || _state != TransportConnectionState.open) return;
     _draining = true;
@@ -213,8 +301,9 @@ class GattBackendConnection
       while (_writes.isNotEmpty && _state == TransportConnectionState.open) {
         final pending = _takeNext();
         final result = await _platform.submitGattFragment(
-            pending.fragments[pending.nextFragment],
-            transmission: pending.transmission);
+          pending.fragments[pending.nextFragment],
+          transmission: pending.transmission,
+        );
         // The platform future can complete after a terminal link failure has
         // cleared the queue (or after a replacement drain has advanced it).
         // Never mutate/remove a stale pending write in that case.  Without
@@ -228,12 +317,14 @@ class GattBackendConnection
         }
         if (result == GattFragmentSubmission.temporarilyUnavailable) {
           _log(
-              'fragment temporarily unavailable index=${pending.nextFragment + 1}/${pending.fragments.length} queueFrames=${_writes.length}');
+            'fragment temporarily unavailable index=${pending.nextFragment + 1}/${pending.fragments.length} queueFrames=${_writes.length}',
+          );
           return;
         }
         if (result == GattFragmentSubmission.terminalFailure) {
           _log(
-              'fragment terminal failure index=${pending.nextFragment + 1}/${pending.fragments.length}');
+            'fragment terminal failure index=${pending.nextFragment + 1}/${pending.fragments.length}',
+          );
           terminalFailure();
           return;
         }
@@ -245,7 +336,8 @@ class GattBackendConnection
           // SENT_TO_TRANSPORT (Section 44.1).
           pending.write.submittedToPlatform();
           _log(
-              'frame submitted transmission=${pending.transmission.name} remainingFrames=${_writes.length} queueBytes=$_queuedBytes');
+            'frame submitted transmission=${pending.transmission.name} remainingFrames=${_writes.length} queueBytes=$_queuedBytes',
+          );
         }
       }
     } catch (error) {
@@ -281,7 +373,11 @@ class GattBackendConnection
 
 class _PendingGattWrite {
   _PendingGattWrite(
-      this.fragments, this.byteCount, this.transmission, this.priority);
+    this.fragments,
+    this.byteCount,
+    this.transmission,
+    this.priority,
+  );
   final List<Uint8List> fragments;
   final int byteCount;
   final GattFragmentTransmission transmission;

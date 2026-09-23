@@ -601,6 +601,17 @@ authenticated and completed through Section 26 before it can replace the
 logical connection, and the existing bounded reconnect deadline and
 duplicate-link arbitration remain in force.
 
+An unassociated discovery endpoint MUST NOT be assigned to a particular
+reconnecting PeerConnection for a RESUME attempt solely because that is the
+only logical peer currently reconnecting.  A Runtime MAY use an endpoint for a
+direct RESUME candidate only when the endpoint retains a recent authenticated
+PeerId association for that same peer.  Otherwise the endpoint MUST follow the
+bounded candidate-probe/HELLO/AUTH path, which establishes the authenticated
+PeerId before any reconnect ownership or duplicate-link decision is made.
+This prevents an advertisement from a different nearby peer from being used as
+a reconnect endpoint; closing that misclassified candidate MUST NOT tear down
+the other peer's physical link.
+
 ## 10.2 Duplicate Physical Connections
 
 Because both peers advertise and scan, opposite-direction GATT connections may be created simultaneously.
@@ -614,6 +625,12 @@ bounded by Section 33.1.2.
 
 After authentication, if two physical links are redundant candidates for the same PeerId pair and the same LPC logical/security session requirement, retain exactly one.
 
+Candidate overlap is determined from the local transport lifecycle: a
+candidate is overlapping an existing owner when its physical connection
+attempt started no later than the instant the existing owner became READY.
+This is runtime-local bookkeeping and is not a wire timestamp or identity
+field.
+
 An existing READY logical PeerConnection is a stale owner when its negotiated
 keepalive dead timeout has elapsed without a valid authenticated encrypted
 frame, even if the platform has not delivered a transport-disconnect callback.
@@ -625,6 +642,14 @@ duplicate rank arbitration solely because it still reports READY. The candidate
 remains subject to the authentication, security-profile, and single-owner
 rules in this section; this rule does not permit two logical sessions to
 coexist.
+
+If the existing READY owner is not stale, a candidate that started after the
+owner became READY MUST be closed as a duplicate and MUST NOT replace the
+owner. This prevents a later advertisement or reconnect probe from replacing
+an active authenticated link merely because its newly generated nonce produces
+a smaller rank. If both candidates overlapped before either owner became
+READY, the rank rule below MUST be used so both runtimes converge on the same
+physical link.
 
 A Runtime MAY intentionally maintain distinct LPC logical/security sessions to the same PeerId only when required by incompatible security profiles as defined in Section 33.5.1. Such distinct logical/security sessions are not duplicates merely because their PeerIds match. Implementations SHOULD multiplex distinct logical sessions over one physical transport where the backend permits it.
 
@@ -640,7 +665,8 @@ connection_rank =
     )
 ```
 
-Retain the link with the lexicographically smaller 32-byte `connection_rank`.
+For overlapping candidates, retain the link with the lexicographically smaller
+32-byte `connection_rank`.
 
 Close the other link with reason `DUPLICATE_CONNECTION`.
 
@@ -8434,6 +8460,9 @@ expected parser result
 - [x] UT-255 A fresh authenticated compatible candidate replaces a READY logical owner whose negotiated keepalive dead timeout has elapsed, even when the platform omitted its disconnect callback; candidates for different PeerIds remain independent.
 - [x] UT-256 A completed known-peer probe is eligible for a fresh probe after its logical owner is terminal, including when disconnect cleanup is duplicated or reordered.
 - [x] UT-257 Reciprocal automatic candidate probes apply bounded endpoint-scoped retry jitter and do not remain phase-locked after transport failure.
+- [x] UT-260 A Runtime with automatic known-peer discovery enabled answers an inbound automatic candidate without requiring a HostSession or GroupSession, classifies the authenticated PeerId through its resolver, and releases an unknown candidate without retaining it.
+- [x] UT-262 A late authenticated duplicate candidate that started after a healthy READY owner is established is closed without replacing that owner; overlapping candidates still use connection-rank arbitration.
+- [x] UT-265 An unassociated discovery endpoint is not assigned to the sole reconnecting peer for RESUME; it is authenticated through the bounded known-peer candidate path first, preserving unrelated physical links.
 
 # 55. Mandatory Physical Integration Tests
 
@@ -8480,6 +8509,15 @@ Every mobile release candidate MUST run:
 - [ ] IT-041 Both Android and iOS send 64-byte RELIABLE_ACKED packets at 5 packets/second for 60 seconds; every packet receives the fixture application ACK and both logical connections remain READY.
 - [x] IT-043 Both Android and iOS send direct RELIABLE_ACKED packets in both directions at 1 Hz for 5 seconds per size, ramping 64, 128, 256, 512, 1024, 2048 bytes and back down to 64 bytes; each direction averages at least 200 B/s, loss remains below 10%, and the post-2048-byte 64-byte phase continues to deliver.
 - [ ] IT-044 The elected coordinator publishes application-validated checkpoints through the upward-and-downward size ramp `64, 128, 256, 512, 1024, 2048, 1024, 512, 256, 128, 64` bytes, at 4 accepted publications/second for 5 seconds per phase; the fixture records durable payload bandwidth, accepted-to-DURABLE latency, and failed-publication rate, requires at least 200 B/s durable payload bandwidth and less than 10% failed publications in every phase, and verifies the final 64-byte phase still completes without a reconnect or queue stall.
+- [ ] IT-045 Every continuous traffic test (including IT-041, IT-043, and IT-044) keeps every logical connection under test READY throughout active traffic and for a further 30 seconds after all producers/publications have stopped and bounded transport/application draining has completed; any `PeerReconnecting`, `PeerDisconnected`, transport-loss, or reconnect oscillation during either interval fails the test.
+
+For IT-041, IT-043, IT-044, and IT-045, “stable” is an observable acceptance
+condition, not merely a final snapshot: the fixture MUST sample all logical
+connections throughout the active interval and the 30-second post-test window,
+and MUST fail if a connection leaves READY even if it returns before the next
+sample. The post-test window begins only after the test's bounded ACK/checkpoint
+drain has completed, so a successful final counter does not hide a transport
+oscillation.
 
 For IT-044, the per-publication completion wait MUST be at least
 `ceil(checkpointSize / 200 B/s) + 2 seconds`. The two seconds are an explicit
