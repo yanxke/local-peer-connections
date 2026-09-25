@@ -8,15 +8,15 @@ import 'hello.dart';
 import 'keepalive.dart';
 
 class HandshakeResult {
-  HandshakeResult(
-      {required this.localHello,
-      required this.remoteHello,
-      required this.localAuthPayload,
-      required this.secrets,
-      required this.negotiatedMinor,
-      required List<int> transcript,
-      this.sas})
-      : transcript = Uint8List.fromList(transcript);
+  HandshakeResult({
+    required this.localHello,
+    required this.remoteHello,
+    required this.localAuthPayload,
+    required this.secrets,
+    required this.negotiatedMinor,
+    required List<int> transcript,
+    this.sas,
+  }) : transcript = Uint8List.fromList(transcript);
   final HelloPayload localHello;
   final HelloPayload remoteHello;
   final Uint8List localAuthPayload;
@@ -31,14 +31,17 @@ class HandshakeResult {
   int get negotiatedPeerCapabilities =>
       localHello.peerCapabilities & remoteHello.peerCapabilities;
   KeepaliveTiming get keepaliveTiming => KeepaliveTiming.negotiate(
-      localHello.keepaliveIntervalMs, remoteHello.keepaliveIntervalMs);
+    localHello.keepaliveIntervalMs,
+    remoteHello.keepaliveIntervalMs,
+  );
 
   ReadyPayload createReady() => ReadyPayload(
-      sessionId: secrets.sessionId,
-      peerCapabilities: negotiatedPeerCapabilities,
-      keepaliveIntervalMs: keepaliveTiming.intervalMs,
-      keepaliveDeadTimeoutMs: keepaliveTiming.deadTimeoutMs,
-      securityLevel: _securityLevel(localHello.trustMode));
+    sessionId: secrets.sessionId,
+    peerCapabilities: negotiatedPeerCapabilities,
+    keepaliveIntervalMs: keepaliveTiming.intervalMs,
+    keepaliveDeadTimeoutMs: keepaliveTiming.deadTimeoutMs,
+    securityLevel: _securityLevel(localHello.trustMode),
+  );
 
   void verifyRemoteReady(ReadyPayload remote) {
     final expected = createReady();
@@ -47,8 +50,10 @@ class HandshakeResult {
         remote.keepaliveIntervalMs != expected.keepaliveIntervalMs ||
         remote.keepaliveDeadTimeoutMs != expected.keepaliveDeadTimeoutMs ||
         remote.securityLevel != _securityLevel(remoteHello.trustMode)) {
-      throw const LpcException(LpcErrorCode.protocolMismatch,
-          'READY does not match handshake agreement');
+      throw const LpcException(
+        LpcErrorCode.protocolMismatch,
+        'READY does not match handshake agreement',
+      );
     }
   }
 }
@@ -73,34 +78,40 @@ bool _same(List<int> a, List<int> b) {
 /// Completes the local validation side after both plaintext HELLO payloads and
 /// the remote AUTH payload have arrived. SAS confirmation remains an explicit
 /// application step; this function never promotes a connection to READY.
-Future<HandshakeResult> verifyHandshake(
-    {required List<int> serviceUuid,
-    required List<int> localHelloBytes,
-    required List<int> remoteHelloBytes,
-    required SimpleKeyPair localIdentityKeyPair,
-    required SimpleKeyPair localEphemeralKeyPair,
-    required List<int> remoteAuthPayload,
-    KnownPeerPolicy? knownPeerPolicy,
-    TofuIdentityStore? tofuStore,
-    List<int>? psk32}) async {
+Future<HandshakeResult> verifyHandshake({
+  required List<int> serviceUuid,
+  required List<int> localHelloBytes,
+  required List<int> remoteHelloBytes,
+  required SimpleKeyPair localIdentityKeyPair,
+  required SimpleKeyPair localEphemeralKeyPair,
+  required List<int> remoteAuthPayload,
+  KnownPeerPolicy? knownPeerPolicy,
+  TofuIdentityStore? tofuStore,
+  List<int>? psk32,
+}) async {
   final local = await HelloPayload.decode(localHelloBytes);
   final remote = await HelloPayload.decode(remoteHelloBytes);
   final minor = negotiateMinor(
-      localMin: local.minMinor,
-      localMax: local.maxMinor,
-      remoteMin: remote.minMinor,
-      remoteMax: remote.maxMinor);
-  if (minor != 0 || local.trustMode != remote.trustMode)
+    localMin: local.minMinor,
+    localMax: local.maxMinor,
+    remoteMin: remote.minMinor,
+    remoteMax: remote.maxMinor,
+  );
+  if (minor == null || minor > 1 || local.trustMode != remote.trustMode)
     throw const LpcException(
-        LpcErrorCode.authenticationFailed, 'incompatible handshake');
+      LpcErrorCode.authenticationFailed,
+      'incompatible handshake',
+    );
   final transcript = await handshakeTranscript(
-      serviceUuid: serviceUuid,
-      localHello: localHelloBytes,
-      remoteHello: remoteHelloBytes);
+    serviceUuid: serviceUuid,
+    localHello: localHelloBytes,
+    remoteHello: remoteHelloBytes,
+  );
   await verifyAuthPayload(
-      payload: remoteAuthPayload,
-      identityPublicKey: remote.identityPublicKey,
-      transcript: transcript);
+    payload: remoteAuthPayload,
+    identityPublicKey: remote.identityPublicKey,
+    transcript: transcript,
+  );
   if (remote.trustMode == HandshakeTrustMode.knownPeer) {
     if (knownPeerPolicy == null)
       throw const LpcException(LpcErrorCode.authenticationFailed);
@@ -112,24 +123,31 @@ Future<HandshakeResult> verifyHandshake(
     tofuStore.verifyOrRemember(remote.peerId, remote.identityPublicKey);
   }
   final shared = await x25519SharedSecret(
-      localKeyPair: localEphemeralKeyPair,
-      remotePublicKey: remote.ephemeralPublicKey);
+    localKeyPair: localEphemeralKeyPair,
+    remotePublicKey: remote.ephemeralPublicKey,
+  );
   final base = await deriveBaseRootKey(
-      sharedSecret: shared,
-      transcript: transcript,
-      trustMode: remote.trustMode,
-      psk32: psk32);
-  final secrets =
-      await deriveHandshakeSecrets(baseRootKey: base, transcript: transcript);
+    sharedSecret: shared,
+    transcript: transcript,
+    trustMode: remote.trustMode,
+    psk32: psk32,
+  );
+  final secrets = await deriveHandshakeSecrets(
+    baseRootKey: base,
+    transcript: transcript,
+  );
   return HandshakeResult(
-      localHello: local,
-      remoteHello: remote,
-      localAuthPayload: await createAuthPayload(
-          identityKeyPair: localIdentityKeyPair, transcript: transcript),
-      secrets: secrets,
-      negotiatedMinor: minor!,
+    localHello: local,
+    remoteHello: remote,
+    localAuthPayload: await createAuthPayload(
+      identityKeyPair: localIdentityKeyPair,
       transcript: transcript,
-      sas: remote.trustMode == HandshakeTrustMode.sas
-          ? await sasFor(baseRootKey: base, transcript: transcript)
-          : null);
+    ),
+    secrets: secrets,
+    negotiatedMinor: minor!,
+    transcript: transcript,
+    sas: remote.trustMode == HandshakeTrustMode.sas
+        ? await sasFor(baseRootKey: base, transcript: transcript)
+        : null,
+  );
 }

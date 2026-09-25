@@ -26,6 +26,7 @@ class PeerConnectionCore {
     required this.localPeerId,
     required this.remotePeerId,
     this.securityLevel,
+    this.negotiatedMinor = 0,
     AckRetentionSet? ackRetention,
     this.messageIdAllocator,
     KeepaliveTiming? keepaliveTiming,
@@ -69,6 +70,7 @@ class PeerConnectionCore {
   Uint8List? _resumeSecret;
   final PeerId localPeerId, remotePeerId;
   final SecurityLevel? securityLevel;
+  final int negotiatedMinor;
   final PeerStateMachine _state = PeerStateMachine();
   final ReceiveSequenceWindow _receiveSequences = ReceiveSequenceWindow();
   final AckRetentionSet ackRetention;
@@ -155,6 +157,7 @@ class PeerConnectionCore {
     final frame = LpcFrame(
       type: type,
       flags: flags,
+      protocolMinor: negotiatedMinor,
       transportGeneration: generation,
       sequenceNumber: sequence,
       messageId: messageId ?? List.filled(8, 0),
@@ -544,6 +547,7 @@ class PeerConnectionCore {
       throw const LpcException(LpcErrorCode.invalidState);
     final frame = LpcFrame.decode(encodedFrame);
     if (!frame.encrypted ||
+        frame.protocolMinor != negotiatedMinor ||
         frame.transportGeneration != generation ||
         !_same(frame.sessionId, _sessionId))
       throw const LpcException(LpcErrorCode.protocolMismatch);

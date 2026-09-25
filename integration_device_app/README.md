@@ -93,7 +93,32 @@ Useful commands include:
 {"action":"provisionKnownPeer","arguments":{"peerId":"<32-hex-peer-id>"}}
 {"action":"removeKnownPeer","arguments":{"peerId":"<32-hex-peer-id>"}}
 {"action":"clearKnownPeers"}
+{"action":"setDirectPeerBlockedForTesting","arguments":{"peerId":"<32-hex-peer-id>","blocked":true}}
 ```
+
+For Section 62's three-device friend-relay test, provision all three pairwise
+friendships, start presence, then set `setDirectPeerBlockedForTesting` for A's
+PeerId on C and C's PeerId on A. This fixture-only policy rejects the A-C
+physical edge after authenticating its PeerId while leaving A-B and B-C
+untouched. A and C should each show `transport=meshRelay` and the same B
+`relayPeerId`, then exchange `reliableAcked` messages in both directions.
+The UI has **Block direct** / **Restore direct** buttons beside each known
+friend and labels every connection **Connected directly** or **Connected via
+<relay PeerId>**. The usual direct-message controls continue to target the
+friend's PeerId on either path; blocking is local to the device whose button
+was pressed, so press it on both A and C to simulate complete A-C loss.
+Clear the block on both endpoints afterward; the direct A-C link should
+replace the relayed connection. The block does not unfriend a peer or change
+LPC wire behavior.
+
+The same 30-second hold and bidirectional 128-byte/4096-byte delivery checks
+can be run from the host with `tool/device_integration_runner.py --device
+A=8765 --device B=18765 --device C=18766 --scenario IT-046 --json-output
+artifacts/mesh-it046.json`; list devices in A, intermediary B, C order. After
+unblocking, the report records whether direct GATT returned within 30 seconds.
+If the physical edge remains unavailable, it requires the relay to stay READY
+and verifies another message in each direction. A slow direct upgrade is
+reported, not mistaken for a lost logical connection.
 
 The fixture persists confirmed friend PeerIds and starts LPC with automatic
 known-peer probing/reconnect enabled. Provision a PeerId from the other

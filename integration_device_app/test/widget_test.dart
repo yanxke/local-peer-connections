@@ -12,6 +12,57 @@ class _SnapshotController extends DeviceTestController {
   Map<String, Object?> snapshot() => value;
 }
 
+class _MeshUiController extends _SnapshotController {
+  _MeshUiController()
+    : super({
+        'runtimeState': 'ready',
+        'localPeerId': '0123456789abcdef0123456789abcdef',
+        'displayName': 'Test Device',
+        'controlApi': 'disabled',
+        'capabilities': 15,
+        'presenceActive': true,
+        'endpoints': const <Object?>[],
+        'knownPeerIds': const ['fedcba9876543210fedcba9876543210'],
+        'directPeerBlocks': const <String>[],
+        'connections': [
+          {
+            'peerId': 'fedcba9876543210fedcba9876543210',
+            'state': 'ready',
+            'security': 'encryptedTofu',
+            'transport': 'meshRelay',
+            'isRelayed': true,
+            'relayPeerId': '11111111111111111111111111111111',
+            'sessionId': 'session',
+          },
+        ],
+        'attempts': const <Object?>[],
+        'telemetry': {
+          'messagesSent': 0,
+          'messagesReceived': 0,
+          'bytesSent': 0,
+          'bytesReceived': 0,
+          'connectionStatePercent': <String, Object?>{},
+        },
+        'trafficTests': {
+          'direct': {'running': false},
+          'group': {'running': false},
+        },
+        'checkpointingEnabled': false,
+        'checkpointTest': {'running': false},
+        'group': null,
+        'eventSequence': 0,
+      });
+
+  @override
+  Future<void> setDirectPeerBlockedForTesting(
+    String peerId, {
+    required bool blocked,
+  }) async {
+    value['directPeerBlocks'] = blocked ? [peerId] : <String>[];
+    notifyListeners();
+  }
+}
+
 class _TrafficUpdateController extends DeviceTestController {
   _TrafficUpdateController()
     : value = {
@@ -79,6 +130,32 @@ class _TrafficUpdateController extends DeviceTestController {
 }
 
 void main() {
+  testWidgets('friend relay status and direct-link fault controls update', (
+    tester,
+  ) async {
+    final controller = _MeshUiController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(DeviceTestApp(controller: controller));
+    await tester.scrollUntilVisible(
+      find.text('Block direct'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(find.text('Block direct'));
+    await tester.pump();
+    expect(
+      find.textContaining('Connected via 11111111111111111111111111111111'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Block direct'));
+    await tester.pump();
+    expect(find.text('Restore direct'), findsOneWidget);
+    expect(
+      find.textContaining('direct link blocked on this device'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('device test app renders raw LPC state', (tester) async {
     final controller = DeviceTestController(displayName: 'Test Device');
     addTearDown(controller.dispose);

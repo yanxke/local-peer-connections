@@ -255,6 +255,7 @@ class CandidateResumeConnection {
     required List<int> previousResumeSecret,
     required this.previousGeneration,
     required this.requester,
+    this.negotiatedMinor = 0,
     List<int> Function()? randomNonce,
     List<int>? initialEncodedFrame,
   }) : _candidateSessionRootKey = Uint8List.fromList(candidateSessionRootKey),
@@ -285,6 +286,7 @@ class CandidateResumeConnection {
       _previousResumeSecret;
   final PeerId localPeerId, remotePeerId;
   final int previousGeneration;
+  final int negotiatedMinor;
   final bool requester;
   final List<int> Function() _randomNonce;
   final Uint8List? _initialEncodedFrame;
@@ -315,6 +317,7 @@ class CandidateResumeConnection {
     required PeerId localPeerId,
     required PeerId remotePeerId,
     required LpcErrorCode error,
+    required int negotiatedMinor,
   }) async {
     final key = await candidateTrafficKey(
       candidateSessionRootKey,
@@ -324,6 +327,7 @@ class CandidateResumeConnection {
     final protected = await const FrameProtector().encrypt(
       LpcFrame(
         type: FrameType.resumeReject,
+        protocolMinor: negotiatedMinor,
         flags: 0,
         transportGeneration: 0,
         sequenceNumber: 1,
@@ -408,7 +412,7 @@ class CandidateResumeConnection {
 
   Future<void> _receiveCandidate(LpcFrame frame) async {
     if (!frame.encrypted ||
-        frame.protocolMinor != protocolMinor ||
+        frame.protocolMinor != negotiatedMinor ||
         frame.flags != 0 ||
         frame.transportGeneration != 0 ||
         !_same(frame.sessionId, _candidateSessionId) ||
@@ -574,7 +578,7 @@ class CandidateResumeConnection {
     final generation = _generation!;
     if (!frame.encrypted ||
         frame.type != FrameType.resumeReady ||
-        frame.protocolMinor != protocolMinor ||
+        frame.protocolMinor != negotiatedMinor ||
         frame.flags != 0 ||
         frame.transportGeneration != generation ||
         frame.sequenceNumber != 1 ||
@@ -616,6 +620,7 @@ class CandidateResumeConnection {
       LpcFrame(
         type: type,
         flags: 0,
+        protocolMinor: negotiatedMinor,
         transportGeneration: generation,
         sequenceNumber: sequence,
         messageId: List.filled(8, 0),

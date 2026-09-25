@@ -248,6 +248,7 @@ class _ConnectionStateBanner extends StatelessWidget {
                     if (value is Map)
                       Text(
                         '${value['peerId']}  •  ${value['state']}'
+                        '${value['state'] == 'ready' ? (value['isRelayed'] == true ? ' (via ${value['relayPeerId']})' : ' (direct)') : ''}'
                         '${value['state'] == 'reconnecting' ? ' (retrying)' : ''}',
                         style: TextStyle(
                           fontFamily: 'monospace',
@@ -791,6 +792,7 @@ class _KnownPeersSection extends StatefulWidget {
 class _KnownPeersSectionState extends State<_KnownPeersSection> {
   final _peerIdController = TextEditingController();
   String? _error;
+  String? _busyPeerId;
 
   @override
   void dispose() {
@@ -802,6 +804,12 @@ class _KnownPeersSectionState extends State<_KnownPeersSection> {
   Widget build(BuildContext context) {
     final values = (widget.snapshot['knownPeerIds'] as List? ?? const [])
         .whereType<String>()
+        .toList(growable: false);
+    final blocked = (widget.snapshot['directPeerBlocks'] as List? ?? const [])
+        .whereType<String>()
+        .toSet();
+    final connections = (widget.snapshot['connections'] as List? ?? const [])
+        .whereType<Map<String, Object?>>()
         .toList(growable: false);
     return _Section(
       title: 'Known friends (${values.length})',
@@ -838,15 +846,66 @@ class _KnownPeersSectionState extends State<_KnownPeersSection> {
                 peerId,
                 style: const TextStyle(fontFamily: 'monospace'),
               ),
-              trailing: IconButton(
-                tooltip: 'Forget friend',
-                icon: const Icon(Icons.person_remove),
-                onPressed: () => widget.controller.forgetKnownPeer(peerId),
+              subtitle: Text(
+                _friendStatus(peerId, connections, blocked.contains(peerId)),
+              ),
+              trailing: Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  OutlinedButton(
+                    onPressed: _busyPeerId == null
+                        ? () => _toggleDirect(peerId, blocked.contains(peerId))
+                        : null,
+                    child: Text(
+                      blocked.contains(peerId)
+                          ? 'Restore direct'
+                          : 'Block direct',
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Forget friend',
+                    icon: const Icon(Icons.person_remove),
+                    onPressed: () => widget.controller.forgetKnownPeer(peerId),
+                  ),
+                ],
               ),
             ),
         ],
       ),
     );
+  }
+
+  String _friendStatus(
+    String peerId,
+    List<Map<String, Object?>> connections,
+    bool directBlocked,
+  ) {
+    final connection = connections
+        .where((value) => value['peerId'] == peerId)
+        .firstOrNull;
+    final path = connection == null
+        ? 'Offline'
+        : connection['state'] != 'ready'
+        ? '${connection['state']}'
+        : connection['isRelayed'] == true
+        ? 'Connected via ${connection['relayPeerId']}'
+        : 'Connected directly';
+    return directBlocked ? '$path · direct link blocked on this device' : path;
+  }
+
+  Future<void> _toggleDirect(String peerId, bool currentlyBlocked) async {
+    setState(() => _busyPeerId = peerId);
+    try {
+      await widget.controller.setDirectPeerBlockedForTesting(
+        peerId,
+        blocked: !currentlyBlocked,
+      );
+      if (mounted) setState(() => _error = null);
+    } on Object catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+    } finally {
+      if (mounted) setState(() => _busyPeerId = null);
+    }
   }
 
   Future<void> _add() async {
@@ -882,6 +941,7 @@ class ConnectionTile extends StatelessWidget {
       'state=${connection['state']} security=${connection['security']}\n'
       'endpoint=${connection['endpointId']} transport=${connection['transport']} '
       'MTU=${connection['negotiatedMtu'] ?? 'unknown'}\n'
+      '${connection['isRelayed'] == true ? 'via friend ${connection['relayPeerId']}\n' : ''}'
       'session=${connection['sessionId']}',
       style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
     ),

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'types.dart';
 
-enum TransportType { gatt, l2cap, lanTcp }
+enum TransportType { gatt, l2cap, lanTcp, meshRelay }
 
 enum TransportWriteState { pending, submittedToPlatform, failed }
 

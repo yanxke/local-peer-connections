@@ -19,6 +19,8 @@ import 'reliability.dart';
 /// the remote READY authenticated; the returned core consequently starts
 /// ordinary encrypted traffic at sequence 2 in both directions.
 class HandshakeConnection {
+  static const Duration _helloAuthTimeout = Duration(seconds: 5);
+
   HandshakeConnection({
     required this.backend,
     required this.exchange,
@@ -76,6 +78,7 @@ class HandshakeConnection {
   bool _remoteReadyFrameReceived = false;
   bool _normalReadySelected = false;
   bool _sasNotified = false;
+  Timer? _helloAuthTimeoutTimer;
   Timer? _sasTimeout;
 
   void _log(String message) {
@@ -94,7 +97,9 @@ class HandshakeConnection {
     final peerId = exchange.remoteHello?.peerId;
     if (peerId == null) {
       throw const LpcException(
-          LpcErrorCode.invalidState, 'remote PeerId is not authenticated');
+        LpcErrorCode.invalidState,
+        'remote PeerId is not authenticated',
+      );
     }
     return peerId;
   }
@@ -103,28 +108,51 @@ class HandshakeConnection {
   Future<void> start() async {
     if (_started) {
       throw const LpcException(
-          LpcErrorCode.invalidState, 'handshake has already started');
+        LpcErrorCode.invalidState,
+        'handshake has already started',
+      );
     }
     _started = true;
     _log(
-        'start candidateOnly=$candidateOnly acceptCandidateResume=$acceptCandidateResume');
-    _subscription = backend.events.listen((event) {
-      if (event is BackendBytesReceived) {
-        _inbound = _inbound.then((_) => _receive(event.bytes));
+      'start candidateOnly=$candidateOnly acceptCandidateResume=$acceptCandidateResume',
+    );
+    // The normative HELLO/AUTH deadline applies to inbound as well as
+    // outbound links. In particular, Android retains a peripheral-side GATT
+    // slot until this handshake closes its backend; without this timer a
+    // silent remote can strand that address in the native server-link map and
+    // every later reconnect is rejected as ENDPOINT_BUSY.
+    _helloAuthTimeoutTimer = Timer(_helloAuthTimeout, () {
+      if (_ready.isCompleted ||
+          exchange.state == HandshakeExchangeState.authenticated) {
+        return;
       }
-      if (event is BackendClosed) {
-        if (!_ready.isCompleted && !_remoteReadyFrameReceived) {
-          _fail(const LpcException(LpcErrorCode.transportClosed));
+      _log('HELLO/AUTH handshake timed out');
+      _fail(
+        const LpcException(
+          LpcErrorCode.connectionTimeout,
+          'HELLO/AUTH handshake timed out',
+        ),
+      );
+    });
+    _subscription = backend.events.listen(
+      (event) {
+        if (event is BackendBytesReceived) {
+          _inbound = _inbound.then((_) => _receive(event.bytes));
         }
-      }
-      if (event is BackendError &&
-          !_ready.isCompleted &&
-          !_remoteReadyFrameReceived) {
-        _fail(event.error);
-      }
-    },
-        onError: (Object error, StackTrace stackTrace) =>
-            _fail(error, stackTrace));
+        if (event is BackendClosed) {
+          if (!_ready.isCompleted && !_remoteReadyFrameReceived) {
+            _fail(const LpcException(LpcErrorCode.transportClosed));
+          }
+        }
+        if (event is BackendError &&
+            !_ready.isCompleted &&
+            !_remoteReadyFrameReceived) {
+          _fail(event.error);
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) =>
+          _fail(error, stackTrace),
+    );
     try {
       // Create the HELLO exactly once so diagnostics describe the frame that
       // is actually submitted.
@@ -166,19 +194,25 @@ class HandshakeConnection {
           // Section 16.2.1 requires this response to be sent before close.
           await _send(response);
           await _closeWithError(
-              const LpcException(LpcErrorCode.protocolMismatch));
+            const LpcException(LpcErrorCode.protocolMismatch),
+          );
           return;
         }
         if (exchange.state == HandshakeExchangeState.helloExchanged) {
           final expected = expectedRemotePeerId;
           if (expected != null && expected != remotePeerId) {
             throw const LpcException(
-                LpcErrorCode.authenticationFailed, 'unexpected HELLO PeerId');
+              LpcErrorCode.authenticationFailed,
+              'unexpected HELLO PeerId',
+            );
           }
           await _send(await exchange.createAuth());
           _log('AUTH submitted remote=${remotePeerId}');
         }
         _notifySasIfRequired();
+        if (exchange.state == HandshakeExchangeState.authenticated) {
+          _cancelHelloAuthTimeout();
+        }
         await _sendReadyIfAuthenticated();
         return;
       }
@@ -214,10 +248,17 @@ class HandshakeConnection {
       return;
     }
     _sasNotified = true;
+    // SAS has its own 30-second user-confirmation deadline; it is not part of
+    // the HELLO/AUTH wire-exchange timeout.
+    _cancelHelloAuthTimeout();
     _log('SAS verification required remote=${remotePeerId}');
     _sasTimeout = Timer(const Duration(seconds: 30), () {
-      _fail(const LpcException(
-          LpcErrorCode.authenticationFailed, 'SAS verification timed out'));
+      _fail(
+        const LpcException(
+          LpcErrorCode.authenticationFailed,
+          'SAS verification timed out',
+        ),
+      );
     });
     onSasRequired?.call(remotePeerId, exchange.result!.sas!);
   }
@@ -238,16 +279,20 @@ class HandshakeConnection {
     final direction = _direction(localPeerId, remote);
     final key = await trafficKey(result.secrets.sessionRootKey, 1, direction);
     final clear = LpcFrame(
-        type: FrameType.ready,
-        flags: 0,
-        transportGeneration: 1,
-        sequenceNumber: 1,
-        messageId: List<int>.filled(8, 0),
-        sessionId: result.secrets.sessionId,
-        nonce: List<int>.filled(12, 0),
-        payload: result.createReady().encode());
-    final protected =
-        await const FrameProtector().encrypt(clear, await key.extractBytes());
+      type: FrameType.ready,
+      flags: 0,
+      protocolMinor: result.negotiatedMinor,
+      transportGeneration: 1,
+      sequenceNumber: 1,
+      messageId: List<int>.filled(8, 0),
+      sessionId: result.secrets.sessionId,
+      nonce: List<int>.filled(12, 0),
+      payload: result.createReady().encode(),
+    );
+    final protected = await const FrameProtector().encrypt(
+      clear,
+      await key.extractBytes(),
+    );
     final status = await _write(protected);
     if (status != TransportWriteState.submittedToPlatform) {
       throw const LpcException(LpcErrorCode.transportClosed);
@@ -274,12 +319,19 @@ class HandshakeConnection {
         frame.messageId.any((byte) => byte != 0) ||
         !_same(frame.sessionId, result.secrets.sessionId)) {
       throw const LpcException(
-          LpcErrorCode.protocolMismatch, 'invalid READY frame');
+        LpcErrorCode.protocolMismatch,
+        'invalid READY frame',
+      );
     }
-    final key = await trafficKey(result.secrets.sessionRootKey, 1,
-        _direction(remotePeerId, localPeerId));
-    final clear =
-        await const FrameProtector().decrypt(frame, await key.extractBytes());
+    final key = await trafficKey(
+      result.secrets.sessionRootKey,
+      1,
+      _direction(remotePeerId, localPeerId),
+    );
+    final clear = await const FrameProtector().decrypt(
+      frame,
+      await key.extractBytes(),
+    );
     result.verifyRemoteReady(ReadyPayload.decode(clear.payload));
     _remoteReadyAuthenticated = true;
     _log('READY authenticated remote=${remotePeerId}');
@@ -293,24 +345,28 @@ class HandshakeConnection {
       return;
     }
     final core = PeerConnectionCore(
-        backend: backend,
-        sessionRootKey: exchange.result!.secrets.sessionRootKey,
-        sessionId: exchange.result!.secrets.sessionId,
-        resumeSecret: exchange.result!.secrets.resumeSecret,
-        localPeerId: localPeerId,
-        remotePeerId: remotePeerId,
-        securityLevel: exchange.result!.createReady().securityLevel,
-        keepaliveTiming: exchange.result!.keepaliveTiming,
-        messageIdAllocator: MessageIdAllocator(
-            List<int>.generate(4, (_) => Random.secure().nextInt(256))),
-        initialNextSequence: 2,
-        initialHighestReceivedSequence: 1);
+      backend: backend,
+      sessionRootKey: exchange.result!.secrets.sessionRootKey,
+      sessionId: exchange.result!.secrets.sessionId,
+      resumeSecret: exchange.result!.secrets.resumeSecret,
+      localPeerId: localPeerId,
+      remotePeerId: remotePeerId,
+      securityLevel: exchange.result!.createReady().securityLevel,
+      negotiatedMinor: exchange.result!.negotiatedMinor,
+      keepaliveTiming: exchange.result!.keepaliveTiming,
+      messageIdAllocator: MessageIdAllocator(
+        List<int>.generate(4, (_) => Random.secure().nextInt(256)),
+      ),
+      initialNextSequence: 2,
+      initialHighestReceivedSequence: 1,
+    );
     // READY has already been authenticated in both directions. Publish that
     // protocol result before awaiting listener teardown: a simultaneous
     // duplicate-link close can otherwise complete _ready with transportClosed
     // during subscription cancellation, even though this handshake reached
     // the authoritative READY state.
     _log('handshake complete remote=${remotePeerId}');
+    _cancelHelloAuthTimeout();
     _ready.complete(core);
     await _subscription?.cancel();
   }
@@ -328,6 +384,7 @@ class HandshakeConnection {
   Future<void> _closeWithError(Object error, [StackTrace? stackTrace]) async {
     final lpcError = error is LpcException ? error : null;
     _log('failed code=${lpcError?.code.name ?? 'unknown'} detail=$error');
+    _cancelHelloAuthTimeout();
     _sasTimeout?.cancel();
     _sasTimeout = null;
     if (!_ready.isCompleted) _ready.completeError(error, stackTrace);
@@ -343,6 +400,11 @@ class HandshakeConnection {
 
   void _fail(Object error, [StackTrace? stackTrace]) {
     unawaited(_closeWithError(error, stackTrace));
+  }
+
+  void _cancelHelloAuthTimeout() {
+    _helloAuthTimeoutTimer?.cancel();
+    _helloAuthTimeoutTimer = null;
   }
 }
 

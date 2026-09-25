@@ -44,6 +44,22 @@ class _Backend implements BackendConnection {
 }
 
 void main() {
+  test('UT-268 minor-0 core accepts encrypted mesh frames', () async {
+    final backend = _Backend();
+    final peer = PeerConnectionCore(
+      backend: backend,
+      sessionRootKey: List.filled(32, 1),
+      sessionId: List.filled(16, 2),
+      localPeerId: PeerId(List.filled(16, 3)),
+      remotePeerId: PeerId(List.filled(16, 4)),
+    );
+    await peer.submitEncrypted(FrameType.meshAdvert, [1]);
+    expect(backend.writes, hasLength(1));
+    expect(LpcFrame.decode(backend.writes.single).type, FrameType.meshAdvert);
+    expect(LpcFrame.decode(backend.writes.single).protocolMinor, 0);
+    await peer.close();
+  });
+
   test(
     'UT-175 RESUME rebinds the logical core to the fresh backend only',
     () async {

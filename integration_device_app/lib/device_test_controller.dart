@@ -729,6 +729,20 @@ class DeviceTestController extends ChangeNotifier {
     _record('peerRetentionReleased', {'peerId': peerId});
   }
 
+  Future<void> setDirectPeerBlockedForTesting(
+    String peerId, {
+    required bool blocked,
+  }) async {
+    final localRuntime = runtime;
+    if (localRuntime == null) throw invalidStateError();
+    await localRuntime.setDirectPeerBlockedForTesting(
+      _parsePeerId(peerId),
+      blocked: blocked,
+    );
+    _record('directPeerBlockChanged', {'peerId': peerId, 'blocked': blocked});
+    notifyListeners();
+  }
+
   /// Adds a PeerId to the persisted friend list. This must be supplied by an
   /// authenticated connection or a trusted out-of-band provisioning channel;
   /// BLE endpoint IDs and unauthenticated names are not identities.
@@ -800,6 +814,12 @@ class DeviceTestController extends ChangeNotifier {
     'connections': [for (final peer in _peers.values) _peerSnapshot(peer)],
     'attempts': [for (final endpointId in _attempts.keys) endpointId],
     'knownPeerIds': _knownPeers?.peerIds.toList() ?? const <String>[],
+    'directPeerBlocks': [
+      for (final peerId in _knownPeers?.peerIds ?? const <String>[])
+        if (runtime?.isDirectPeerBlockedForTesting(_parsePeerId(peerId)) ==
+            true)
+          peerId,
+    ],
     'autoConnectKnownPeers': _knownPeers?.hasPeers ?? false,
     'telemetry': _telemetrySnapshot(),
     'trafficTests': {
@@ -1929,6 +1949,12 @@ class DeviceTestController extends ChangeNotifier {
       case 'releasePeerRetention':
         await releasePeerRetention(_requiredString(arguments, 'peerId'));
         return snapshot();
+      case 'setDirectPeerBlockedForTesting':
+        await setDirectPeerBlockedForTesting(
+          _requiredString(arguments, 'peerId'),
+          blocked: arguments['blocked'] == true,
+        );
+        return snapshot();
       case 'addKnownPeer':
       case 'provisionKnownPeer':
       case 'rememberPeer':
@@ -1973,6 +1999,8 @@ class DeviceTestController extends ChangeNotifier {
     'state': peer.state.name,
     'security': peer.securityLevel.name,
     'transport': peer.activeTransport.name,
+    'isRelayed': peer.isRelayed,
+    'relayPeerId': peer.relayPeerId?.toString(),
     'negotiatedMtu': peer.negotiatedMtu,
     'sessionId': _hex(peer.sessionId),
     'remoteMetadataBytes': peer.remoteApplicationMetadata.length,

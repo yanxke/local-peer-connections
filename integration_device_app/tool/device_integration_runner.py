@@ -122,6 +122,7 @@ class Runner:
         self.apis = [DeviceApi(device, timeout=timeout) for device in devices]
         self.timeout = timeout
         self.soak_seconds = soak_seconds
+        self.metrics: dict[str, Any] = {}
 
     def wait(self, predicate: Callable[[], bool], description: str, timeout: float | None = None) -> None:
         deadline = time.monotonic() + (timeout if timeout is not None else self.timeout)
@@ -1381,6 +1382,114 @@ class Runner:
         )
         print("IT-036: three-peer checkpoint barrier reached durable")
 
+    def scenario_friend_relay(self) -> None:
+        """IT-046: break only A-C's physical edge and verify A-B-C delivery.
+
+        Device order is A, B (intermediary), C. Keep all installed apps and
+        friend identities intact. The fixture block is keyed by authenticated
+        PeerId, never by a possibly stale BLE endpoint identifier.
+        """
+        if len(self.apis) != 3:
+            raise ScenarioBlocked("IT-046 requires exactly three physical devices")
+        a, b, c = self.apis
+        ids = [api.snapshot().get("localPeerId") for api in self.apis]
+        if any(not isinstance(peer_id, str) for peer_id in ids):
+            raise RunnerFailure("IT-046: a device has no local PeerId")
+        a_id, b_id, c_id = ids
+        assert isinstance(a_id, str) and isinstance(b_id, str) and isinstance(c_id, str)
+
+        def connection(api: DeviceApi, peer_id: str) -> dict[str, Any] | None:
+            return next((value for value in api.snapshot().get("connections", [])
+                         if isinstance(value, dict) and value.get("peerId") == peer_id), None)
+
+        def direct(api: DeviceApi, peer_id: str) -> bool:
+            value = connection(api, peer_id)
+            return value is not None and value.get("state") == "ready" and value.get("isRelayed") is False
+
+        def relay(api: DeviceApi, peer_id: str) -> bool:
+            value = connection(api, peer_id)
+            return (value is not None and value.get("state") == "ready"
+                    and value.get("isRelayed") is True and value.get("relayPeerId") == b_id)
+
+        self.wait(lambda: direct(a, b_id) and direct(b, a_id)
+                  and direct(b, c_id) and direct(c, b_id),
+                  "IT-046 stable A-B and B-C physical links", timeout=30)
+        self.drain_events()
+        blocked_at = time.monotonic()
+        try:
+            a.command("setDirectPeerBlockedForTesting", {"peerId": c_id, "blocked": True})
+            c.command("setDirectPeerBlockedForTesting", {"peerId": a_id, "blocked": True})
+            self.wait(lambda: relay(a, c_id) and relay(c, a_id),
+                      "IT-046 mutually READY A-C relay", timeout=30)
+            relay_seconds = time.monotonic() - blocked_at
+            baseline_a = int(a.snapshot()["telemetry"]["messagesReceived"])
+            baseline_c = int(c.snapshot()["telemetry"]["messagesReceived"])
+            baseline_b = int(b.snapshot()["telemetry"]["messagesReceived"])
+            sent_at = time.monotonic()
+            for size in (128, 128, 128, 128, 4096):
+                a.command("sendReliable", {"peerId": c_id, "size": size,
+                                           "deliveryMode": "reliableAcked"})
+                c.command("sendReliable", {"peerId": a_id, "size": size,
+                                           "deliveryMode": "reliableAcked"})
+            self.wait(lambda: int(a.snapshot()["telemetry"]["messagesReceived"]) >= baseline_a + 5
+                      and int(c.snapshot()["telemetry"]["messagesReceived"]) >= baseline_c + 5,
+                      "IT-046 bidirectional relayed delivery", timeout=60)
+            delivery_seconds = time.monotonic() - sent_at
+            if int(b.snapshot()["telemetry"]["messagesReceived"]) != baseline_b:
+                raise RunnerFailure("IT-046: intermediary received endpoint application payload")
+            self.metrics.update({"relayReadySeconds": round(relay_seconds, 3),
+                                 "bidirectionalDeliverySeconds": round(delivery_seconds, 3),
+                                 "messagesEachDirection": 5,
+                                 "bytesEachDirection": 4608})
+            stable_until = time.monotonic() + 30
+            while time.monotonic() < stable_until:
+                if not (relay(a, c_id) and relay(c, a_id) and direct(a, b_id)
+                        and direct(b, a_id) and direct(b, c_id) and direct(c, b_id)):
+                    raise RunnerFailure("IT-046: a healthy direct or relayed link oscillated during 30s hold")
+                time.sleep(1)
+            print("IT-046: mutual relayed readiness and 5 bidirectional messages passed; "
+                  f"relay {relay_seconds:.2f}s, delivery {delivery_seconds:.2f}s, "
+                  "30s links stable")
+        finally:
+            # Never leave a simulated partition active after a failed run.
+            for api, peer_id in ((a, c_id), (c, a_id)):
+                try:
+                    api.command("setDirectPeerBlockedForTesting", {"peerId": peer_id,
+                                                                     "blocked": False})
+                except RunnerFailure:
+                    pass
+        direct_restored_at = time.monotonic()
+        try:
+            self.wait(lambda: direct(a, c_id) and direct(c, a_id),
+                      "IT-046 direct A-C recovery after restoring the edge", timeout=30)
+            self.metrics["directRecoverySeconds"] = round(
+                time.monotonic() - direct_restored_at, 3)
+            self.metrics["directRecoveredWithin30Seconds"] = True
+        except RunnerFailure:
+            # A BLE controller can continue rejecting the direct GATT edge.
+            # That is the condition mesh is meant to survive, not a reason to
+            # disconnect an otherwise healthy A-C logical PeerConnection.
+            if direct(a, c_id) and direct(c, a_id):
+                self.metrics["directRecoverySeconds"] = round(
+                    time.monotonic() - direct_restored_at, 3)
+                self.metrics["directRecoveredWithin30Seconds"] = False
+                return
+            if not (relay(a, c_id) and relay(c, a_id)):
+                raise RunnerFailure(
+                    "IT-046: neither direct nor relayed A-C link stayed READY after unblock")
+            baseline_a = int(a.snapshot()["telemetry"]["messagesReceived"])
+            baseline_c = int(c.snapshot()["telemetry"]["messagesReceived"])
+            a.command("sendReliable", {"peerId": c_id, "size": 128,
+                                       "deliveryMode": "reliableAcked"})
+            c.command("sendReliable", {"peerId": a_id, "size": 128,
+                                       "deliveryMode": "reliableAcked"})
+            self.wait(lambda: int(a.snapshot()["telemetry"]["messagesReceived"]) > baseline_a
+                      and int(c.snapshot()["telemetry"]["messagesReceived"]) > baseline_c,
+                      "IT-046 relay delivery despite unavailable restored direct edge", timeout=30)
+            self.metrics["directRecoveredWithin30Seconds"] = False
+            print("IT-046: direct A-C GATT unavailable after 30s; "
+                  "relay remained READY and delivered both fallback messages")
+
     def run(self, scenario: str) -> None:
         if scenario in {"IT-001", "IT-002"}:
             self.scenario_discovery(scenario)
@@ -1418,6 +1527,8 @@ class Runner:
             self.scenario_checkpoint()
         elif scenario == "IT-036":
             self.scenario_three_peer_checkpoint()
+        elif scenario == "IT-046":
+            self.scenario_friend_relay()
         elif scenario in {"IT-032", "IT-033"}:
             self.scenario_group()
         elif scenario == "IT-034":
@@ -1470,7 +1581,7 @@ def main() -> int:
     parser.add_argument("--device", action="append", type=parse_device, required=True,
                         help="generic device label and forwarded host port, e.g. device-a=18765")
     parser.add_argument("--scenario", action="append", required=True,
-                        help="IT-001 through IT-044; repeat for multiple scenarios")
+                        help="IT-001 through IT-046; repeat for multiple scenarios")
     parser.add_argument("--provision-known-peers", action="store_true",
                         help="exchange current device PeerIds over the trusted control channel before scenarios")
     parser.add_argument("--timeout", type=float, default=60.0)
@@ -1485,6 +1596,7 @@ def main() -> int:
         started = time.monotonic()
         runner: Runner | None = None
         telemetry: dict[str, dict[str, Any]] = {}
+        diagnostics: dict[str, Any] = {}
         try:
             runner = Runner(args.device, args.timeout, args.soak_seconds)
             runner.preflight()
@@ -1506,16 +1618,27 @@ def main() -> int:
                     value = snapshot.get("telemetry", {})
                     if isinstance(value, dict):
                         telemetry[api.device.label] = value
+                    if scenario.upper() == "IT-046":
+                        # Preserve bounded fixture evidence for both a pass
+                        # and an intermittent physical-link failure.
+                        diagnostics[api.device.label] = {
+                            "snapshot": snapshot,
+                            "events": api.events()[-500:],
+                        }
                 except RunnerFailure as error:
                     # Preserve the scenario result if a failing device is no
                     # longer reachable, while making the omission explicit.
                     telemetry[api.device.label] = {"error": str(error)}
+                    if scenario.upper() == "IT-046":
+                        diagnostics[api.device.label] = {"error": str(error)}
         results.append({
             "scenario": scenario.upper(),
             "status": status,
             "detail": detail,
             "durationSeconds": f"{time.monotonic() - started:.3f}",
             "telemetry": telemetry,
+            "metrics": runner.metrics if runner is not None else {},
+            "diagnostics": diagnostics,
         })
         print(f"{scenario.upper()}: {status}{': ' + detail if detail else ''}", file=sys.stderr if status != "passed" else sys.stdout)
         for label, value in telemetry.items():

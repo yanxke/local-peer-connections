@@ -209,10 +209,10 @@ Do not weaken authentication or silently downgrade trust.
 
 ## Scope discipline
 
-`local_peer_connections` protocol 1.1 is not a general:
+`local_peer_connections` minor-0 group routing is not a general:
 
 - consensus protocol;
-- mesh network;
+- unrestricted mesh network (Section 62 defines only a bounded, confirmed-friend two-hop relay within protocol minor 0);
 - distributed transaction system;
 - permanent exactly-once queue;
 - globally ordered event log;

@@ -958,6 +958,68 @@ void main() {
   );
 
   test(
+    'UT-271 stalled physical GATT candidate does not block another peer',
+    () async {
+      const methods = MethodChannel(
+        'runtime-known-probe-physical-timeout-test',
+      );
+      final events = StreamController<PlatformBleEvent>.broadcast();
+      final connectCalls = <String>[];
+      final runtimeEvents = <RuntimeEvent>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(methods, (call) async {
+            if (call.method == 'connectGatt') {
+              connectCalls.add(
+                ((call.arguments as Map<Object?, Object?>)['endpointId'])
+                    as String,
+              );
+            }
+            return null;
+          });
+      final runtime = await createRuntime(
+        config: RuntimeConfig(
+          autoConnectKnownPeers: true,
+          knownPeerResolver: _KnownPeerResolver(),
+          maxConcurrentKnownPeerProbes: 1,
+          maxPendingKnownPeerProbes: 2,
+          reconnectTimeoutMs: 1000,
+        ),
+        identityStore: InMemoryIdentityStore(),
+        platformBleBackend: PlatformBleBackend(
+          methods: methods,
+          eventStream: events.stream,
+        ),
+      );
+      final runtimeSubscription = runtime.events.listen(runtimeEvents.add);
+      final discovery = await runtime.startDiscovery();
+
+      // The first peripheral never reports GATT_CONNECTED. After the bounded
+      // physical-only deadline, LPC closes it and lets the second, unrelated
+      // endpoint begin without waiting for the full reconnect handshake
+      // timeout. The single-procedure Android safeguard still applies while
+      // the first physical attempt is live.
+      events.add(const PlatformEndpointFound('stalled-a', rssi: -40));
+      events.add(const PlatformEndpointFound('available-b', rssi: -41));
+      await _waitUntil(
+        () => connectCalls.length == 2,
+        timeout: const Duration(seconds: 3),
+      );
+      expect(connectCalls, ['stalled-a', 'available-b']);
+      expect(
+        runtimeEvents.whereType<KnownPeerProbeFailed>().any(
+          (event) => event.discoveryEndpointId == 'stalled-a',
+        ),
+        isTrue,
+      );
+
+      await runtimeSubscription.cancel();
+      await discovery.stop();
+      await runtime.close();
+      await events.close();
+    },
+  );
+
+  test(
     'repeated endpoint observations do not start duplicate probes',
     () async {
       const methods = MethodChannel('runtime-known-probe-dedup-test');

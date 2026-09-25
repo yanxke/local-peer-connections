@@ -7,24 +7,24 @@ enum HelloTopology { pointToPoint, explicitStar, autoGroup }
 enum HelloRole { host, client, peer }
 
 class HelloPayload {
-  HelloPayload(
-      {required this.peerId,
-      required List<int> identityPublicKey,
-      required List<int> ephemeralPublicKey,
-      required List<int> connectionNonce,
-      required this.peerCapabilities,
-      this.minMinor = 0,
-      this.maxMinor = 0,
-      this.topology = HelloTopology.autoGroup,
-      this.role = HelloRole.peer,
-      this.trustMode = HandshakeTrustMode.tofu,
-      List<int> applicationMetadata = const [],
-      this.keepaliveIntervalMs = 2000,
-      this.maxApplicationMessageBytes = 1048576})
-      : identityPublicKey = Uint8List.fromList(identityPublicKey),
-        ephemeralPublicKey = Uint8List.fromList(ephemeralPublicKey),
-        connectionNonce = Uint8List.fromList(connectionNonce),
-        applicationMetadata = Uint8List.fromList(applicationMetadata) {
+  HelloPayload({
+    required this.peerId,
+    required List<int> identityPublicKey,
+    required List<int> ephemeralPublicKey,
+    required List<int> connectionNonce,
+    required this.peerCapabilities,
+    this.minMinor = 0,
+    this.maxMinor = 0,
+    this.topology = HelloTopology.autoGroup,
+    this.role = HelloRole.peer,
+    this.trustMode = HandshakeTrustMode.tofu,
+    List<int> applicationMetadata = const [],
+    this.keepaliveIntervalMs = 2000,
+    this.maxApplicationMessageBytes = 1048576,
+  }) : identityPublicKey = Uint8List.fromList(identityPublicKey),
+       ephemeralPublicKey = Uint8List.fromList(ephemeralPublicKey),
+       connectionNonce = Uint8List.fromList(connectionNonce),
+       applicationMetadata = Uint8List.fromList(applicationMetadata) {
     if (this.identityPublicKey.length != 32 ||
         this.ephemeralPublicKey.length != 32 ||
         this.connectionNonce.length != 16 ||
@@ -32,7 +32,8 @@ class HelloPayload {
         minMinor > maxMinor ||
         keepaliveIntervalMs < 1000 ||
         keepaliveIntervalMs > 10000 ||
-        peerCapabilities & ~0x1ff != 0)
+        peerCapabilities & ~0x1ff != 0 ||
+        maxMinor > 1)
       throw const LpcException(LpcErrorCode.protocolMismatch, 'invalid HELLO');
   }
   final PeerId peerId;
@@ -63,8 +64,10 @@ class HelloPayload {
     h.setUint8(105, applicationMetadata.length);
     h.setUint16(106, keepaliveIntervalMs);
     h.setUint32(108, maxApplicationMessageBytes);
-    return Uint8List.fromList(
-        [...h.buffer.asUint8List(), ...applicationMetadata]);
+    return Uint8List.fromList([
+      ...h.buffer.asUint8List(),
+      ...applicationMetadata,
+    ]);
   }
 
   static Future<HelloPayload> decode(List<int> input) async {
@@ -74,25 +77,30 @@ class HelloPayload {
     final h = ByteData.sublistView(raw);
     if (input.length != 112 + h.getUint8(105))
       throw const LpcException(
-          LpcErrorCode.protocolMismatch, 'invalid HELLO length');
+        LpcErrorCode.protocolMismatch,
+        'invalid HELLO length',
+      );
     final value = HelloPayload(
-        peerId: PeerId(raw.sublist(0, 16)),
-        identityPublicKey: raw.sublist(16, 48),
-        ephemeralPublicKey: raw.sublist(48, 80),
-        connectionNonce: raw.sublist(80, 96),
-        peerCapabilities: h.getUint32(96),
-        minMinor: h.getUint8(100),
-        maxMinor: h.getUint8(101),
-        topology: _value(HelloTopology.values, h.getUint8(102)),
-        role: _value(HelloRole.values, h.getUint8(103)),
-        trustMode: _value(HandshakeTrustMode.values, h.getUint8(104)),
-        applicationMetadata: raw.sublist(112),
-        keepaliveIntervalMs: h.getUint16(106),
-        maxApplicationMessageBytes: h.getUint32(108));
+      peerId: PeerId(raw.sublist(0, 16)),
+      identityPublicKey: raw.sublist(16, 48),
+      ephemeralPublicKey: raw.sublist(48, 80),
+      connectionNonce: raw.sublist(80, 96),
+      peerCapabilities: h.getUint32(96),
+      minMinor: h.getUint8(100),
+      maxMinor: h.getUint8(101),
+      topology: _value(HelloTopology.values, h.getUint8(102)),
+      role: _value(HelloRole.values, h.getUint8(103)),
+      trustMode: _value(HandshakeTrustMode.values, h.getUint8(104)),
+      applicationMetadata: raw.sublist(112),
+      keepaliveIntervalMs: h.getUint16(106),
+      maxApplicationMessageBytes: h.getUint32(108),
+    );
     if (await PeerIdentity.peerIdForPublicKey(value.identityPublicKey) !=
         value.peerId)
       throw const LpcException(
-          LpcErrorCode.authenticationFailed, 'HELLO PeerId mismatch');
+        LpcErrorCode.authenticationFailed,
+        'HELLO PeerId mismatch',
+      );
     return value;
   }
 
@@ -103,13 +111,14 @@ class HelloPayload {
   }
 }
 
-int? negotiateMinor(
-    {required int localMin,
-    required int localMax,
-    required int remoteMin,
-    required int remoteMax,
-    int localMajor = 1,
-    int remoteMajor = 1}) {
+int? negotiateMinor({
+  required int localMin,
+  required int localMax,
+  required int remoteMin,
+  required int remoteMax,
+  int localMajor = 1,
+  int remoteMajor = 1,
+}) {
   if (localMajor != 1 || remoteMajor != 1) return null;
   final negotiated = localMax < remoteMax ? localMax : remoteMax;
   return negotiated >= (localMin > remoteMin ? localMin : remoteMin)

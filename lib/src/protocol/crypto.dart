@@ -12,16 +12,22 @@ Uint8List frameNonce(int generation, int sequence) {
 }
 
 Future<SecretKey> trafficKey(
-    List<int> sessionRootKey, int generation, int direction) {
+  List<int> sessionRootKey,
+  int generation,
+  int direction,
+) {
   if (sessionRootKey.length != 32 || direction < 0 || direction > 1)
     throw ArgumentError('invalid traffic key inputs');
   final generationBytes = ByteData(4)..setUint32(0, generation);
-  return Hkdf(hmac: Hmac.sha256(), outputLength: 32)
-      .deriveKey(secretKey: SecretKey(sessionRootKey), nonce: const [], info: [
-    ...ascii.encode('LPC1-traffic'),
-    ...generationBytes.buffer.asUint8List(),
-    direction
-  ]);
+  return Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(
+    secretKey: SecretKey(sessionRootKey),
+    nonce: const [],
+    info: [
+      ...ascii.encode('LPC1-traffic'),
+      ...generationBytes.buffer.asUint8List(),
+      direction,
+    ],
+  );
 }
 
 /// Section 17 frame protection. Associated data is the first 50 header bytes.
@@ -32,43 +38,58 @@ class FrameProtector {
     if (plain.encrypted) throw ArgumentError('frame is already encrypted');
     final nonce = frameNonce(plain.transportGeneration, plain.sequenceNumber);
     final aad = _headerPrefix(plain, nonce, plain.payload.length);
-    final box = await _cipher.encrypt(plain.payload,
-        secretKey: SecretKey(key), nonce: nonce, aad: aad);
+    final box = await _cipher.encrypt(
+      plain.payload,
+      secretKey: SecretKey(key),
+      nonce: nonce,
+      aad: aad,
+    );
     return LpcFrame(
-        type: plain.type,
-        flags: plain.flags,
-        transportGeneration: plain.transportGeneration,
-        sequenceNumber: plain.sequenceNumber,
-        messageId: plain.messageId,
-        sessionId: plain.sessionId,
-        nonce: nonce,
-        payload: box.cipherText,
-        tag: box.mac.bytes);
+      type: plain.type,
+      flags: plain.flags,
+      protocolMinor: plain.protocolMinor,
+      transportGeneration: plain.transportGeneration,
+      sequenceNumber: plain.sequenceNumber,
+      messageId: plain.messageId,
+      sessionId: plain.sessionId,
+      nonce: nonce,
+      payload: box.cipherText,
+      tag: box.mac.bytes,
+    );
   }
 
   Future<LpcFrame> decrypt(LpcFrame frame, List<int> key) async {
     if (!frame.encrypted ||
-        !_equal(frame.nonce,
-            frameNonce(frame.transportGeneration, frame.sequenceNumber)))
+        !_equal(
+          frame.nonce,
+          frameNonce(frame.transportGeneration, frame.sequenceNumber),
+        ))
       throw const LpcException(
-          LpcErrorCode.protocolMismatch, 'invalid encrypted frame nonce');
+        LpcErrorCode.protocolMismatch,
+        'invalid encrypted frame nonce',
+      );
     try {
       final clear = await _cipher.decrypt(
-          SecretBox(frame.payload, nonce: frame.nonce, mac: Mac(frame.tag!)),
-          secretKey: SecretKey(key),
-          aad: _headerPrefix(frame, frame.nonce, frame.payload.length));
+        SecretBox(frame.payload, nonce: frame.nonce, mac: Mac(frame.tag!)),
+        secretKey: SecretKey(key),
+        aad: _headerPrefix(frame, frame.nonce, frame.payload.length),
+      );
       return LpcFrame(
-          type: frame.type,
-          flags: frame.flags,
-          transportGeneration: frame.transportGeneration,
-          sequenceNumber: frame.sequenceNumber,
-          messageId: frame.messageId,
-          sessionId: frame.sessionId,
-          nonce: frame.nonce,
-          payload: clear);
+        type: frame.type,
+        flags: frame.flags,
+        protocolMinor: frame.protocolMinor,
+        transportGeneration: frame.transportGeneration,
+        sequenceNumber: frame.sequenceNumber,
+        messageId: frame.messageId,
+        sessionId: frame.sessionId,
+        nonce: frame.nonce,
+        payload: clear,
+      );
     } on SecretBoxAuthenticationError {
-      throw const LpcException(LpcErrorCode.authenticationFailed,
-          'ChaCha20-Poly1305 authentication failed');
+      throw const LpcException(
+        LpcErrorCode.authenticationFailed,
+        'ChaCha20-Poly1305 authentication failed',
+      );
     }
   }
 
@@ -76,7 +97,9 @@ class FrameProtector {
     final h = ByteData(50);
     h.buffer.asUint8List().setRange(0, 4, ascii.encode('LPC1'));
     h.setUint8(4, protocolMajor);
-    h.setUint8(5, protocolMinor);
+    // Bind the frame's version byte in the AEAD associated data, rather than
+    // relying on a global constant that could diverge from the wire header.
+    h.setUint8(5, f.protocolMinor);
     h.setUint8(6, f.type.value);
     h.setUint8(7, f.flags);
     h.setUint16(8, lpcHeaderLength);

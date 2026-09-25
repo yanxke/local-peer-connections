@@ -45,33 +45,35 @@ enum FrameType {
   groupReliable(0x24),
   groupRealtimeDatagram(0x25),
   groupDeliveryAck(0x26),
-  groupRelayStatus(0x27);
+  groupRelayStatus(0x27),
+  meshAdvert(0x28),
+  meshFrame(0x29);
 
   const FrameType(this.value);
   final int value;
-  static FrameType fromValue(int value) =>
-      FrameType.values.firstWhere((e) => e.value == value,
-          orElse: () =>
-              throw const LpcException(LpcErrorCode.unsupportedFrameType));
+  static FrameType fromValue(int value) => FrameType.values.firstWhere(
+    (e) => e.value == value,
+    orElse: () => throw const LpcException(LpcErrorCode.unsupportedFrameType),
+  );
 }
 
 class LpcFrame {
-  LpcFrame(
-      {required this.type,
-      required this.flags,
-      this.protocolMinor = 0,
-      required this.transportGeneration,
-      required this.sequenceNumber,
-      required List<int> messageId,
-      required List<int> sessionId,
-      required List<int> nonce,
-      required List<int> payload,
-      List<int>? tag})
-      : messageId = Uint8List.fromList(messageId),
-        sessionId = Uint8List.fromList(sessionId),
-        nonce = Uint8List.fromList(nonce),
-        payload = Uint8List.fromList(payload),
-        tag = tag == null ? null : Uint8List.fromList(tag) {
+  LpcFrame({
+    required this.type,
+    required this.flags,
+    this.protocolMinor = 0,
+    required this.transportGeneration,
+    required this.sequenceNumber,
+    required List<int> messageId,
+    required List<int> sessionId,
+    required List<int> nonce,
+    required List<int> payload,
+    List<int>? tag,
+  }) : messageId = Uint8List.fromList(messageId),
+       sessionId = Uint8List.fromList(sessionId),
+       nonce = Uint8List.fromList(nonce),
+       payload = Uint8List.fromList(payload),
+       tag = tag == null ? null : Uint8List.fromList(tag) {
     if (this.messageId.length != 8 ||
         this.sessionId.length != 16 ||
         this.nonce.length != 12)
@@ -80,7 +82,9 @@ class LpcFrame {
       throw const LpcException(LpcErrorCode.messageTooLarge);
     if (flags & ~1 != 0 || this.protocolMinor < 0 || this.protocolMinor > 255)
       throw const LpcException(
-          LpcErrorCode.protocolMismatch, 'reserved flag set');
+        LpcErrorCode.protocolMismatch,
+        'reserved flag set',
+      );
   }
   final FrameType type;
   final int flags, protocolMinor, transportGeneration, sequenceNumber;
@@ -93,7 +97,9 @@ class LpcFrame {
         type != FrameType.auth &&
         type != FrameType.error)
       throw const LpcException(
-          LpcErrorCode.protocolMismatch, 'plaintext frame type');
+        LpcErrorCode.protocolMismatch,
+        'plaintext frame type',
+      );
     final b = BytesBuilder(copy: false);
     final h = ByteData(lpcHeaderLength);
     h.setUint8(0, 0x4c);
@@ -133,17 +139,20 @@ class LpcFrame {
     final encrypted = input.length == lpcHeaderLength + length + 16;
     if (!encrypted && input.length != lpcHeaderLength + length)
       throw const LpcException(
-          LpcErrorCode.protocolMismatch, 'invalid frame length');
+        LpcErrorCode.protocolMismatch,
+        'invalid frame length',
+      );
     return LpcFrame(
-        type: type,
-        flags: h.getUint8(7),
-        protocolMinor: h.getUint8(5),
-        transportGeneration: h.getUint32(14),
-        sequenceNumber: h.getUint64(18),
-        messageId: bytes.sublist(26, 34),
-        sessionId: bytes.sublist(34, 50),
-        nonce: bytes.sublist(50, 62),
-        payload: bytes.sublist(62, 62 + length),
-        tag: encrypted ? bytes.sublist(62 + length) : null);
+      type: type,
+      flags: h.getUint8(7),
+      protocolMinor: h.getUint8(5),
+      transportGeneration: h.getUint32(14),
+      sequenceNumber: h.getUint64(18),
+      messageId: bytes.sublist(26, 34),
+      sessionId: bytes.sublist(34, 50),
+      nonce: bytes.sublist(50, 62),
+      payload: bytes.sublist(62, 62 + length),
+      tag: encrypted ? bytes.sublist(62 + length) : null,
+    );
   }
 }

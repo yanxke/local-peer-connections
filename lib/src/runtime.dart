@@ -8,6 +8,7 @@ import 'backend.dart';
 import 'gatt_backend_connection.dart';
 import 'group.dart';
 import 'identity_store.dart';
+import 'mesh_backend_connection.dart';
 import 'platform_ble_backend.dart';
 import 'protocol/capabilities.dart';
 import 'protocol/connection_rank.dart';
@@ -24,6 +25,7 @@ import 'protocol/handshake_connection.dart';
 import 'protocol/handshake_exchange.dart';
 import 'protocol/handshake_orchestrator.dart';
 import 'protocol/hello.dart';
+import 'protocol/mesh_relay.dart';
 import 'protocol/peer_state.dart';
 import 'protocol/reconnect.dart';
 import 'protocol/resume.dart';
@@ -274,9 +276,11 @@ class PeerConnection {
     List<int> remoteApplicationMetadata = const [],
     void Function(PeerConnection)? onDisconnected,
     void Function(PeerConnection)? onReconnecting,
+    void Function(PeerConnection, LpcFrame)? onMeshFrame,
   }) : remoteApplicationMetadata = List.unmodifiable(remoteApplicationMetadata),
        _onDisconnected = onDisconnected,
-       _onReconnecting = onReconnecting {
+       _onReconnecting = onReconnecting,
+       _onMeshFrame = onMeshFrame {
     _frames = _core.receivedFrames.listen(_onFrame);
     _connectionTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
       unawaited(_core.pollKeepalive());
@@ -307,6 +311,7 @@ class PeerConnection {
   final List<int> remoteApplicationMetadata;
   final void Function(PeerConnection)? _onDisconnected;
   final void Function(PeerConnection)? _onReconnecting;
+  final void Function(PeerConnection, LpcFrame)? _onMeshFrame;
   late final StreamSubscription<LpcFrame> _frames;
   late final Timer _connectionTimer;
   final List<PeerMessageReceived> _messagesBeforeListener =
@@ -330,6 +335,11 @@ class PeerConnection {
   List<int> get sessionId => List.unmodifiable(_core.sessionId);
   PeerConnectionState get state => _core.state;
   TransportType get activeTransport => _core.backend.transportType;
+  bool get isRelayed => activeTransport == TransportType.meshRelay;
+  PeerId? get relayPeerId => _core.backend is MeshBackendConnection
+      ? (_core.backend as MeshBackendConnection).relayPeerId
+      : null;
+  int get negotiatedMinor => _core.negotiatedMinor;
 
   /// Negotiated link MTU for transports that expose one (currently GATT).
   int? get negotiatedMtu => switch (_core.backend) {
@@ -443,6 +453,11 @@ class PeerConnection {
   }
 
   void _onFrame(LpcFrame frame) {
+    if (frame.type == FrameType.meshAdvert ||
+        frame.type == FrameType.meshFrame) {
+      _onMeshFrame?.call(this, frame);
+      return;
+    }
     if (frame.type == FrameType.groupReliable ||
         frame.type == FrameType.groupRealtimeDatagram ||
         frame.type == FrameType.groupDeliveryAck ||
@@ -970,6 +985,7 @@ class NearbyRuntime {
     _platformSubscription = _platformBleBackend?.events.listen(
       _onPlatformEvent,
     );
+    _mesh = _MeshController(this);
   }
   final RuntimeConfig config;
   final PeerId localPeerId;
@@ -1056,6 +1072,11 @@ class NearbyRuntime {
       <String, PeerConnection>{};
   final Set<PeerId> _directRetainedPeers = <PeerId>{};
   final Set<PeerId> _knownRetainedPeers = <PeerId>{};
+  // Fixture-only topology injection: deny a direct physical edge after
+  // authenticating PeerId while leaving friendship intact. This lets a
+  // co-located three-device test prove A-B-C relay without RF shielding.
+  // Never use a BLE address/DiscoveryEndpointId as the identity decision.
+  final Set<PeerId> _blockedDirectPeersForTesting = <PeerId>{};
   final Set<String> _automaticProbeEndpoints = <String>{};
   // Several Android BLE stacks cannot start two LE link procedures from one
   // process concurrently. They report a successful connectGatt invocation
@@ -1067,6 +1088,8 @@ class NearbyRuntime {
   // lifecycle safeguard, not a reconnect direction or PeerId ownership
   // decision.
   String? _automaticGattConnectInFlight;
+  Timer? _automaticGattConnectTimer;
+  final Set<String> _automaticGattConnectTimedOut = <String>{};
   // An endpoint becomes comparable to an existing logical owner only after
   // its HELLO/AUTH exchange has authenticated the remote PeerId. Keep this
   // short-lived classification so duplicate-link arbitration can suppress a
@@ -1129,6 +1152,7 @@ class NearbyRuntime {
   final Map<PeerConnection, Set<String>> _knownPeerProbeEndpointsByPeer =
       <PeerConnection, Set<String>>{};
   final Map<PeerId, bool> _knownPeerCache = <PeerId, bool>{};
+  late final _MeshController _mesh;
   final StreamController<RuntimeEvent> _events =
       StreamController<RuntimeEvent>.broadcast(sync: true);
   late String? _discoveryDisplayName = config.discoveryDisplayName;
@@ -1862,6 +1886,7 @@ class NearbyRuntime {
               PeerCapability.gattBaseline,
               PeerCapability.resume,
             ]).value,
+            maxMinor: 0,
             keepaliveIntervalMs: config.keepaliveIntervalMs,
             applicationMetadata:
                 host?.config.applicationMetadata ?? _applicationMetadata,
@@ -2110,6 +2135,10 @@ class NearbyRuntime {
 
   void _scheduleKnownPeerProbe(String endpointId) {
     _clearStaleKnownPeerProbeState(endpointId);
+    if (_blockedDirectPeersForTesting.contains(
+      _lastAuthenticatedPeerByEndpoint[endpointId],
+    ))
+      return;
     if (_freshHandshakeHandoffEndpoints.contains(endpointId)) return;
     var suppressedOwner = _knownProbeSuppressedByOwner[endpointId];
     if (suppressedOwner != null) {
@@ -2353,6 +2382,21 @@ class NearbyRuntime {
   void _startKnownPeerProbe(String endpointId) {
     _automaticGattConnectInFlight = endpointId;
     _automaticProbeEndpoints.add(endpointId);
+    // Android stacks may leave connectGatt pending without ever delivering
+    // PlatformGattConnected for a stale/unreachable endpoint. Keep the longer
+    // reconnect window for service discovery and HELLO/AUTH after the physical
+    // callback, but do not let a missing callback serialize unrelated friends
+    // for that entire window.
+    _automaticGattConnectTimer?.cancel();
+    _automaticGattConnectTimer = Timer(
+      Duration(
+        milliseconds: min(
+          config.reconnectTimeoutMs,
+          _connectionRequestTimeoutMs,
+        ),
+      ),
+      () => _expireAutomaticGattConnect(endpointId),
+    );
     _log(
       'known probe started endpoint=$endpointId timeoutMs=${config.reconnectTimeoutMs}',
     );
@@ -2418,14 +2462,57 @@ class NearbyRuntime {
     }
   }
 
-  /// Releases the serialized automatic-probe slot after the complete
-  /// application attempt has ended.  Do not release it from
-  /// PlatformGattConnected: that event precedes the protocol handshake and
-  /// is not proof that a usable PeerConnection exists.
+  /// Releases only the serialized native GATT link-procedure slot. Protocol
+  /// handshakes for different candidates remain independent; the
+  /// PlatformGattConnected callback is the physical completion boundary.
   void _releaseAutomaticGattConnectSlot(String endpointId) {
+    if (_automaticGattConnectTimedOut.contains(endpointId)) return;
     if (_automaticGattConnectInFlight != endpointId) return;
+    _automaticGattConnectTimer?.cancel();
+    _automaticGattConnectTimer = null;
     _automaticGattConnectInFlight = null;
-    _startNextKnownPeerProbe();
+    if (_state == RuntimeState.ready) _startNextKnownPeerProbe();
+  }
+
+  void _expireAutomaticGattConnect(String endpointId) {
+    if (_automaticGattConnectInFlight != endpointId ||
+        _gattConnectedEvents.containsKey(endpointId)) {
+      return;
+    }
+    _automaticGattConnectTimedOut.add(endpointId);
+    _deferKnownPeerProbe(endpointId);
+    _log(
+      'known probe physical GATT connect timed out endpoint=$endpointId; closing before next candidate',
+    );
+    final attempt = _attempts[endpointId];
+    _connectionAttemptTimers.remove(endpointId)?.cancel();
+    _knownPeerProbeTimers.remove(endpointId)?.cancel();
+    _attempts.remove(endpointId);
+    _gattCandidateStartedAtMs.remove(endpointId);
+    _automaticProbeEndpoints.remove(endpointId);
+    attempt?._failed(
+      const LpcException(
+        LpcErrorCode.connectionTimeout,
+        'physical GATT connection did not complete',
+      ),
+    );
+    unawaited(() async {
+      try {
+        await _platformBleBackend
+            ?.closeGattConnection(endpointId)
+            .timeout(const Duration(seconds: 1));
+      } on Object catch (error) {
+        // Some mobile BLE stacks can hang while disposing a connect request
+        // that never reached GATT_CONNECTED. Bound cleanup so one stale
+        // native handle cannot starve later unrelated friend candidates.
+        _log(
+          'known probe physical timeout cleanup pending endpoint=$endpointId error=$error',
+        );
+      } finally {
+        _automaticGattConnectTimedOut.remove(endpointId);
+        _releaseAutomaticGattConnectSlot(endpointId);
+      }
+    }());
   }
 
   bool _shouldBackoffKnownPeerProbe(LpcException error) {
@@ -2688,8 +2775,69 @@ class NearbyRuntime {
     _directRetainedPeers.remove(peerId);
     _knownRetainedPeers.remove(peerId);
     _knownPeerCache.remove(peerId);
+    _mesh.forget(peerId);
     final peer = _peers.where((value) => value.peerId == peerId).firstOrNull;
     if (peer != null && !_hasOtherOwner(peer)) await peer.disconnect();
+  }
+
+  /// Local physical-edge fault injection for fixture/conformance testing.
+  /// It does not change trust, friendship, GroupSession membership, or any
+  /// wire frame. Production applications should not depend on this hook.
+  bool isDirectPeerBlockedForTesting(PeerId peerId) =>
+      _blockedDirectPeersForTesting.contains(peerId);
+
+  /// Blocks or restores only the direct edge to [peerId]. A confirmed friend
+  /// may remain reachable through a different authenticated friend.
+  Future<void> setDirectPeerBlockedForTesting(
+    PeerId peerId, {
+    required bool blocked,
+  }) async {
+    if (_state != RuntimeState.ready) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    if (blocked) {
+      if (_blockedDirectPeersForTesting.length >= 64 &&
+          !_blockedDirectPeersForTesting.contains(peerId)) {
+        throw const LpcException(LpcErrorCode.resourceExhausted);
+      }
+      _blockedDirectPeersForTesting.add(peerId);
+      for (final peer
+          in _peers
+              .where(
+                (candidate) =>
+                    candidate.peerId == peerId && !candidate.isRelayed,
+              )
+              .toList()) {
+        await peer.disconnect();
+      }
+    } else {
+      _blockedDirectPeersForTesting.remove(peerId);
+      _lastAuthenticatedPeerByEndpoint.removeWhere(
+        (_, value) => value == peerId,
+      );
+    }
+    _mesh.poke();
+  }
+
+  /// Simulates a terminal write/transport loss on a virtual friend link while
+  /// preserving its direct relay. This fixture-only fault hook exercises the
+  /// route controller's fresh-handshake recovery path without disabling the
+  /// physical A-B or B-C links.
+  Future<void> simulateRelayedTransportFailureForTesting(PeerId peerId) async {
+    if (_state != RuntimeState.ready) {
+      throw const LpcException(LpcErrorCode.invalidState);
+    }
+    final peer = _peers
+        .where((candidate) => candidate.peerId == peerId && candidate.isRelayed)
+        .firstOrNull;
+    if (peer == null) {
+      throw const LpcException(
+        LpcErrorCode.invalidState,
+        'no relayed peer exists for the requested test failure',
+      );
+    }
+    _log('mesh test injecting virtual transport loss target=$peerId');
+    peer._platformTransportLost();
   }
 
   bool _hasOtherOwner(PeerConnection peer) =>
@@ -2763,7 +2911,17 @@ class NearbyRuntime {
         localPeerId: localPeerId,
         remotePeerId: handshake.remotePeerId,
         error: LpcErrorCode.resumeRejected,
+        negotiatedMinor: candidate.negotiatedMinor,
       );
+      // `submittedToPlatform` means the final GATT write was accepted by the
+      // native stack, not that the remote Dart isolate has processed the
+      // encrypted rejection yet. Closing the inbound binding in the same
+      // callback can discard that already-received frame on mobile backends;
+      // the requester then sees only transportClosed and retries RESUME until
+      // its watchdog expires instead of promptly falling back to fresh HELLO.
+      // Give the bounded candidate exchange a short drain window before the
+      // normal failure cleanup closes this physical generation.
+      await Future<void>.delayed(const Duration(milliseconds: 100));
       throw const LpcException(
         LpcErrorCode.resumeRejected,
         'no unique reconnecting logical peer',
@@ -2808,6 +2966,7 @@ class NearbyRuntime {
       previousResumeSecret: peer._core.resumeSecret,
       previousGeneration: peer._core.generation,
       requester: false,
+      negotiatedMinor: peer._core.negotiatedMinor,
       initialEncodedFrame: await handshake.candidateInitialFrame,
     );
     await bounded(resume.start(), 'proof start');
@@ -3278,6 +3437,7 @@ class NearbyRuntime {
         previousResumeSecret: peer._core.resumeSecret,
         previousGeneration: peer._core.generation,
         requester: true,
+        negotiatedMinor: peer._core.negotiatedMinor,
       );
       await bounded(resume.start(), 'proof start');
       final resumed = await bounded(resume.completed, 'proof');
@@ -3828,6 +3988,11 @@ class NearbyRuntime {
   Future<void> close() async {
     if (_state == RuntimeState.closed || _state == RuntimeState.closing) return;
     _state = RuntimeState.closing;
+    await _mesh.close();
+    _automaticGattConnectTimer?.cancel();
+    _automaticGattConnectTimer = null;
+    _automaticGattConnectInFlight = null;
+    _automaticGattConnectTimedOut.clear();
     for (final timer in _knownPeerProbeTimers.values) {
       timer.cancel();
     }
@@ -3924,6 +4089,17 @@ class NearbyRuntime {
     List<int>? connectionRank,
     List<int> remoteApplicationMetadata = const [],
   }) async {
+    if (gattEndpointId != null &&
+        _blockedDirectPeersForTesting.contains(core.remotePeerId)) {
+      // Enforce the fixture topology only after HELLO/AUTH identified the
+      // actual PeerId. Rejecting by ephemeral BLE endpoint here would allow
+      // a rotating address or another nearby friend to bypass the test.
+      await core.close();
+      throw const LpcException(
+        LpcErrorCode.transportClosed,
+        'direct physical edge disabled by local test fixture',
+      );
+    }
     if (gattEndpointId != null) {
       _lastAuthenticatedPeerByEndpoint.remove(gattEndpointId);
       _lastAuthenticatedPeerByEndpoint[gattEndpointId] = core.remotePeerId;
@@ -3961,6 +4137,19 @@ class NearbyRuntime {
       // replacement path below. It deliberately does not close the new,
       // authenticated candidate or affect any other PeerId.
       old._platformTransportLost();
+    }
+    if (gattEndpointId != null) {
+      // A newly authenticated physical path supersedes an end-to-end relay
+      // for the same PeerId. Close only the virtual backend, never the relay's
+      // own direct BLE link. This avoids presenting duplicate online friends.
+      for (final virtual
+          in _peers
+              .where(
+                (peer) => peer.peerId == core.remotePeerId && peer.isRelayed,
+              )
+              .toList()) {
+        await virtual.disconnect();
+      }
     }
     // A process restart cannot present the previous RESUME secret, so the
     // restarted peer may arrive as a fresh authenticated READY connection
@@ -4042,6 +4231,10 @@ class NearbyRuntime {
     String? displacedDuplicateEndpoint;
     if (duplicate.isNotEmpty) {
       final existing = duplicate.first;
+      if (core.backend is MeshBackendConnection && !existing.isRelayed) {
+        await core.close();
+        return existing;
+      }
       _log(
         'duplicate READY peer=${core.remotePeerId} existingState=${existing.state.name} existingSecurity=${existing.securityLevel.name} candidateSecurity=${securityLevel.name}',
       );
@@ -4143,6 +4336,7 @@ class NearbyRuntime {
           'peer disconnected peer=${core.remotePeerId} endpoint=${gattEndpointId ?? 'none'}',
         );
         _peers.remove(peer);
+        _mesh.poke();
         _connectionRanks.remove(peer);
         _reconnectWaitingForDiscovery.remove(peer);
         _reconnectWaitingSchedules.remove(peer);
@@ -4202,8 +4396,10 @@ class NearbyRuntime {
               _beginGattReconnect(peer);
               _scheduleGattReconnectExpiry(peer);
             },
+      onMeshFrame: (owner, frame) => _mesh.receive(owner, frame),
     );
     _peers.add(peer);
+    _mesh.observe(peer);
     if (physicalEndpointId != null) {
       _authenticatedPeerByPhysicalEndpoint[physicalEndpointId] = peer;
     }
@@ -4259,6 +4455,642 @@ class NearbyRuntime {
   }
 }
 
+class _MeshAdvertRecord {
+  _MeshAdvertRecord(this.targets, this.receivedAtMs);
+  final Set<PeerId> targets;
+  final int receivedAtMs;
+}
+
+class _MeshIncompleteFrame {
+  _MeshIncompleteFrame(this.count, this.updatedAtMs);
+  final int count;
+  int updatedAtMs;
+  final List<int> bytes = [];
+  int nextIndex = 0;
+}
+
+/// Friend-relay transport overlay. Only authenticated, confirmed-friend direct
+/// links participate. It does not replace GroupSession routing: GroupSession
+/// still selects its coordinator and sends normal protocol frames over the
+/// logical PeerConnection, which may be this end-to-end encrypted virtual A-C
+/// session. B owns only a bounded, opaque two-hop frame-forwarding operation.
+class _MeshController {
+  _MeshController(this.runtime) {
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => poke());
+  }
+
+  final NearbyRuntime runtime;
+  late final Timer _timer;
+  final Map<PeerId, _MeshAdvertRecord> _adverts = {};
+  final Map<PeerId, MeshBackendConnection> _backends = {};
+  final Map<PeerId, PeerConnection> _virtualPeers = {};
+  final Map<PeerId, int> _reverseRouteUntil = {};
+  final Map<PeerId, int> _confirmedUntil = {};
+  final Map<String, _MeshIncompleteFrame> _incomplete = {};
+  final Map<PeerId, Map<int, int>> _completed = {};
+  final Map<PeerConnection, Future<void>> _inbound = {};
+  final Map<PeerConnection, int> _inboundDepth = {};
+  int _totalInboundDepth = 0;
+  final Map<PeerConnection, StreamSubscription<PeerConnectionEvent>>
+  _peerEvents = {};
+  int _advertGeneration = 0;
+  int _lastAdvertAtMs = 0;
+  String _lastAdvertFingerprint = '';
+  bool _busy = false;
+  bool _closed = false;
+
+  bool get _enabled =>
+      !_closed &&
+      runtime.config.autoConnectKnownPeers &&
+      runtime.config.knownPeerResolver != null &&
+      runtime._identity != null &&
+      runtime._state == RuntimeState.ready;
+
+  void poke() {
+    if (!_enabled || _busy) return;
+    unawaited(_tick());
+  }
+
+  void observe(PeerConnection peer) {
+    _peerEvents[peer]?.cancel();
+    _peerEvents[peer] = peer.events.listen((event) {
+      if (event is PeerReconnecting || event is PeerReconnected) {
+        // A relayed peer's lower transport can fail while its direct relay is
+        // still READY. Wake the mesh controller so it can retire the failed
+        // virtual generation and authenticate a replacement on the same path.
+        _lastAdvertFingerprint = '';
+        poke();
+      }
+      _lastAdvertFingerprint = '';
+      if (event is PeerDisconnected) {
+        unawaited(_peerEvents.remove(peer)?.cancel());
+        _inbound.remove(peer);
+        _inboundDepth.remove(peer);
+      }
+      poke();
+    });
+    _lastAdvertFingerprint = '';
+    poke();
+  }
+
+  void forget(PeerId peerId) {
+    _confirmedUntil.remove(peerId);
+    _adverts.remove(peerId);
+    _reverseRouteUntil.remove(peerId);
+    final backend = _backends.remove(peerId);
+    if (backend != null) unawaited(backend.close());
+    final virtual = _virtualPeers.remove(peerId);
+    if (virtual != null) unawaited(virtual.disconnect());
+    poke();
+  }
+
+  Future<bool> _friend(PeerId peerId) async {
+    if (!_enabled || peerId == runtime.localPeerId) return false;
+    // The runtime's authenticated known-peer classification has already
+    // consulted the application resolver. Do not run a second mesh-specific
+    // lookup for every advertised neighbor: it changes resolver semantics,
+    // can race a mutable relationship store, and adds latency to busy BLE
+    // neighborhoods. releasePeerRetention invalidates this ownership.
+    if (runtime._knownRetainedPeers.contains(peerId)) return true;
+    final now = runtime._monotonicMs;
+    if ((_confirmedUntil[peerId] ?? 0) > now) return true;
+    try {
+      final confirmed = await runtime.config.knownPeerResolver!
+          .isKnownPeer(peerId)
+          .timeout(
+            Duration(milliseconds: runtime.config.knownPeerLookupTimeoutMs),
+          );
+      if (confirmed) {
+        if (_confirmedUntil.length >= 256) {
+          _confirmedUntil.remove(_confirmedUntil.keys.first);
+        }
+        _confirmedUntil[peerId] = now + 5000;
+      } else {
+        _confirmedUntil.remove(peerId);
+      }
+      return confirmed;
+    } on Object {
+      return false;
+    }
+  }
+
+  PeerConnection? _direct(PeerId peerId) => runtime._peers
+      .where(
+        (peer) =>
+            peer.peerId == peerId &&
+            peer.state == PeerConnectionState.ready &&
+            peer.activeTransport != TransportType.meshRelay,
+      )
+      .firstOrNull;
+
+  bool _classifiedOrExplicit(PeerConnection peer) =>
+      runtime._knownRetainedPeers.contains(peer.peerId) ||
+      runtime._directRetainedPeers.contains(peer.peerId) ||
+      runtime._hosts.any((host) => host.peers().contains(peer));
+
+  Future<void> _tick() async {
+    if (!_enabled || _busy) return;
+    _busy = true;
+    try {
+      final observedDirectCount = runtime._peers
+          .where(
+            (peer) =>
+                peer.state == PeerConnectionState.ready &&
+                peer.activeTransport != TransportType.meshRelay &&
+                _classifiedOrExplicit(peer),
+          )
+          .length;
+      if (observedDirectCount < 2 &&
+          _adverts.isEmpty &&
+          _backends.isEmpty &&
+          _lastAdvertFingerprint.isEmpty) {
+        // A two-device neighborhood cannot contain a relay. Do not poll the
+        // application-owned friendship resolver or send mesh hints in that
+        // common case; it also keeps relationship changes driven by the
+        // existing known-peer probe contract rather than a second poller.
+        return;
+      }
+      final now = runtime._monotonicMs;
+      _adverts.removeWhere(
+        (relay, record) =>
+            _direct(relay) == null || now - record.receivedAtMs > 12000,
+      );
+      _incomplete.removeWhere(
+        (_, operation) => now - operation.updatedAtMs > 30000,
+      );
+      for (final recent in _completed.values) {
+        recent.removeWhere((_, receivedAt) => now - receivedAt > 30000);
+      }
+      _completed.removeWhere((_, recent) => recent.isEmpty);
+      final direct = runtime._peers
+          .where(
+            (peer) =>
+                peer.state == PeerConnectionState.ready &&
+                peer.activeTransport != TransportType.meshRelay &&
+                _classifiedOrExplicit(peer),
+          )
+          .toList();
+      final friends = <PeerConnection>[];
+      for (final peer in direct) {
+        if (await _friend(peer.peerId)) friends.add(peer);
+      }
+      final fingerprint =
+          (friends.map((peer) => peer.peerId.toString()).toList()..sort()).join(
+            ',',
+          );
+      if (friends.isNotEmpty &&
+          (fingerprint != _lastAdvertFingerprint ||
+              now - _lastAdvertAtMs >= 5000)) {
+        _lastAdvertFingerprint = fingerprint;
+        _lastAdvertAtMs = now;
+        _advertGeneration = (_advertGeneration + 1) & 0xffffffff;
+        for (final peer in friends) {
+          final targets =
+              friends
+                  .where((other) => other.peerId != peer.peerId)
+                  .map((other) => other.peerId)
+                  .toList()
+                ..sort(_meshComparePeerIds);
+          final advert = MeshAdvert(_advertGeneration, targets.take(64));
+          unawaited(
+            peer._core
+                .submitEncrypted(
+                  FrameType.meshAdvert,
+                  advert.encode(),
+                  priority: SendPriority.interactive,
+                )
+                .catchError((Object _) => TransportWriteState.failed),
+          );
+        }
+      }
+      final candidates = <PeerId, PeerId>{};
+      for (final entry in _adverts.entries) {
+        for (final target in entry.value.targets) {
+          if (target == runtime.localPeerId || _direct(target) != null)
+            continue;
+          final prior = candidates[target];
+          if (prior == null || _meshComparePeerIds(entry.key, prior) < 0) {
+            candidates[target] = entry.key;
+          }
+        }
+      }
+      for (final entry in _backends.entries.toList()) {
+        final reverseHint =
+            (_reverseRouteUntil[entry.key] ?? 0) > now &&
+            _direct(entry.value.relayPeerId) != null;
+        final directTarget = _direct(entry.key) != null;
+        final candidateRelay = candidates[entry.key];
+        final directRelay = _direct(entry.value.relayPeerId) != null;
+        final virtualPeer = _virtualPeers[entry.key];
+        final relayChanged =
+            candidateRelay != entry.value.relayPeerId && !reverseHint;
+        String? retireReason;
+        if (directTarget) {
+          retireReason = 'direct-target-ready';
+        } else if (relayChanged) {
+          retireReason = 'advertised-relay-changed';
+        } else if (!directRelay) {
+          retireReason = 'relay-not-ready';
+        } else if (!await _friend(entry.key)) {
+          retireReason = 'target-not-friend';
+        } else if (virtualPeer != null &&
+            virtualPeer.state != PeerConnectionState.ready) {
+          // A failed end-to-end write moves the virtual PeerConnection into
+          // RECONNECTING but leaves its MeshBackendConnection object cached.
+          // Without retiring both together, the next HELLO is blocked by the
+          // stale backend entry and the UI can remain offline indefinitely,
+          // even though this direct relay and its advertised route are healthy.
+          retireReason = 'virtual-peer-not-ready';
+        }
+        if (retireReason != null) {
+          runtime._log(
+            'mesh route retiring target=${entry.key} relay=${entry.value.relayPeerId} '
+            'reason=$retireReason '
+            'candidateRelay=$candidateRelay reverseHint=$reverseHint '
+            'directTarget=$directTarget directRelay=$directRelay',
+          );
+          await entry.value.close();
+          _backends.remove(entry.key);
+          final virtual = _virtualPeers.remove(entry.key);
+          if (virtual != null) await virtual.disconnect();
+        }
+      }
+      for (final entry in candidates.entries) {
+        if (_backends.length >= 64) break;
+        if (_backends.containsKey(entry.key) ||
+            _meshComparePeerIds(runtime.localPeerId, entry.key) >= 0 ||
+            !await _friend(entry.key))
+          continue;
+        _startVirtual(entry.key, entry.value);
+      }
+    } finally {
+      _busy = false;
+    }
+  }
+
+  void receive(PeerConnection from, LpcFrame frame) {
+    if (!_enabled || from.isRelayed || frame.protocolMinor != 0) return;
+    final depth = _inboundDepth[from] ?? 0;
+    if (depth >= 64 || _totalInboundDepth >= 64) return;
+    _inboundDepth[from] = depth + 1;
+    _totalInboundDepth++;
+    // Decryption can finish for the next frame while an earlier resolver
+    // lookup is pending. Preserve each authenticated direct hop's frame order
+    // so 4 KiB mesh chunks cannot spuriously fail reassembly on mobile BLE.
+    final work = (_inbound[from] ?? Future<void>.value())
+        .catchError((Object _) {})
+        .then((_) => _receive(from, frame))
+        .whenComplete(() {
+          _totalInboundDepth--;
+          final remaining = (_inboundDepth[from] ?? 1) - 1;
+          if (remaining == 0) {
+            _inboundDepth.remove(from);
+          } else {
+            _inboundDepth[from] = remaining;
+          }
+        });
+    _inbound[from] = work;
+    unawaited(work);
+  }
+
+  Future<void> _receive(PeerConnection from, LpcFrame frame) async {
+    if (!await _friend(from.peerId)) {
+      if (frame.type == FrameType.meshAdvert ||
+          frame.type == FrameType.meshFrame) {
+        runtime._log(
+          'mesh frame ignored unconfirmed direct relay=${from.peerId} type=${frame.type.name}',
+        );
+      }
+      return;
+    }
+    try {
+      if (frame.type == FrameType.meshAdvert) {
+        final advert = MeshAdvert.decode(frame.payload);
+        if (advert.neighbors.contains(runtime.localPeerId) ||
+            advert.neighbors.contains(from.peerId)) {
+          runtime._log(
+            'mesh advert rejected relay=${from.peerId} generation=${advert.generation} reason=invalid-neighbor-list',
+          );
+          return;
+        }
+        if (!_adverts.containsKey(from.peerId) && _adverts.length >= 64) return;
+        _adverts[from.peerId] = _MeshAdvertRecord(
+          advert.neighbors.toSet(),
+          runtime._monotonicMs,
+        );
+        runtime._log(
+          'mesh advert received relay=${from.peerId} generation=${advert.generation} neighbors=${advert.neighbors.join(',')}',
+        );
+        poke();
+        return;
+      }
+      if (frame.type != FrameType.meshFrame) return;
+      final packet = MeshFrame.decode(frame.payload);
+      if (packet.source == from.peerId) {
+        // Only a direct confirmed friend can ask this runtime to relay; the
+        // next hop must itself be a READY direct confirmed friend. No packet
+        // can be forwarded from a relayed link or to an arbitrary BLE target.
+        final to = _direct(packet.destination);
+        if (to == null) {
+          if (packet.kind == MeshFrameKind.receipt || packet.chunkIndex == 0) {
+            runtime._log(
+              'mesh forward blocked source=${packet.source} destination=${packet.destination} via=${from.peerId} frame=${packet.frameId} reason=no-ready-direct-next-hop',
+            );
+          }
+          return;
+        }
+        if (!await _friend(to.peerId)) {
+          runtime._log(
+            'mesh forward blocked source=${packet.source} destination=${packet.destination} via=${from.peerId} frame=${packet.frameId} reason=next-hop-not-friend',
+          );
+          return;
+        }
+        if (packet.kind == MeshFrameKind.receipt || packet.chunkIndex == 0) {
+          runtime._log(
+            'mesh forward source=${packet.source} destination=${packet.destination} via=${from.peerId}->${to.peerId} frame=${packet.frameId} kind=${packet.kind.name} chunk=${packet.chunkIndex}/${packet.chunkCount} bytes=${packet.bytes.length}',
+          );
+        }
+        await to._core.submitEncrypted(
+          FrameType.meshFrame,
+          packet.encode(),
+          priority: SendPriority.interactive,
+        );
+      } else if (packet.destination == runtime.localPeerId) {
+        if (!await _friend(packet.source)) {
+          runtime._log(
+            'mesh frame rejected source=${packet.source} relay=${from.peerId} reason=source-not-friend',
+          );
+          return;
+        }
+        if (packet.kind == MeshFrameKind.receipt || packet.chunkIndex == 0) {
+          runtime._log(
+            'mesh frame arrived source=${packet.source} relay=${from.peerId} frame=${packet.frameId} kind=${packet.kind.name} chunk=${packet.chunkIndex}/${packet.chunkCount} bytes=${packet.bytes.length}',
+          );
+        }
+        if (packet.kind == MeshFrameKind.receipt) {
+          final backend = _backends[packet.source];
+          if (backend?.relayPeerId == from.peerId) {
+            backend!.receiveReceipt(packet.frameId);
+          } else {
+            runtime._log(
+              'mesh receipt ignored source=${packet.source} relay=${from.peerId} frame=${packet.frameId} expectedRelay=${backend?.relayPeerId}',
+            );
+          }
+        } else {
+          await _receiveChunk(from.peerId, packet);
+        }
+      }
+    } on Object catch (error) {
+      runtime._log('mesh frame rejected relay=${from.peerId} reason=$error');
+    }
+  }
+
+  Future<void> _receiveChunk(PeerId relay, MeshFrame packet) async {
+    final key = '${packet.source}:${packet.frameId}';
+    if (_completed[packet.source]?.containsKey(packet.frameId) ?? false) {
+      await _sendReceipt(relay, packet);
+      return;
+    }
+    var operation = _incomplete[key];
+    if (operation == null) {
+      final occupied = _incomplete.values.fold<int>(
+        0,
+        (sum, value) => sum + value.bytes.length,
+      );
+      if (packet.chunkIndex != 0 ||
+          _incomplete.length >= 16 ||
+          occupied + packet.bytes.length > 65536)
+        return;
+      operation = _MeshIncompleteFrame(packet.chunkCount, runtime._monotonicMs);
+      _incomplete[key] = operation;
+    }
+    if (packet.chunkIndex < operation.nextIndex) {
+      // A receipt can be delayed behind a busy second BLE hop, causing the
+      // source to resend the same frame from chunk zero. Preserve already
+      // accepted bytes; otherwise the duplicate first chunk would erase the
+      // partial frame and the later chunks could never complete it.
+      final start = packet.chunkIndex * meshRelayChunkBytes;
+      final end = start + packet.bytes.length;
+      if (end > operation.bytes.length ||
+          !_sameBytes(operation.bytes.sublist(start, end), packet.bytes)) {
+        _incomplete.remove(key);
+      } else {
+        operation.updatedAtMs = runtime._monotonicMs;
+      }
+      return;
+    }
+    if (operation.count != packet.chunkCount ||
+        packet.chunkIndex != operation.nextIndex ||
+        _incomplete.values.fold<int>(
+                  0,
+                  (sum, value) => sum + value.bytes.length,
+                ) +
+                packet.bytes.length >
+            65536 ||
+        operation.bytes.length + packet.bytes.length > 16462) {
+      _incomplete.remove(key);
+      return;
+    }
+    operation.bytes.addAll(packet.bytes);
+    operation.nextIndex++;
+    operation.updatedAtMs = runtime._monotonicMs;
+    if (operation.nextIndex != operation.count) return;
+    _incomplete.remove(key);
+    if (!_completed.containsKey(packet.source) && _completed.length >= 64) {
+      // Never inject without reserving a dedup slot: otherwise a lost
+      // receipt would permit a retry to deliver the same inner DATA twice.
+      return;
+    }
+    // Parsing before backend injection bounds allocations and ensures one
+    // serialized LPC frame, not an arbitrary byte stream, crossed the relay.
+    final inner = LpcFrame.decode(operation.bytes);
+    runtime._log(
+      'mesh frame reassembled source=${packet.source} relay=$relay frame=${packet.frameId} inner=${inner.type.name} bytes=${operation.bytes.length}',
+    );
+    var backend = _backends[packet.source];
+    final existingVirtual = _virtualPeers[packet.source];
+    if (inner.type == FrameType.hello &&
+        !inner.encrypted &&
+        existingVirtual != null) {
+      // A process restart can send a fresh HELLO while this runtime still
+      // considers the old relayed session READY. A failed virtual write can
+      // also leave its previous generation RECONNECTING. In either case a
+      // fresh authenticated handshake needs a new backend, not the stale
+      // core that would reject plaintext HELLO or suppress route recovery.
+      final old = _virtualPeers.remove(packet.source);
+      if (old != null) await old.disconnect();
+      if (backend != null) await backend.close();
+      _backends.remove(packet.source);
+      backend = null;
+    }
+    if (backend == null) {
+      if (_direct(packet.source) != null) {
+        runtime._log(
+          'mesh HELLO rejected source=${packet.source} relay=$relay reason=direct-peer-ready',
+        );
+        return;
+      }
+      if (_backends.length >= 64) {
+        runtime._log(
+          'mesh HELLO rejected source=${packet.source} relay=$relay reason=virtual-link-limit',
+        );
+        return;
+      }
+      _reverseRouteUntil[packet.source] = runtime._monotonicMs + 12000;
+      backend = _startVirtual(packet.source, relay);
+    } else {
+      _reverseRouteUntil[packet.source] = runtime._monotonicMs + 12000;
+    }
+    if (backend.relayPeerId != relay) {
+      runtime._log(
+        'mesh frame rejected source=${packet.source} relay=$relay expectedRelay=${backend.relayPeerId} inner=${inner.type.name}',
+      );
+      return;
+    }
+    backend.receiveFrame(operation.bytes);
+    final recent = _completed.putIfAbsent(packet.source, () => {});
+    if (recent.length >= 64) recent.remove(recent.keys.first);
+    recent[packet.frameId] = runtime._monotonicMs;
+    await _sendReceipt(relay, packet);
+  }
+
+  Future<void> _sendReceipt(PeerId relay, MeshFrame packet) async {
+    final peer = _direct(relay);
+    if (peer == null) return;
+    final receipt = MeshFrame(
+      kind: MeshFrameKind.receipt,
+      source: runtime.localPeerId,
+      destination: packet.source,
+      frameId: packet.frameId,
+      chunkIndex: 0,
+      chunkCount: 0,
+      bytes: const [],
+    );
+    await peer._core.submitEncrypted(
+      FrameType.meshFrame,
+      receipt.encode(),
+      priority: SendPriority.interactive,
+    );
+  }
+
+  MeshBackendConnection _startVirtual(PeerId target, PeerId relay) {
+    runtime._log('mesh handshake start target=$target relay=$relay');
+    final backend = MeshBackendConnection(
+      localPeerId: runtime.localPeerId,
+      remotePeerId: target,
+      relayPeerId: relay,
+      sendEnvelope: (packet) async {
+        final peer = _direct(relay);
+        if (peer == null || !await _friend(relay)) {
+          return TransportWriteState.failed;
+        }
+        return peer._core.submitEncrypted(
+          FrameType.meshFrame,
+          packet.encode(),
+          priority: SendPriority.interactive,
+        );
+      },
+    );
+    _backends[target] = backend;
+    unawaited(_handshakeVirtual(target, backend));
+    return backend;
+  }
+
+  Future<void> _handshakeVirtual(
+    PeerId target,
+    MeshBackendConnection backend,
+  ) async {
+    try {
+      final identity = runtime._identity!;
+      final ephemeral = await X25519().newKeyPair();
+      final public = await ephemeral.extractPublicKey();
+      if (!_enabled || _backends[target] != backend) return;
+      final handshake = HandshakeConnection(
+        backend: backend,
+        localPeerId: runtime.localPeerId,
+        remotePeerId: target,
+        exchange: HandshakeExchange(
+          serviceUuid: runtime.config.serviceUuid,
+          localHello: HelloPayload(
+            peerId: runtime.localPeerId,
+            identityPublicKey: identity.publicKey.bytes,
+            ephemeralPublicKey: public.bytes,
+            connectionNonce: List<int>.generate(
+              16,
+              (_) => Random.secure().nextInt(256),
+            ),
+            peerCapabilities: PeerCapabilityBitmap(const [
+              PeerCapability.resume,
+            ]).value,
+            maxMinor: 0,
+            trustMode: HandshakeTrustMode.tofu,
+            keepaliveIntervalMs: runtime.config.keepaliveIntervalMs,
+            applicationMetadata: runtime._applicationMetadata,
+          ),
+          localIdentityKeyPair: identity.keyPair,
+          localEphemeralKeyPair: ephemeral,
+          tofuStore: runtime._tofuStore,
+        ),
+      );
+      final ready = handshake.ready;
+      unawaited(ready.then<void>((_) {}, onError: (_, __) {}));
+      await handshake.start();
+      final core = await ready.timeout(
+        Duration(milliseconds: runtime.config.reconnectTimeoutMs),
+      );
+      if (!_enabled || _backends[target] != backend || !await _friend(target)) {
+        await core.close();
+        return;
+      }
+      final peer = await runtime._ownPeer(
+        core,
+        securityLevel: handshake.exchange.result!.createReady().securityLevel,
+        remoteApplicationMetadata:
+            handshake.exchange.result!.remoteHello.applicationMetadata,
+      );
+      if (!identical(peer._core, core)) return;
+      _virtualPeers[target] = peer;
+      runtime._knownRetainedPeers.add(target);
+      runtime._events.add(KnownPeerConnected(runtime._monotonicMs, peer));
+      runtime._log('mesh READY target=$target relay=${backend.relayPeerId}');
+    } on Object catch (error) {
+      runtime._log(
+        'mesh handshake failed target=$target relay=${backend.relayPeerId} error=$error',
+      );
+      if (_backends[target] == backend) {
+        _backends.remove(target);
+        await backend.close();
+      }
+    }
+  }
+
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    _timer.cancel();
+    for (final subscription in _peerEvents.values) {
+      await subscription.cancel();
+    }
+    _peerEvents.clear();
+    for (final backend in _backends.values.toList()) {
+      await backend.close();
+    }
+    _backends.clear();
+    _reverseRouteUntil.clear();
+    _adverts.clear();
+    _incomplete.clear();
+    _completed.clear();
+  }
+}
+
+int _meshComparePeerIds(PeerId left, PeerId right) {
+  for (var index = 0; index < 16; index++) {
+    final comparison = left.bytes[index].compareTo(right.bytes[index]);
+    if (comparison != 0) return comparison;
+  }
+  return 0;
+}
+
 /// Runtime adapter for the Section 43 routing cores.  It owns no BLE API: all
 /// bytes enter and leave through authenticated [PeerConnection] instances.
 /// The coordinator-star decision is made from committed GroupSession state;
@@ -4309,9 +5141,11 @@ class _RuntimeGroupRouteTransport
   final Map<int, _CheckpointPublicationData> _checkpointPublications = {};
   final Map<GroupMessageId, SendHandleController> _sourceHandles = {};
   final Set<PeerId> _sameGroupCatchUpPending = <PeerId>{};
+  bool _membershipReconciliationPending = false;
   GroupMemberRouter? _memberRouter;
   GroupCoordinatorRouter? _coordinatorRouter;
   GroupDestinationRouter? _destinationRouter;
+  String? _memberView;
   String? _coordinatorView;
   String? _destinationView;
   bool _disposed = false;
@@ -4363,6 +5197,18 @@ class _RuntimeGroupRouteTransport
     );
     unawaited(() async {
       try {
+        if (_membershipReconciliationPending) {
+          // Do not route application operations using a locally retained view
+          // after the current coordinator has confirmed that this PeerId is
+          // absent. A following membership snapshot or GROUP_MERGE will
+          // release this gate after reconciliation.
+          controller.complete(SendState.failed);
+          _sourceHandles.remove(operation.groupMessageId);
+          logger(
+            'group source submit rejected pending membership reconciliation local=${group.localPeerId} destination=${operation.destinationPeerId}',
+          );
+          return;
+        }
         if (group.isCoordinator) {
           await _admitLocalCoordinatorOperation(operation);
           return;
@@ -4627,6 +5473,10 @@ class _RuntimeGroupRouteTransport
   ) {
     unawaited(() async {
       try {
+        if (_membershipReconciliationPending) {
+          controller.complete(SendState.failed);
+          return;
+        }
         final target = group.isCoordinator
             ? _readyPeer(datagram.destinationPeerId)
             : _readyPeer(group.coordinatorPeerId!);
@@ -4653,14 +5503,21 @@ class _RuntimeGroupRouteTransport
     final coordinator = group.coordinatorPeerId;
     if (coordinator == null)
       throw const LpcException(LpcErrorCode.invalidState);
+    final view = _routingView(coordinator);
     final existing = _memberRouter;
-    if (existing != null &&
-        existing.validator.currentCoordinatorPeerId == coordinator) {
+    if (existing != null && _memberView == view) {
       return existing;
     }
+    _memberView = view;
+    // A restart can restore GroupSession membership without changing its
+    // coordinator PeerId. The validator must nevertheless follow the whole
+    // committed roster, or a send to a newly restored member is rejected
+    // against the stale pre-restart view. Preserve bounded in-flight sends
+    // and cancellation tombstones when refreshing that validator.
     return _memberRouter = GroupMemberRouter(
       validator: _validator(coordinator),
-      sends: RoutedSendTable(localPeerId: group.localPeerId),
+      sends: existing?.sends ?? RoutedSendTable(localPeerId: group.localPeerId),
+      tombstones: existing?.tombstones,
     );
   }
 
@@ -5099,6 +5956,7 @@ class _RuntimeGroupRouteTransport
       coordinator: coordinator,
       coordinatorTerm: payload.newCoordinatorTerm,
     );
+    _membershipReconciliationPending = false;
   }
 
   Future<void> _receiveGroupMerge(PeerConnection peer, LpcFrame frame) async {
@@ -5278,19 +6136,36 @@ class _RuntimeGroupRouteTransport
       'group membership snapshot order peer=${peer.peerId} term=${snapshot.coordinatorTerm} disposition=$disposition message=${_debugId(frame.messageId)}',
     );
     if (disposition == MembershipSnapshotOrderDisposition.accepted) {
-      group.commitMembership(
-        snapshot.members,
-        coordinator: peer.peerId,
-        coordinatorTerm: snapshot.coordinatorTerm,
-      );
-      logger(
-        'group membership snapshot applied local=${group.localPeerId} term=${group.coordinatorTerm} members=${group.members.map((member) => member.peerId).join(',')}',
-      );
-      _mergeReceiver = GroupMergeReceiver(
-        committedGroupId: group.groupId,
-        committedTerm: group.coordinatorTerm,
-        committedMembers: group.members,
-      );
+      if (membershipSnapshotLocalDisposition(snapshot, group.localPeerId) ==
+          MembershipSnapshotLocalDisposition.excluded) {
+        // A coordinator can have an older removal snapshot in flight when a
+        // restarted process recreates its GroupSession. Treat that as a
+        // membership reconciliation race, not a corrupt protocol frame: ACK
+        // below, keep the authenticated relayed/direct link alive, and
+        // advertise the current local view so the coordinator can reconcile
+        // this currently reachable same-GroupId peer (Sections 10.8.2/10.10).
+        // Group application traffic remains gated until a newer committed
+        // snapshot admits this local PeerId.
+        _membershipReconciliationPending = true;
+        logger(
+          'group membership snapshot excludes local peer; requesting reconciliation local=${group.localPeerId} peer=${peer.peerId} term=${snapshot.coordinatorTerm}',
+        );
+      } else {
+        group.commitMembership(
+          snapshot.members,
+          coordinator: peer.peerId,
+          coordinatorTerm: snapshot.coordinatorTerm,
+        );
+        _membershipReconciliationPending = false;
+        logger(
+          'group membership snapshot applied local=${group.localPeerId} term=${group.coordinatorTerm} members=${group.members.map((member) => member.peerId).join(',')}',
+        );
+        _mergeReceiver = GroupMergeReceiver(
+          committedGroupId: group.groupId,
+          committedTerm: group.coordinatorTerm,
+          committedMembers: group.members,
+        );
+      }
     }
     await peer._core.submitAck(frame.messageId);
     await _publishGroupInfo();
@@ -5866,6 +6741,7 @@ class _RuntimeGroupRouteTransport
         sends: member.sends,
         tombstones: member.tombstones,
       );
+      _memberView = _routingView(event.current);
       unawaited(_rerouteMemberOperations());
     }
   }

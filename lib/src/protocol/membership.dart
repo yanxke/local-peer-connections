@@ -4,7 +4,10 @@ import '../types.dart';
 
 class CoordinatorRank implements Comparable<CoordinatorRank> {
   const CoordinatorRank(
-      this.applicationPriority, this.capabilityScore, this.peerId);
+    this.applicationPriority,
+    this.capabilityScore,
+    this.peerId,
+  );
   final int applicationPriority, capabilityScore;
   final PeerId peerId;
   @override
@@ -21,11 +24,12 @@ class CoordinatorRank implements Comparable<CoordinatorRank> {
   }
 }
 
-int coordinatorCapabilityScore(
-        {required bool lanListen,
-        required bool l2capListen,
-        required bool gattPeripheral,
-        required bool gattCentral}) =>
+int coordinatorCapabilityScore({
+  required bool lanListen,
+  required bool l2capListen,
+  required bool gattPeripheral,
+  required bool gattCentral,
+}) =>
     (lanListen ? 8 : 0) +
     (l2capListen ? 4 : 0) +
     (gattPeripheral ? 2 : 0) +
@@ -45,27 +49,31 @@ Uint8List _canonical(List<GroupMember> members) {
   for (var i = 1; i < sorted.length; i++) {
     if (_compare(sorted[i - 1].peerId.bytes, sorted[i].peerId.bytes) == 0)
       throw const LpcException(
-          LpcErrorCode.protocolMismatch, 'duplicate member');
+        LpcErrorCode.protocolMismatch,
+        'duplicate member',
+      );
   }
   final output = ByteData(2 + sorted.length * 18);
   output.setUint16(0, sorted.length);
   for (var i = 0; i < sorted.length; i++) {
-    output.buffer
-        .asUint8List()
-        .setRange(2 + i * 18, 18 + i * 18, sorted[i].peerId.bytes);
+    output.buffer.asUint8List().setRange(
+      2 + i * 18,
+      18 + i * 18,
+      sorted[i].peerId.bytes,
+    );
     output.setUint16(18 + i * 18, sorted[i].maxPeers);
   }
   return output.buffer.asUint8List();
 }
 
 class MembershipSnapshot {
-  MembershipSnapshot(
-      {required this.groupId,
-      required this.coordinatorTerm,
-      required List<GroupMember> members,
-      List<int>? hash})
-      : members = List.unmodifiable(members),
-        hash = hash == null ? null : Uint8List.fromList(hash) {
+  MembershipSnapshot({
+    required this.groupId,
+    required this.coordinatorTerm,
+    required List<GroupMember> members,
+    List<int>? hash,
+  }) : members = List.unmodifiable(members),
+       hash = hash == null ? null : Uint8List.fromList(hash) {
     if (this.hash != null && this.hash!.length != 32)
       throw ArgumentError.value(hash, 'hash');
   }
@@ -98,21 +106,40 @@ class MembershipSnapshot {
     final members = <GroupMember>[];
     for (var i = 0; i < count; i++) {
       final offset = 26 + i * 18;
-      members.add(GroupMember(
-          PeerId(raw.sublist(offset, offset + 16)), h.getUint16(offset + 16)));
+      members.add(
+        GroupMember(
+          PeerId(raw.sublist(offset, offset + 16)),
+          h.getUint16(offset + 16),
+        ),
+      );
     }
     final expected = await canonicalMembershipHash(members);
     final supplied = raw.sublist(input.length - 32);
     if (!_same(expected, supplied))
       throw const LpcException(
-          LpcErrorCode.protocolMismatch, 'membership hash mismatch');
+        LpcErrorCode.protocolMismatch,
+        'membership hash mismatch',
+      );
     return MembershipSnapshot(
-        groupId: GroupId(raw.sublist(0, 16)),
-        coordinatorTerm: h.getUint64(16),
-        members: members,
-        hash: supplied);
+      groupId: GroupId(raw.sublist(0, 16)),
+      coordinatorTerm: h.getUint64(16),
+      members: members,
+      hash: supplied,
+    );
   }
 }
+
+/// Whether an authenticated coordinator snapshot admits the receiving local
+/// PeerId. An excluded receiver must ACK and request same-GroupId
+/// reconciliation without applying the snapshot or closing its pairwise link.
+enum MembershipSnapshotLocalDisposition { included, excluded }
+
+MembershipSnapshotLocalDisposition membershipSnapshotLocalDisposition(
+  MembershipSnapshot snapshot,
+  PeerId localPeerId,
+) => snapshot.members.any((member) => member.peerId == localPeerId)
+    ? MembershipSnapshotLocalDisposition.included
+    : MembershipSnapshotLocalDisposition.excluded;
 
 /// The disposition of an otherwise valid, authenticated membership snapshot
 /// under Section 10.8.1's same-term ordering rule. A stale snapshot remains a
@@ -142,8 +169,9 @@ class MembershipSnapshotOrderTable {
       throw const LpcException(LpcErrorCode.protocolMismatch);
     }
     final prefix = senderMessageId.sublist(0, 4);
-    final counter =
-        ByteData.sublistView(Uint8List.fromList(senderMessageId)).getUint32(4);
+    final counter = ByteData.sublistView(
+      Uint8List.fromList(senderMessageId),
+    ).getUint32(4);
     final key = _domainKey(
       coordinatorPeerId: coordinatorPeerId,
       coordinatorTerm: coordinatorTerm,

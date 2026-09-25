@@ -1,9 +1,9 @@
 # Local Peer Connections
 ## Normative Cross-Platform Offline Proximity Networking Specification
 
-**Specification version:** 0.9.15-application-validated-checkpoints
+**Specification version:** 0.10.0-friend-relay
 **Wire protocol major:** 1  
-**Wire protocol minor:** 0  
+**Wire protocol minor:** 0
 **Working project name:** `local_peer_connections`
 
 > This document is normative. An implementation claiming conformance MUST implement all MUST requirements for the declared version.  
@@ -181,7 +181,7 @@ The following remain optional capability extensions unless another conformance p
 
 A product MUST NOT claim Full V1.0 Mobile Conformance if it omits any required item above.
 
-## 3.4 Minor-0-Only Baseline
+## 3.4 Versioned Baseline
 
 This specification intentionally defines no backwards compatibility with any earlier unimplemented protocol draft.
 
@@ -192,7 +192,9 @@ protocol major = 1
 protocol minor = 0
 ```
 
-and MUST NOT claim protocol-minor-1 support.
+Friend relay is part of this protocol-minor-0 baseline as specified in Section
+62. This protocol has not shipped; no minor-1 fallback or feature negotiation
+is required for the relay frames.
 
 Protocol minor 0 is the first frozen, implementation-targeted wire baseline for this project.
 
@@ -214,7 +216,7 @@ TX characteristic UUID:  83F20A02-8C5A-4F5A-9A3A-2F0D7A96B100
 Control UUID:            83F20A03-8C5A-4F5A-9A3A-2F0D7A96B100
 ```
 
-A conforming implementation of this specification MUST advertise this supported version range:
+A conforming implementation MUST advertise this supported version range:
 
 ```text
 supported_major = 1
@@ -222,18 +224,9 @@ min_minor = 0
 max_minor = 0
 ```
 
-This specification defines only protocol major 1, minor 0.
-
-There is no normative protocol-minor-1 wire compatibility requirement.
-
-Minor negotiation machinery remains in the wire format so future protocol-major-1 minor versions can coexist, but an implementation conforming to this specification MUST advertise:
-
-```text
-min_minor = 0
-max_minor = 0
-```
-
-until a later specification explicitly adds another supported minor.
+This specification defines protocol major 1, minor 0 only. All conforming
+implementations use the same frame catalog, including Section 62; there is no
+legacy mesh-free minor-0 profile to negotiate with.
 
 Applications MAY override the service UUID namespace, but both peers MUST use the same configured service UUID.
 
@@ -906,6 +899,30 @@ If coordinator PeerId or `coordinator_term` changes, ordering is governed by coo
 
 This rule provides same-term monotonic membership state without adding a separate wire-visible `membership_revision`.
 
+### 10.8.2 Snapshot Excluding the Receiving Peer
+
+A newly accepted, authenticated `MEMBERSHIP_SNAPSHOT` can exclude the local
+PeerId when the peer's GroupSession was recreated after a disconnect and the
+coordinator's older committed view was already in flight. This is a membership
+reconciliation condition, not a malformed frame or pairwise authentication
+failure.
+
+When an otherwise valid current-coordinator snapshot excludes the receiving
+peer's local PeerId, the receiver MUST:
+
+1. NOT apply that snapshot to its local GroupSession;
+2. ACK the snapshot MessageId when ACK-required;
+3. keep the authenticated pairwise PeerConnection READY; and
+4. immediately publish its current authenticated `GROUP_INFO` on that
+   connection so the coordinator can reconcile the currently reachable
+   same-GroupId view under Section 10.10.
+
+The receiver MUST accept and apply a later, correctly ordered snapshot that
+includes its PeerId. An authenticated `GROUP_LEAVE(KICKED)` remains the
+explicit removal mechanism for a reachable member. This rule MUST NOT make a
+peer absent from the coordinator's committed membership eligible for group
+application routing before a snapshot containing that peer is committed.
+
 ## 10.9 Automatic Election
 
 When the coordinator is unavailable, every remaining member enters `ELECTING`.
@@ -1386,15 +1403,14 @@ Exact protocol-major-1 frame values:
 0x25 GROUP_REALTIME_DATAGRAM      // protocol minor >= 0
 0x26 GROUP_DELIVERY_ACK           // protocol minor >= 0
 0x27 GROUP_RELAY_STATUS           // protocol minor >= 0
+0x28 MESH_ADVERT                  // protocol minor 0
+0x29 MESH_FRAME                   // protocol minor 0
 ```
 
 A sender MUST NOT transmit a frame type introduced after the negotiated minor version.
 
-For negotiated minor 0, valid reliable-stream frame types are 0x01 through 0x27.
-
-This specification does not define protocol-minor-1 frame semantics.
-
-A frame type invalid for negotiated minor 0 MUST cause encrypted ERROR `UNSUPPORTED_FRAME_TYPE`, followed by connection close.
+For negotiated minor 0, valid reliable-stream frame types are 0x01 through
+0x29. Values 0x28 and 0x29 have the Section 62 semantics.
 
 ---
 
@@ -1477,7 +1493,7 @@ min_minor
 max_minor
 ```
 
-A conforming implementation of this specification MUST send:
+A conforming implementation MUST send:
 
 ```text
 supported_major = 1
@@ -1502,11 +1518,8 @@ and
 negotiated_minor >= max(local_min_minor, remote_min_minor)
 ```
 
-For this specification, that means a successful connection MUST negotiate:
-
-```text
-negotiated_minor = 0
-```
+The negotiated minor is 0 for conforming peers. Section 62 traffic is part of
+that baseline and requires no additional capability negotiation.
 
 If the ranges do not intersect, send the exact pre-key plaintext `ERROR(PROTOCOL_MISMATCH)` defined below, then close the physical connection.
 
@@ -1517,16 +1530,6 @@ protocol_minor = negotiated_minor
 ```
 
 HELLO and AUTH headers use the sender's `max_minor`.
-
-A conforming implementation MUST NOT attempt to encode, decode, or emulate protocol-minor-1 DATA/control semantics.
-
-A peer advertising:
-
-```text
-max_minor = 1
-```
-
-has no compatible minor version with this specification and MUST fail version negotiation with `PROTOCOL_MISMATCH`.
 
 ### 16.2.1 Pre-Key ERROR(PROTOCOL_MISMATCH)
 
@@ -1657,7 +1660,9 @@ For protocol minor 0, bits 0 through 8 are defined.
 
 Bits 9 through 31 are reserved and MUST be zero.
 
-Protocol minor 1 capability semantics are not defined by this specification.
+Friend relay adds no capability bit. It is enabled only when the application
+provides a confirmed-friend resolver and the route requirements in Section 62
+are met.
 
 This wire bitmap MUST NOT be confused with `LocalRuntimeCapabilityBitmap`.
 
@@ -5630,6 +5635,19 @@ Pending work beyond `maxPendingKnownPeerProbes` MUST NOT allocate an unbounded q
 
 Probe scheduling MUST NOT allocate a `PeerConnection` for every application-known PeerId. Connections are candidate/discovery driven, not database-population driven.
 
+A platform MAY serialize native GATT link procedures when required by its BLE
+stack. This serialization MUST NOT let one endpoint with no physical
+`PlatformGattConnected` callback block unrelated pending candidates for the
+entire authentication/reconnect window. If the physical GATT connection has
+not completed within `min(reconnectTimeoutMs, 10000 ms)`, the Runtime MUST
+cancel and close that candidate, release the physical-connect slot, and allow
+the next bounded pending endpoint to proceed. Once
+`PlatformGattConnected` is observed, the candidate handshake retains the full
+configured `reconnectTimeoutMs` window; this shorter bound applies only to
+physical link establishment, not service discovery, HELLO/AUTH, or READY.
+Late native callbacks for a canceled candidate MUST follow the existing
+generation-safe stale-callback cleanup rules.
+
 When an automatic candidate probe fails because the physical endpoint closed,
 was lost, or timed out, the Runtime MUST apply a bounded retry delay before
 retrying that endpoint. The retry delay SHOULD include bounded per-runtime and
@@ -5921,7 +5939,7 @@ Releasing one owner MUST NOT disconnect the PeerConnection if another owner stil
 - `HostSession.close()` or `disconnect(peerId, ...)` releases HostSession ownership and MUST NOT tear down a connection still required by a GroupSession or another Runtime owner;
 - `GroupSession.leave()`/`close()` releases that GroupSession's ownership and MUST NOT disconnect a connection still retained for direct/HostSession/known-peer use;
 - a known-peer resolver result changing to false or an application releasing known-peer retention MUST NOT break a GroupSession that still owns the connection;
-- removal of an application friendship/relationship is application state and MUST NOT by itself invalidate GroupSession ownership.
+- removal of an application friendship/relationship is application state and MUST NOT by itself invalidate GroupSession ownership. For a Section 62 friend-only relay, removal does revoke the local relay authorization and closes that virtual transport; it does not remove committed GroupSession membership or prohibit recovery over a separately authorized direct link.
 
 When the last logical owner releases a PeerConnection, the Runtime MUST gracefully close it unless another explicit normative LPC policy requires temporary retention.
 
@@ -7740,7 +7758,7 @@ bits 0-8 may be used
 bits 9-31 MUST be zero
 ```
 
-Protocol minor 1 capability semantics are not defined by this specification.
+Section 62 adds no capability bit.
 
 A peer MUST set `REALTIME_LATEST` only if it implements Section 22.
 
@@ -8175,8 +8193,8 @@ expected parser result
 - [x] UT-006 SAS known vector and six-digit formatting.
 - [x] UT-007 SAS rejection prevents READY.
 - [x] UT-008 PSK_32 known vector.
-- [x] UT-009 Version negotiation succeeds only when the peer's supported range includes minor 0.
-- [x] UT-010 Peer advertising max_minor=1 has no compatible minor and receives pre-key PROTOCOL_MISMATCH.
+- [x] UT-009 A minor-0-only implementation negotiates only when the peer's range includes minor 0.
+- [x] UT-010 A minor-0-only implementation rejects a peer advertising only minor 1 with pre-key PROTOCOL_MISMATCH.
 - [x] UT-011 PeerCapabilityBitmap encoding exact.
 - [x] UT-012 LocalRuntimeCapabilityBitmap never serialized in HELLO.
 - [x] UT-013 GATT uint32 fragment sequence handles >65535 fragments.
@@ -8256,9 +8274,9 @@ expected parser result
 - [x] UT-084 Plaintext ERROR after AUTH/session-key establishment is rejected.
 - [x] UT-085 After sending pre-key ERROR(PROTOCOL_MISMATCH), sender closes without sending AUTH.
 - [x] UT-086 GroupId merge winner uses larger committed_member_count before lexicographic GroupId tie-break.
-- [x] UT-087 Conforming HELLO advertises min_minor=0 and max_minor=0.
-- [x] UT-088 Peer advertising only minor 1 is rejected with pre-key PROTOCOL_MISMATCH before AUTH.
-- [x] UT-089 Implementation does not attempt to encode a minor-1 DATA frame after version negotiation failure.
+- [x] UT-087 A minor-0-only HELLO advertises min_minor=0 and max_minor=0.
+- [x] UT-088 A minor-0-only peer rejects a peer advertising only minor 1 with pre-key PROTOCOL_MISMATCH before AUTH.
+- [x] UT-089 An implementation does not encode DATA after version negotiation failure.
 - [x] UT-090 When checkpoint A is in flight and B then C are published, only A and C are transmitted; B is replaced before transmission.
 - [x] UT-091 Checkpoint replication retains at most one in-flight and one pending checkpoint per target peer.
 - [x] UT-092 Publishing a newer checkpoint does not cancel or truncate an ACK-required checkpoint already in flight.
@@ -8463,6 +8481,7 @@ expected parser result
 - [x] UT-260 A Runtime with automatic known-peer discovery enabled answers an inbound automatic candidate without requiring a HostSession or GroupSession, classifies the authenticated PeerId through its resolver, and releases an unknown candidate without retaining it.
 - [x] UT-262 A late authenticated duplicate candidate that started after a healthy READY owner is established is closed without replacing that owner; overlapping candidates still use connection-rank arbitration.
 - [x] UT-265 An unassociated discovery endpoint is not assigned to the sole reconnecting peer for RESUME; it is authenticated through the bounded known-peer candidate path first, preserving unrelated physical links.
+- [x] UT-271 An automatic GATT candidate with no physical-connected callback is closed at the bounded physical-connect deadline and does not block a pending unrelated endpoint for the full reconnect window.
 
 # 55. Mandatory Physical Integration Tests
 
@@ -8917,6 +8936,7 @@ For protocol major 1, the following are fixed and MUST match across implementati
 - GroupTrustMode values and exact mapping to pairwise HELLO trust_mode/KnownPeerPolicy;
 - Runtime automatic known-peer configuration and exact `KnownPeerResolver` contract;
 - bounded automatic known-peer probe scheduling and cache limits;
+- automatic physical GATT-connect serialization released after its bounded pre-callback timeout, without shortening the post-connect handshake deadline;
 - KnownPeerConnected / UnknownPeerIdentified event semantics;
 - applicationNamespace and groupJoinToken scoping rules;
 - group trust compatibility and KNOWN_PEERS auto-merge rules;
@@ -8929,6 +8949,7 @@ For protocol major 1, the following are fixed and MUST match across implementati
 - CoordinatorCheckpointHandle per-peer ACK correlation, DURABLE/FAILED aggregation, supersession, membership-race, authority-loss, and bounded-retention semantics;
 - MessageId `next_message_counter` initialization, allocation, and exhaustion behavior;
 - exact frame-specific final ACK-timeout recovery and per-peer GroupSyncState;
+- nonfatal acknowledgement and GROUP_INFO reconciliation when a current-coordinator MEMBERSHIP_SNAPSHOT excludes a restarted receiver;
 - exact ACK timer start semantics based on final frame/chunk reaching SENT_TO_TRANSPORT;
 - SENT_TO_TRANSPORT backend-acceptance definition;
 - RESUME preservation of all ACK_REQUIRED logical operations;
@@ -8969,8 +8990,198 @@ For protocol major 1, the following are fixed and MUST match across implementati
 - termination of nonterminal admitted relays when destination membership removal commits;
 - API semantics.
 
+Section 62 adds opt-in friend-only two-hop relay connections within protocol
+minor 0. READY relay PeerConnections are ordinary GroupSession
+coordinator-member transports, including for coordinator control, reliable,
+realtime, and checkpoint frames; this does not alter coordinator authority,
+coordinator routing, or GroupMessageId semantics.
+
 For negotiated protocol minor 0, the rules above are fixed and MUST match across conforming implementations.
 
 A future protocol-major-1 minor version MAY add backward-compatible wire or semantic extensions when those extensions are governed by minor-version negotiation.
 
 A change that is incompatible with the already-defined semantics of an existing negotiated minor requires a new protocol major.
+
+
+# 62. Friend-Only Two-Hop Relay (Protocol Minor 0)
+
+This extension lets a READY pairwise `PeerConnection` between A and C use B
+as its transport when A-B and B-C are direct READY links and A-C has no usable
+direct link. It is a bounded two-hop relay, not a claim of unrestricted
+multi-hop routing or discovery. The application's confirmed-friend resolver
+remains authoritative. A relay link is never created for an unconfirmed
+endpoint, and a discovery advertisement alone never establishes friendship.
+
+The logical A-C handshake, identity, SessionId, encrypted DATA, ACKs,
+keepalive, and GroupSession frames remain end-to-end between A and C. B sees
+the relay envelope and the plaintext initial HELLO/AUTH, but MUST NOT receive
+the decrypted A-C application frames or impersonate either endpoint. A and C
+MUST each verify the other's authenticated PeerId against their current
+`KnownPeerResolver` before publishing READY; every hop MUST verify its direct
+neighbor is a confirmed friend. A resolver failure or timeout is rejection,
+never an implicit TOFU friendship. Route eligibility MUST be re-evaluated
+after `releasePeerRetention`/unfriend and link replacement. There is no
+remote friendship oracle or gossip of a third party's relationship state.
+
+This extension is enabled only when `autoConnectKnownPeers` and
+`knownPeerResolver` are configured. The maximum two-hop path is one direct
+relay B; relayed connections MUST NOT be used as relay hops.
+
+## 62.1 Advertisement and Route Selection
+
+After a direct confirmed-friend link becomes READY, and whenever its direct
+confirmed-friend neighbor set changes, a runtime sends `MESH_ADVERT` to each
+direct confirmed friend. An empty advertisement MAY be omitted until this
+runtime has had two READY direct confirmed friends; once a nonempty neighbor
+set has been advertised, loss of a neighbor MUST be signaled within 1 second.
+The payload is:
+
+```text
+offset  size  field
+0       1    format_version = 1
+1       1    entry_count (0..64)
+2       4    generation (uint32, monotonically increased per sender process)
+6       N*16 distinct, lexicographically sorted direct READY neighbor PeerIds
+```
+
+The recipient MUST authenticate the sender through the outer pairwise LPC
+connection, require exact payload length, reject duplicate IDs, its own ID,
+and the sender's ID, and retain at most the most recent 64 advertised IDs per
+direct neighbor. An advert replaces the previous snapshot from that neighbor;
+it is not accumulated. On direct link loss its snapshot is removed. The
+sender MUST exclude the recipient from its advertised set. Advertisements
+MUST be sent within 1 second of a set change, with a 5-second refresh while
+the link is READY. A received target becomes an eligible candidate only after
+the recipient's own resolver confirms that target as a friend. The route
+choice is the lexicographically lowest READY direct relay PeerId advertising
+that target. A usable direct link always takes precedence. A candidate MUST
+expire no later than 12 seconds after its last valid advert; expiry closes
+its virtual backend and makes the peer non-READY unless another valid path is
+already usable. A route advertisement is a hint, never proof of target
+identity or delivery.
+
+The mesh controller MUST observe the lifecycle of each published virtual
+PeerConnection. If a virtual PeerConnection enters RECONNECTING or becomes
+terminal while its selected direct relay is still READY and the advertised
+route remains eligible, the controller MUST retire that failed virtual
+backend and allow a fresh end-to-end handshake on the selected route. The
+lexicographically lower endpoint initiates; the other endpoint MUST accept a
+fresh plaintext HELLO over that authenticated relay even when its prior
+virtual PeerConnection is no longer READY. A failed virtual generation MUST
+NOT remain cached as the active route and suppress recovery. This retry is
+bounded by the existing one-route-per-target and handshake timeout limits;
+it does not preserve the old SessionId or extend the two-hop path.
+
+Only the endpoint with the lexicographically lower PeerId initiates a fresh
+virtual handshake. A valid incoming virtual HELLO can create the responder
+even before the responder receives its own route advert; the authenticated
+direct relay that carried that HELLO is a bounded reverse-path hint. Neither
+endpoint may publish the virtual PeerConnection before normal end-to-end
+HELLO/AUTH/READY and the resolver check complete. Virtual and direct
+connections for the same authenticated PeerId are arbitrated as one logical
+owner; a healthy direct READY connection wins over a virtual candidate and
+the virtual candidate MUST close without disrupting the direct link. Route
+changes may replace a virtual connection with a fresh handshake; they MUST
+NOT reuse a SessionId as though a fresh path had completed RESUME.
+
+## 62.2 MESH_FRAME
+
+`MESH_FRAME` carries one chunk of a serialized inner LPC frame or a transport
+submission acknowledgement. The complete outer encrypted payload is:
+
+```text
+offset  size  field
+0       1    format_version = 1
+1       1    kind (1=frame chunk, 2=complete-frame receipt)
+2       16   source_peer_id
+18      16   destination_peer_id
+34      8    frame_id, uint64, unique within this source's live relay state
+42      2    chunk_index, uint16
+44      2    chunk_count, uint16
+46      2    chunk_length, uint16
+48      N    chunk_bytes
+```
+
+`chunk_length` is at most 3900. The 48-byte MESH_FRAME payload header plus
+the 62-byte outer LPC frame header and 16-byte authentication tag make the
+maximum serialized outer frame 4026 bytes, below the 4096-byte control-frame
+limit. A receipt has `chunk_index=0`,
+`chunk_count=0`, `chunk_length=0` and no bytes. A data operation has 1..5
+chunks and contains exactly one complete inner LPC frame of at most 16462
+bytes. All chunks use one frame_id. Chunks MUST be in index order on each
+direct hop. The relay validates that the outer authenticated PeerId equals
+`source_peer_id` for an A-to-B data chunk, that destination C is a READY
+direct confirmed friend, and that source A is a READY direct confirmed
+friend. It forwards only to C. C accepts only when the authenticated relay
+is a READY direct confirmed friend, the destination equals local PeerId, and
+the source is a confirmed friend. C reassembles within 64 KiB total and at
+most 16 incomplete frames, with a 30-second inactivity timeout, then injects
+the inner serialized frame into the virtual backend. For a reliable inner
+frame it sends a receipt back over the same relay after injection. Receipt
+direction reverses source and
+destination; the relay verifies its two READY confirmed-friend direct links
+and forwards it to the original source. A receipt is transport submission
+only, not application delivery. End-to-end `RELIABLE_ACKED` still requires
+the inner destination's LPC ACK. For an inner `REALTIME_DATAGRAM` or
+`GROUP_REALTIME_DATAGRAM`, the source submits the chunks once and completes
+the local transport write after first-hop submission. It MUST NOT wait for a
+receipt or retransmit stale realtime state. `REALTIME_LATEST` may supersede
+queued inner frames; a relay MUST NOT silently convert it to reliable
+application delivery.
+
+The origin retains at most 16 outstanding inner frames or 64 KiB per virtual
+peer. It waits `5000 ms + ceil(inner_frame_bytes / 200 bytes/second) * 1000 ms`
+for a destination receipt after the final chunk reaches the first-hop
+transport. That allowance covers a congested two-hop BLE path; the timer
+MUST NOT begin while the frame is still being submitted. It retries an
+unreceipted complete frame from chunk zero at most twice with the same
+frame_id, then fails the virtual backend
+write and enters normal transport-loss handling. C deduplicates the last 64
+complete frame_ids from each virtual source for 30 seconds and re-sends the
+receipt on a duplicate; it MUST NOT inject that duplicate twice. When an
+identical chunk of an incomplete frame arrives again with an index
+already accepted, C MUST ignore it without resetting the partial frame. A
+conflicting duplicate invalidates that partial frame; a later retry from
+chunk zero may start it again. All such tables and per-neighbor adverts MUST
+be bounded. On route loss, the virtual
+peer leaves READY promptly; after a new route is authenticated, a new
+handshake or normal RESUME may recover according to Section 26. No queued
+traffic may remain indefinitely behind an unavailable relay.
+
+`PeerConnection.activeTransport` MUST expose `MESH_RELAY` for a virtual
+connection. A read-only `relayPeerId`/`isRelayed` indication SHOULD be
+available. To preserve existing applications, `KnownPeerConnected` MUST
+publish the READY virtual PeerConnection exactly as it does a direct known
+peer, with no fabricated BLE endpoint ID. GroupSession logical
+coordinator-member links MUST treat it as an ordinary end-to-end logical
+PeerConnection when it is READY. If the current coordinator is reachable only
+through such a relayed link, GroupSession MUST carry its normal coordinator
+control, reliable, realtime, and checkpoint frames over that link. Mesh is a
+transport beneath GroupSession, not an alternate group route: Section 43
+coordinator routing and committed membership authority remain unchanged.
+
+## 62.3 Required Tests
+
+- [x] UT-266 MESH_ADVERT encoding matches the protocol-minor-0 binary vector and rejects malformed lengths and duplicate IDs.
+- [x] UT-267 MESH_FRAME and receipt encoding match the protocol-minor-0 binary vectors and reject malformed lengths and oversize chunks.
+- [x] UT-268 A minor-0 core encrypts a mesh frame with the minor-0 wire header.
+- [x] UT-269 A realtime virtual-backend frame submits once and does not wait for or retry a mesh receipt.
+- [x] UT-270 A reliable virtual-backend frame remains pending until a matching destination receipt arrives.
+- [x] UT-273 A multi-chunk reliable virtual frame does not retry before the expected-bandwidth receipt allowance expires; a matching receipt completes it.
+- [x] UT-274 A silent HELLO/AUTH peer is closed at the normative five-second handshake deadline so an inbound native GATT slot cannot remain reserved indefinitely.
+- [x] UT-275 A valid membership snapshot's local-membership disposition distinguishes an excluded restarted receiver, which must reconcile without applying the excluding snapshot or dropping its pairwise link.
+- [x] RT-028 A-B-C with no A-C physical link produces mutually READY relayed A-C PeerConnections; bidirectional RELIABLE_ACKED messages reach only the intended endpoint and complete only after the end-to-end ACK; a two-member GroupSession uses that relayed coordinator-member link for routed reliable delivery and for a required-validated coordinator checkpoint, which commits at the receiver and completes durable only after its validation ACK.
+- [ ] RT-029 Unfriended A-C or an untrusted relay cannot create a relayed connection or forward application bytes.
+- [ ] RT-030 A direct A-C connection supersedes a relay without duplicate READY peers; loss of B removes relayed readiness within the lease and route restoration recovers without unbounded queues or duplicate delivery.
+- [x] RT-031 Restart A after an A-B-C virtual link is READY; A and C perform a fresh authenticated relayed handshake on route recovery and resume bidirectional messaging without remaining stuck on C's old SessionId.
+- [x] RT-032 An authenticated test-only block of direct A-C while A-B and B-C remain READY yields mutual relayed A-C readiness; clearing the block restores direct A-C without dropping B's healthy links.
+- [x] RT-033 Restart the relay destination C of an established A-B-C virtual link while the relay remains connected; both endpoints perform a fresh authenticated relayed handshake and resume bidirectional reliable delivery within 12 seconds without duplicate READY peers. RT-031 covers restarting A.
+- [x] RT-034 In a three-member group with A-C forced through B, restart C's LPC runtime and recreate its GroupSession using the existing GroupId/current coordinator; require rejoin, reliable C-to-B delivery, and a 6144-byte required-validated coordinator checkpoint to C to complete DURABLE over the relay.
+- [x] RT-035 A virtual PeerConnection that enters RECONNECTING after a relay write failure is retired and re-handshaken while the direct relay remains READY; the remote endpoint replaces its stale virtual generation, and RELIABLE_ACKED delivery recovers without stale SessionId reuse or duplicate READY peers.
+- [x] IT-046 On iOS, Android, and macOS, force A-C physical loss while A-B and B-C stay READY; require mutual relayed online reporting within 30 seconds, bidirectional delivery, and a stable 30-second hold. After clearing the artificial block, measure direct-path upgrade for 30 seconds; if the physical A-C GATT connection remains unavailable, the relayed A-C connection MUST remain READY and continue delivering instead of failing the test. Record direct-upgrade latency or unavailability separately. Preserve installed apps and save diagnostics for failures.
+
+An integration fixture MAY expose a local, test-only physical-edge block
+keyed by an authenticated PeerId to make IT-046 repeatable with co-located
+devices. It MUST NOT change friend resolution or trust, forward any test
+marker on the wire, or reject another peer merely because a BLE endpoint ID
+rotated. It MUST be cleared after the scenario.

@@ -117,8 +117,16 @@ Wire baseline:
 
 ```text
 protocol major 1
-protocol minor 0
+protocol minor 0 (includes optional friend-only two-hop relay)
 ```
+
+With `autoConnectKnownPeers` and a confirmed-friend resolver, compatible
+peers can expose an end-to-end authenticated `PeerConnection` through
+one mutual friend when no direct link exists. `connection.isRelayed` and
+`activeTransport == TransportType.meshRelay` identify that path. The relay
+does not receive decrypted application messages. This feature does not turn
+GroupSession into unrestricted multi-hop routing; physical iOS/Android/macOS
+conformance is still pending.
 
 The canonical protocol definition is:
 
