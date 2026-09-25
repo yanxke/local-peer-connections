@@ -1,21 +1,15 @@
 PODS:
   - Flutter (1.0.0)
-  - local_peer_connections (0.1.0):
-    - Flutter
 
 DEPENDENCIES:
   - Flutter (from `Flutter`)
-  - local_peer_connections (from `.symlinks/plugins/local_peer_connections/ios`)
 
 EXTERNAL SOURCES:
   Flutter:
     :path: Flutter
-  local_peer_connections:
-    :path: ".symlinks/plugins/local_peer_connections/ios"
 
 SPEC CHECKSUMS:
   Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
-  local_peer_connections: da23e04f22199ee174a1f08b4f56a7c964be9a03
 
 PODFILE CHECKSUM: 3ba3a73b1b12adcf321a227a745625fe0888cc82
 
