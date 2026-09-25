@@ -1,1 +1,1 @@
-../../ios/Classes/LocalPeerConnectionsPlugin.swift
+../../ios/local_peer_connections/Sources/local_peer_connections/LocalPeerConnectionsPlugin.swift

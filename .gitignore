@@ -2,6 +2,8 @@
 .dart_tool/
 .packages
 build/
+.build/
+.swiftpm/
 coverage/
 pubspec_overrides.yaml
 
